@@ -6,9 +6,30 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-1.0.0-green)](https://github.com/jiexiaoyin/wpp-hermes/releases)
 [![GitHub stars](https://img.shields.io/github/stars/jiexiaoyin/wpp-hermes?style=social)](https://github.com/jiexiaoyin/wpp-hermes/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/jiexiaoyin/wpp-hermes?style=social)](https://github.com/jiexiaoyin/wpp-hermes/network)
+[![Open Issues](https://img.shields.io/github/issues/jiexiaoyin/wpp-hermes)](https://github.com/jiexiaoyin/wpp-hermes/issues)
+[![Last commit](https://img.shields.io/github/last-commit/jiexiaoyin/wpp-hermes)](https://github.com/jiexiaoyin/wpp-hermes/commits/main)
 
 > 在 WPP vendor (`wss://.../ws/sync` 推送 + `POST /api/Msg/SendTxt` 发送) 和 Hermes agent 之间转发微信消息。
 > 从 [wpp-openclaw](https://github.com/jiexiaoyin/wpp-openclaw) **v1.3.80**(TypeScript)移植而来,改为 Hermes 原生 Python 适配器。
+
+---
+
+## 🔗 相关项目
+
+本项目是 WeChatPadPro 跨平台适配插件生态的一部分:
+
+| 项目 | 平台 | 语言 | 状态 |
+|---|---|---|---|
+| **[wpp-openclaw](https://github.com/jiexiaoyin/wpp-openclaw)** | OpenClaw | TypeScript | ✅ 活跃维护 |
+| **[wpp-hermes](https://github.com/jiexiaoyin/wpp-hermes)** (本仓库) | Hermes Agent | Python 3 | ✅ 活跃维护 |
+| **[astrbot-plugin-wpp](https://github.com/jiexiaoyin/astrbot-plugin-wpp)** | AstrBot | Python 3 | ✅ 活跃维护 |
+
+三个仓库覆盖同一 vendor API,根据 agent 平台选择:
+
+- 想用 **OpenClaw gateway** 的 LLM → [wpp-openclaw](https://github.com/jiexiaoyin/wpp-openclaw)
+- 想用 **Hermes Agent** → 本仓库 (`wpp-hermes`)
+- 想用 **AstrBot** 的多平台架构 → [astrbot-plugin-wpp](https://github.com/jiexiaoyin/astrbot-plugin-wpp)
 
 ---
 
