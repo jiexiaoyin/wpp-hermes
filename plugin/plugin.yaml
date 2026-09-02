@@ -19,7 +19,7 @@ requires_env:
     prompt: "WeChatPadPro authcode"
     password: true
   - name: WECHATPRO_TOKEN_KEY
-    description: "vendor client tokenKey (adminmax)"
+    description: "vendor client tokenKey (cloud.wechatpadpro.com)"
     prompt: "WeChatPadPro tokenKey"
     password: true
 optional_env:
