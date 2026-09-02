@@ -1,0 +1,22 @@
+name: wpp-stt
+label: WPP Speech-to-Text (微信语音转文字 skill)
+kind: standalone
+version: 1.0.0
+description: >
+  微信语音转文字 skill (2026-09-01 接总立拍板, Phase 2.3).
+
+  从 wechatpadro plugin 抽出 transcribe_voice + stt.py 到独立 skill.
+  Pipeline: silk → decode → PCM → WAV header → SiliconFlow API → text.
+
+  调用方 (wpp-wechat adapter) 提供:
+    1. silk_bytes: 原始 silk 字节
+    2. vendor_transcript: vendor 自带 transcript (wechat_official) - 优先用
+
+  Skill 优先级:
+    1. vendor_transcript (免费, 准, 即时) — openclaw v1.3.22 VENDOR-TRANSCRIPT
+    2. SiliconFlow STT (降级, 消耗 API token)
+
+  与 wpp-media-download / oss-archive skill 配合, 业务能力(skill)和传输(plugin)分离.
+provides_tools:
+  - wpp
+author: knowhub-ops

@@ -1,0 +1,58 @@
+name: wechatpadpro-platform
+label: WeChatPadPro (Personal WeChat)
+kind: platform
+version: 1.0.0
+# 2026-08-31 老板拍板修复: 声明 tools.py 提供工具 → deferred discovery 阶段
+# 会调 tools.py 的 register_tools(ctx), 否则 wechatpadpro 工具一个都不注册,
+# model 只能用 terminal 跑 CLI (打字循环根因)。
+provides_tools:
+  - wechatpadpro
+description: >
+  WeChat Pad protocol gateway adapter for Hermes Agent (vendor wx.juhe.chat).
+  Registers the ``wechatpadpro`` platform; relays WeChat chats between
+  vendors (GetQR login, /ws/sync push, /Msg/SendTxt send) and the Hermes agent.
+  Migrated from wpp-openclaw (TypeScript) v1.3.80 to Hermes Python adapter.
+author: knowhub-ops
+requires_env:
+  - name: WECHATPRO_AUTHCODE
+    description: "vendor authcode (device login token) for default account (益融小助理)"
+    prompt: "WeChatPadPro authcode"
+    password: true
+  - name: WECHATPRO_TOKEN_KEY
+    description: "vendor client tokenKey (adminmax)"
+    prompt: "WeChatPadPro tokenKey"
+    password: true
+optional_env:
+  - name: WECHATPRO_ALLOWED_USERS
+    description: "Comma-separated DM wxids allowed to talk to the bot"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: WECHATPRO_ALLOW_ALL_USERS
+    description: "Set 1 to allow all DM users (not recommended)"
+    password: false
+  - name: WECHATPRO_HOME_CHANNEL
+    description: "Default chat ID for cron / notification delivery (format accountId:peerId)"
+    prompt: "Home channel ID"
+    password: false
+  - name: WECHATPRO_DB_PASSWORD
+    description: "MariaDB wechatpro database password"
+    prompt: "MariaDB password"
+    password: true
+  - name: WECHATPRO_LLM_API_KEY
+    description: "MiniMax/DeepSeek API key for heartflow/affection/jargon"
+    prompt: "LLM API key"
+    password: true
+  - name: WECHATPRO_STT_API_KEY
+    description: "SiliconFlow STT API key for voice transcription"
+    prompt: "STT API key"
+    password: true
+  - name: WECHATPRO_S3_ACCESS_KEY
+    description: "OSS S3 access key for media storage"
+    prompt: "S3 access key"
+    password: true
+  - name: WECHATPRO_S3_SECRET_KEY
+    description: "OSS S3 secret key"
+    prompt: "S3 secret key"
+    password: true
+pip_dependencies:
+  - pymysql

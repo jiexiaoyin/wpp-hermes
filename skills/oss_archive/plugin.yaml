@@ -1,0 +1,22 @@
+name: oss-archive
+label: OSS Archive (阿里云对象存储上传)
+kind: standalone
+version: 1.0.0
+description: >
+  通用阿里云 OSS 上传 skill (2026-09-01 接总立拍板).
+
+  把微信/任何 channel 的入站媒体上传到 OSS 公网存储, 返回 HTTPS URL.
+
+  任何 adapter / agent 都可调用 (不只 wechatpadpro):
+    from oss_archive import upload_bytes, upload_file
+
+  与 wechatpadpro plugin 解耦 — 之前在 adapter._download_media_safe
+  内部内联 upload_media_to_oss, 现抽成独立 skill.
+
+  复用: wpp-wechat 入站媒体 (图片/语音/视频/文件) 自动存档.
+  Future: 朋友圈导出/客户头像/活动海报等场景.
+
+  依赖: ossutil 命令 (60s 超时 + 3 次重试).
+provides_tools:
+  - oss
+author: knowhub-ops

@@ -1,0 +1,104 @@
+{
+  "_comment": "WPP 第二账号示例 (2026-09-01 接老板拍板: 多账号能力设计). 复制本文件为 accounts/<your_id>.json, 填自己的 authcode/env + 独立的 agent profile. 多账号隔离原则 (与 wpp-openclaw 一致): 1. accounts/<id>.json 每个账号一个独立配置文件 2. 每个账号用独立 authcode (从 WECHATPRO_AUTHCODE_<id> env 读取) 3. agent 字段必填, 禁止 'main' (防 fallback main 串号) 4. 账号绑专属 agent profile (e.g. 'wpp-wechat-boss2'), 多 profile 通过 hermes multiplex 隔离 5. 账号间 authcode/token/selfWxid/nickname/allowFrom 全部独立. ⚠️ 启用方法: 1) 把 'enabled' 改成 true; 2) 配 WECHATPRO_AUTHCODE_BOSS2 env (在 wpp-wechat-boss2 profile 的 .env); 3) 创建 /root/.hermes/profiles/wpp-wechat-boss2/ profile (基于 wpp-wechat 复制); 4) 重启 gateway.",
+  "_design_notes": {
+    "schema_source": "对齐 wpp-openclaw v1.5.2 accounts/default.json + 接总立 2026-09-01 拍板的 cfg.agent 字段",
+    "isolation_layers": [
+      "L1 vendor 服务端 (authcode 识别账号)",
+      "L2 plugin 进程 (authcode 锁在 WppClient 实例)",
+      "L3 hermes multiplex (每个 profile 独立进程副本)",
+      "L4 oss_archive skill ALLOWED_ACCOUNTS 白名单 (拒绝未注册账号)"
+    ],
+    "agent_binding_rule": "agent 字段 = 专属 hermes profile 名 (e.g. 'wpp-wechat-boss2'), 必须建对应的 /root/.hermes/profiles/<agent>/ 目录",
+    "env_naming": "凭据 env 用 WECHATPRO_<FIELD>_<UPPER_ACCOUNT_ID> 格式, e.g. WECHATPRO_AUTHCODE_BOSS2"
+  },
+  "enabled": false,
+  "_enabled_note": "默认 false — 老板确认要启用时再改 true, 避免误启动",
+
+  "tokenKey": "",
+  "tokenKeyEnv": "WECHATPRO_TOKEN_KEY_BOSS2",
+
+  "apiBaseUrl": "https://wx.juhe.chat",
+  "wsUrl": "wss://wx.juhe.chat/ws/sync",
+
+  "authcode": "",
+  "authcodeEnv": "WECHATPRO_AUTHCODE_BOSS2",
+
+  "webhookHost": "127.0.0.1",
+  "webhookPort": 4399,
+  "_webhookPort_note": "每个账号必须独立端口 (default 4398), 避免 webhook 冲突",
+  "webhookPath": "/wechatpadpro/boss2/webhook",
+  "webhookPathToken": "boss2token_replace_me",
+  "webhookPublicUrl": "",
+  "webhookPublicUrlEnv": "WECHATPRO_WEBHOOK_PUBLIC_URL_BOSS2",
+
+  "autoSetWebhook": true,
+  "setWebhookRetries": 3,
+
+  "allowFrom": [
+    "wxid_boss_demo"
+  ],
+  "_allowFrom_note": "只允许老板私聊触发, 不开群白名单 (谨慎启用)",
+
+  "groupPolicy": "disabled",
+  "groupAllowFrom": [],
+
+  "selfWxid": "wxid_replace_me_boss2",
+  "nickname": "益融小助理-老板副号",
+
+  "requireAtMention": true,
+  "debounceMs": 1500,
+
+  "agent": "wpp-wechat-boss2",
+  "_agent_note": "必填, 禁止 'main'. 对应 /root/.hermes/profiles/wpp-wechat-boss2/ 目录",
+
+  "mcpEnabled": false,
+  "webhookBusinessPath": "/wechatpadpro/boss2/webhook/business",
+  "webhookSecretEnv": "WECHATPRO_WEBHOOK_SECRET_BOSS2",
+
+  "adminUsers": [
+    "wxid_boss_demo"
+  ],
+  "blacklistGroups": [],
+
+  "chatroomDebug": false,
+  "dmPairingEnabled": false,
+  "groupContextEnabled": false,
+  "friendCirclePublishEnabled": false,
+  "friendCirclePublishAllowFrom": [],
+
+  "heartflow": {
+    "enabled": false,
+    "_heartflow_note": "新账号默认关闭心流, 跑稳后再开",
+    "model": "deepseek-v4-flash",
+    "whitelistGroups": [],
+    "replyThreshold": 0.6,
+    "minReplyIntervalSec": 0,
+    "minJudgeIntervalSec": 60,
+    "maxRetries": 1,
+    "timeoutMs": 5000,
+    "independentTrigger": false
+  },
+
+  "affection": {
+    "enabled": false,
+    "model": "deepseek-v4-flash",
+    "timeoutMs": 5000,
+    "maxRetries": 1,
+    "replyThreshold": 0.6,
+    "minReplyIntervalSec": 0,
+    "minJudgeIntervalSec": 60
+  },
+
+  "jargon": {
+    "enabled": false,
+    "_jargon_note": "按 7-01 老板偏好保留 enabled=false 默认",
+    "model": "deepseek-v4-flash",
+    "timeoutMs": 5000,
+    "maxRetries": 1,
+    "minJudgeIntervalSec": 0
+  },
+
+  "llmIntentEnabled": true,
+  "llmIntentModel": "deepseek-v4-flash",
+  "llmIntentTimeoutMs": 5000
+}

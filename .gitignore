@@ -1,0 +1,35 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 日志
+*.log
+logs/
+
+# 测试/缓存
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# 凭证（含 authcode/token，禁止提交；README 标注替换流程）
+plugin/accounts/default.json
+plugin/accounts/*.json
+!plugin/accounts/*.example.json
+
+# 部署脚本（不属于开源源码）
+deploy.sh
+reapply-patches.sh
+
+# 临时文件
+*.swp
+*.swo
+.DS_Store
+
+# 编译产物
+dist/
+build/
+*.spec

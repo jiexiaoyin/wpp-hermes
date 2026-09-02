@@ -1,0 +1,2185 @@
+{
+  "_comment": "WPP vendor 工具清单 (SSOT: /root/dev/wpp-hermes/plugin/tools_data.py + tools_data_extra.py)",
+  "_generated": "2026-09-01",
+  "_source": "main agent 解析 tools_data.py / tools_data_extra.py 生成",
+  "version": 1,
+  "total_tools": 219,
+  "domains": {
+    "CUSTOMIZED_TOOLS": 1,
+    "EXTRA_FINDER_TOOLS": 9,
+    "EXTRA_FRIENDCIRCLE_TOOLS": 14,
+    "EXTRA_FRIEND_TOOLS": 2,
+    "EXTRA_GROUP_TOOLS": 8,
+    "EXTRA_LOGIN_TOOLS": 2,
+    "EXTRA_MSG_TOOLS": 4,
+    "EXTRA_OA_TOOLS": 8,
+    "EXTRA_QW_TOOLS": 1,
+    "EXTRA_SEARCH_TOOLS": 15,
+    "EXTRA_TENPAY_TOOLS": 9,
+    "EXTRA_TOOLS_TOOLS": 10,
+    "EXTRA_USER_TOOLS": 11,
+    "EXTRA_VOICE_TOOLS": 1,
+    "EXTRA_WXAPP_TOOLS": 6,
+    "EXTRA_XIAOWEI_TOOLS": 7,
+    "FAVORITES_TOOLS": 4,
+    "FINDER_TOOLS": 8,
+    "FRIENDCIRCLE_TOOLS": 7,
+    "FRIEND_TOOLS": 10,
+    "GROUP_TOOLS": 14,
+    "LABEL_TOOLS": 6,
+    "LOGIN_TOOLS": 13,
+    "OA_TOOLS": 6,
+    "QWC_TOOLS": 2,
+    "SAYHELLO_TOOLS": 3,
+    "SEARCH_TOOLS": 5,
+    "TENPAY_TOOLS": 4,
+    "TOOLS_TOOLS": 4,
+    "TRANSLATE_TOOLS": 2,
+    "USER_TOOLS": 7,
+    "VOICE_TOOLS": 2,
+    "WEBHOOK_TOOLS": 5,
+    "WXAPP_TOOLS": 6,
+    "XIAOWEI_TOOLS": 3
+  },
+  "tools": [
+    {
+      "name": "wpp_group_info",
+      "description": "获取群信息（名称/成员数等）。QID 是群 @chatroom 标识。",
+      "endpoint": "/Group/GetChatRoomInfo",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群 @chatroom 标识"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_info_detail",
+      "description": "获取群详情 (含公告)",
+      "endpoint": "/Group/GetChatRoomInfoDetail",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群 @chatroom 标识"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_member_detail",
+      "description": "获取群单个成员详情",
+      "endpoint": "/Group/GetChatRoomMemberDetail",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群 @chatroom 标识"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_add_member",
+      "description": "邀请群成员 (40 人以内). wxidList 用逗号分隔 vendor 私聊 wxid",
+      "endpoint": "/Group/AddChatRoomMember",
+      "method": "POST",
+      "params": {
+        "ChatRoomName": {
+          "type": "string",
+          "required": true,
+          "desc": "群 @chatroom 标识"
+        },
+        "ToWxids": {
+          "type": "string",
+          "required": true,
+          "desc": "成员 wxid，多个逗号分隔"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_del_member",
+      "description": "删除群成员",
+      "endpoint": "/Group/DelChatRoomMember",
+      "method": "POST",
+      "params": {
+        "ChatRoomName": {
+          "type": "string",
+          "required": true,
+          "desc": "群 @chatroom 标识"
+        },
+        "ToWxids": {
+          "type": "string",
+          "required": true,
+          "desc": "成员 wxid，多个逗号分隔"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_create",
+      "description": "创建群聊. wxidList 用逗号分隔",
+      "endpoint": "/Group/CreateChatRoom",
+      "method": "POST",
+      "params": {
+        "ToWxids": {
+          "type": "string",
+          "required": true,
+          "desc": "成员 wxid，逗号分隔"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_quit",
+      "description": "退出群聊",
+      "endpoint": "/Group/Quit",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群标识"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_list",
+      "description": "获取群列表 (GET 业务路由)",
+      "endpoint": "/Group/List",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "name": "wpp_group_set_name",
+      "description": "设置群名称。",
+      "endpoint": "/Group/SetChatRoomName",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群标识"
+        },
+        "Content": {
+          "type": "string",
+          "required": true,
+          "desc": "新群名"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_set_announcement",
+      "description": "设置群公告。",
+      "endpoint": "/Group/SetChatRoomAnnouncement",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群标识"
+        },
+        "Content": {
+          "type": "string",
+          "required": true,
+          "desc": "公告内容"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_set_remarks",
+      "description": "设置群备注。",
+      "endpoint": "/Group/SetChatRoomRemarks",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群标识"
+        },
+        "Content": {
+          "type": "string",
+          "required": true,
+          "desc": "备注"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_operate_admin",
+      "description": "群管理操作. Val: 1=添加管理员 2=删除管理员 3=转让群主",
+      "endpoint": "/Group/OperateChatRoomAdmin",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群标识"
+        },
+        "ToWxids": {
+          "type": "string",
+          "required": true,
+          "desc": "成员 wxid"
+        },
+        "Val": {
+          "type": "integer",
+          "required": true,
+          "desc": "1=管理员 2=取消 3=转移群主"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_transfer_owner",
+      "description": "转让群主 (新OwnerUserName)",
+      "endpoint": "/Group/SendTransferGroupOwner",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群标识"
+        },
+        "NewOwnerUserName": {
+          "type": "string",
+          "required": true,
+          "desc": "新群主 wxid"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_qrcode",
+      "description": "获取群二维码",
+      "endpoint": "/Group/GetQRCode",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群标识"
+        }
+      }
+    },
+    {
+      "name": "wpp_user_my_profile",
+      "description": "取自己个人信息",
+      "endpoint": "/User/GetContractProfile",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_online_info",
+      "description": "获取账号在线状态信息。",
+      "endpoint": "/User/GetOnlineInfo",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_qrcode",
+      "description": "取个人二维码",
+      "endpoint": "/User/GetQRCode",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_set_alias",
+      "description": "设置自己的微信号 (一次性)",
+      "endpoint": "/User/SetAlisa",
+      "method": "POST",
+      "params": {
+        "alias": {
+          "type": "string",
+          "required": true,
+          "desc": "新微信号"
+        }
+      }
+    },
+    {
+      "name": "wpp_user_update_profile",
+      "description": "修改自己昵称/签名/性别. sex: 0=未知, 1=男, 2=女",
+      "endpoint": "/User/UpdateProfile",
+      "method": "POST",
+      "params": {
+        "NickName": {
+          "type": "string",
+          "required": false,
+          "desc": "新昵称"
+        },
+        "Signature": {
+          "type": "string",
+          "required": false,
+          "desc": "新签名"
+        }
+      }
+    },
+    {
+      "name": "wpp_user_upload_headimage",
+      "description": "修改自己头像",
+      "endpoint": "/User/UploadHeadImage",
+      "method": "POST",
+      "params": {
+        "imgBase64": {
+          "type": "string",
+          "required": true,
+          "desc": "头像图片 base64"
+        }
+      }
+    },
+    {
+      "name": "wpp_user_safety_info",
+      "description": "登录设备管理 (列出已登录设备)",
+      "endpoint": "/User/GetSafetyInfo",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_friend_list",
+      "description": "获取通讯录好友列表 (一次性全量)",
+      "endpoint": "/Friend/GetContractList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_friend_contract_detail",
+      "description": "获取指定 wxid 的好友详情",
+      "endpoint": "/Friend/GetContractDetail",
+      "method": "POST",
+      "params": {
+        "userName": {
+          "type": "string",
+          "required": true,
+          "desc": "好友 wxid"
+        }
+      }
+    },
+    {
+      "name": "wpp_friend_set_remarks",
+      "description": "设置好友备注",
+      "endpoint": "/Friend/SetRemarks",
+      "method": "POST",
+      "params": {
+        "toWxid": {
+          "type": "string",
+          "required": true,
+          "desc": "好友 wxid"
+        },
+        "remarks": {
+          "type": "string",
+          "required": true,
+          "desc": "备注名"
+        }
+      }
+    },
+    {
+      "name": "wpp_friend_search",
+      "description": "按关键字搜索联系人",
+      "endpoint": "/Friend/Search",
+      "method": "POST",
+      "params": {
+        "keyword": {
+          "type": "string",
+          "required": true,
+          "desc": "搜索关键词"
+        }
+      }
+    },
+    {
+      "name": "wpp_friend_send_request",
+      "description": "添加联系人 (发好友请求). content 留空也允许",
+      "endpoint": "/Friend/SendRequest",
+      "method": "POST",
+      "params": {
+        "v1": {
+          "type": "string",
+          "required": true,
+          "desc": "验证参数 v1（从搜索/扫码得到）"
+        },
+        "v2": {
+          "type": "string",
+          "required": true,
+          "desc": "验证参数 v2"
+        }
+      }
+    },
+    {
+      "name": "wpp_friend_pass_verify",
+      "description": "通过好友请求 (v1/v2 来自 inbound 事件 payload)",
+      "endpoint": "/Friend/PassVerify",
+      "method": "POST",
+      "params": {
+        "opcode": {
+          "type": "integer",
+          "required": false,
+          "desc": "操作码，默认 1"
+        },
+        "scene": {
+          "type": "integer",
+          "required": false,
+          "desc": "场景，默认 1"
+        },
+        "v1": {
+          "type": "string",
+          "required": false,
+          "desc": "验证 v1"
+        },
+        "v2": {
+          "type": "string",
+          "required": false,
+          "desc": "验证 v2"
+        }
+      }
+    },
+    {
+      "name": "wpp_friend_delete",
+      "description": "删除好友",
+      "endpoint": "/Friend/Delete",
+      "method": "POST",
+      "params": {
+        "toWxid": {
+          "type": "string",
+          "required": true,
+          "desc": "好友 wxid"
+        }
+      }
+    },
+    {
+      "name": "wpp_friend_blacklist",
+      "description": "加入/移除黑名单. val: 1=拉黑 0=取消",
+      "endpoint": "/Friend/Blacklist",
+      "method": "POST",
+      "params": {
+        "toWxid": {
+          "type": "string",
+          "required": true,
+          "desc": "好友 wxid"
+        },
+        "val": {
+          "type": "integer",
+          "required": true,
+          "desc": "1=拉黑 0=取消"
+        }
+      }
+    },
+    {
+      "name": "wpp_friend_gh_list",
+      "description": "通讯录完整拉取 (分页+批量补齐名称/备注/头像). 比 getContactList 更全",
+      "endpoint": "/Friend/GetGHList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_friend_request_list",
+      "description": "获取好友申请列表（status: pending 待处理/accepted 已通过/rejected 已拒绝）。",
+      "endpoint": "/Friend/GetFriendRequestList",
+      "method": "POST",
+      "params": {
+        "page": {
+          "type": "integer",
+          "required": false,
+          "desc": "页码，从 1 开始，默认 1"
+        },
+        "limit": {
+          "type": "integer",
+          "required": false,
+          "desc": "每页数量，默认 20"
+        },
+        "status": {
+          "type": "string",
+          "required": false,
+          "desc": "状态筛选：pending/accepted/rejected，默认 pending"
+        }
+      }
+    },
+    {
+      "name": "wpp_label_list",
+      "description": "获取标签列表。",
+      "endpoint": "/Label/GetList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_label_add",
+      "description": "创建标签。",
+      "endpoint": "/Label/Add",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_label_delete",
+      "description": "删除标签。",
+      "endpoint": "/Label/Delete",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_label_update_name",
+      "description": "修改标签名。",
+      "endpoint": "/Label/UpdateName",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_label_update_list",
+      "description": "给好友打/移除标签。",
+      "endpoint": "/Label/UpdateList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_label_friend_list",
+      "description": "获取标签下的好友。",
+      "endpoint": "/Label/GetWXFriendListByLabel",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_translate_text",
+      "description": "翻译文本。",
+      "endpoint": "/Translate/Text",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_translate_send",
+      "description": "翻译并发送消息。",
+      "endpoint": "/Translate/Send",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_get_a8key",
+      "description": "公众号 A8 Key (open 文章用)",
+      "endpoint": "/Tools/GetA8Key",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_generate_pay_qrcode",
+      "description": "生成支付二维码 (GET)",
+      "endpoint": "/Tools/GeneratePayQCode",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_band_card_list",
+      "description": "获取余额和银行卡信息",
+      "endpoint": "/Tools/GetBandCardList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_bound_hard_devices",
+      "description": "获取绑定的硬件设备。",
+      "endpoint": "/Tools/GetBoundHardDevices",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_collect_money",
+      "description": "确认收款",
+      "endpoint": "/TenPay/Collectmoney",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_open_hongbao",
+      "description": "抢红包 (带参数, 接收 url + key 自动拆)",
+      "endpoint": "/TenPay/OpenHongBao",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_query_hongbao",
+      "description": "查看红包详情",
+      "endpoint": "/TenPay/Qrydetailwxhb",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_receive_hongbao",
+      "description": "接收红包 (无 key 流程, vendor 自动)",
+      "endpoint": "/TenPay/Receivewxhb",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fc_list",
+      "description": "获取朋友圈首页 (firstPageMd5 翻页)",
+      "endpoint": "/FriendCircle/GetList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fc_by_user",
+      "description": "获取特定人朋友圈",
+      "endpoint": "/FriendCircle/GetDetail",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fc_by_snsid",
+      "description": "获取特定 snsId 详情",
+      "endpoint": "/FriendCircle/GetIdDetail",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fc_comment",
+      "description": "朋友圈点赞/评论. type: 1=点赞 2=文本评论 3=消息 4=with 5=陌生人点赞; 点赞传 content=👍 + type=1. ⚠️ 朋友圈点赞不要用 wpp_finder_like (那是视频号 Finder 的工具)",
+      "endpoint": "/FriendCircle/Comment",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fc_operate",
+      "description": "操作朋友圈. type: 1=删除朋友圈 2=设为隐私 3=设为公开 4=删除评论 5=取消点赞; id 是朋友圈 snsId; 删除评论需传 commnetId",
+      "endpoint": "/FriendCircle/Operation",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fc_sync",
+      "description": "查询朋友圈正在评论/转发的 sns ID (用于同步评论事件)",
+      "endpoint": "/FriendCircle/MmSnsSync",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fc_comments",
+      "description": "获取某朋友圈的所有评论",
+      "endpoint": "/FriendCircle/GetCommnet",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_search",
+      "description": "搜索视频号用户",
+      "endpoint": "/Finder/Search",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_recommend",
+      "description": "获取视频号推荐流",
+      "endpoint": "/Finder/GetRecommend",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_follow",
+      "description": "关注视频号用户. finderId 是视频号 ID（只支持关注，无取关）",
+      "endpoint": "/Finder/Follow",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_like",
+      "description": "点赞视频号内容. Id 是作品 ID（只支持点赞，无取消）",
+      "endpoint": "/Finder/Like",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_comment",
+      "description": "评论视频号内容",
+      "endpoint": "/Finder/Comment",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_send_dm",
+      "description": "发视频号私信",
+      "endpoint": "/Finder/FinderSendText",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_user_page",
+      "description": "获取指定视频号用户主页数据",
+      "endpoint": "/Finder/TargetUserPage",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_mine",
+      "description": "获取当前账号的视频号中心信息",
+      "endpoint": "/Finder/UserPrepare",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_follow",
+      "description": "关注公众号. operation: follow|unfollow",
+      "endpoint": "/OfficialAccounts/Follow",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_quit",
+      "description": "取消关注公众号",
+      "endpoint": "/OfficialAccounts/Quit",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_history",
+      "description": "获取公众号历史消息",
+      "endpoint": "/OfficialAccounts/GetMpHistory",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_article_markdown",
+      "description": "把公众号文章 URL 转成 Markdown (返回标题/公众号/正文/图片)",
+      "endpoint": "/OfficialAccounts/ArticleMarkdown",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_article_list",
+      "description": "获取公众号文章列表. accountId=公众号 __biz 标识 或 historyUrl=历史页链接 (二选一), limit=数量",
+      "endpoint": "/OfficialAccounts/ArticleList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_auth_mp_login",
+      "description": "授权公众号登录 (web 扫码)",
+      "endpoint": "/OfficialAccounts/AuthMpLogin",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_qw_search",
+      "description": "搜索企业微信联系人。",
+      "endpoint": "/QWContact/SearchQWContact",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_qw_add",
+      "description": "添加企业微信联系人。",
+      "endpoint": "/QWContact/QWAddContact",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fav_sync",
+      "description": "同步收藏。",
+      "endpoint": "/Favor/Sync",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fav_info",
+      "description": "获取收藏信息。",
+      "endpoint": "/Favor/GetFavInfo",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fav_item",
+      "description": "获取收藏条目。",
+      "endpoint": "/Favor/GetFavItem",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fav_del",
+      "description": "删除收藏。",
+      "endpoint": "/Favor/Del",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_invite",
+      "description": "邀请进入小微会话。",
+      "endpoint": "/XiaoWei/Invites",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_history_list",
+      "description": "获取小微历史列表。",
+      "endpoint": "/XiaoWei/History/List",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_reddots",
+      "description": "查询小微红点。",
+      "endpoint": "/XiaoWei/RedDots/Query",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_openid",
+      "description": "查询小程序用户的 openId",
+      "endpoint": "/Wxapp/GetUserOpenId",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_record",
+      "description": "获取小程序使用记录。",
+      "endpoint": "/Wxapp/GetWxAppRecord",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_cloud_call",
+      "description": "小程序云函数调用 (云开发)",
+      "endpoint": "/Wxapp/CloudCallFunction",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_js_session",
+      "description": "获取小程序 sessionid",
+      "endpoint": "/Wxapp/JSGetSessionid",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_oauth_list",
+      "description": "获取小程序授权管理列表",
+      "endpoint": "/Wxapp/GetOauthList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_unionpay",
+      "description": "云闪付支付",
+      "endpoint": "/Wxapp/GetUnionPay",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_voice_transcribe",
+      "description": "语音转写文字（base64 输入）。",
+      "endpoint": "/Voice/Transcribe",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_voice_message_transcribe",
+      "description": "语音消息转写（按消息 ID）。",
+      "endpoint": "/Voice/MessageTranscribe",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_webhook_set",
+      "description": "设置 webhook 回调地址。",
+      "endpoint": "/Webhook/Set",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_webhook_get",
+      "description": "读取当前 webhook 配置",
+      "endpoint": "/Webhook/Get",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "name": "wpp_webhook_remove",
+      "description": "删除 webhook 配置",
+      "endpoint": "/Webhook/Remove",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_webhook_business_set",
+      "description": "设置业务 webhook。",
+      "endpoint": "/Webhook/Business/Set",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_webhook_test",
+      "description": "测试发送 Webhook 消息（按授权码，验证回调配置是否生效）。",
+      "endpoint": "/Webhook/Test",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_sayhello_v1",
+      "description": "打招呼（模型 v1）。",
+      "endpoint": "/SayHello/Modelv1",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_sayhello_v2",
+      "description": "通过微信号/手机号申请好友。",
+      "endpoint": "/SayHello/Modelv2",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_sayhello_v3",
+      "description": "使用搜索结果申请好友。",
+      "endpoint": "/SayHello/Modelv3",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_get_qr",
+      "description": "获取 iPad 登录二维码。",
+      "endpoint": "/Login/GetQR",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_check_qr",
+      "description": "检测二维码状态（uuid）。",
+      "endpoint": "/Login/CheckQR",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_heartbeat",
+      "description": "单次心跳。",
+      "endpoint": "/Login/HeartBeat",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_heartbeat_long",
+      "description": "长连接心跳包。",
+      "endpoint": "/Login/HeartBeatLong",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_heartbeat_logs",
+      "description": "获取心跳日志。",
+      "endpoint": "/Login/HeartBeatLogs",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_auto_heartbeat",
+      "description": "开启自动心跳。",
+      "endpoint": "/Login/AutoHeartBeat",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_cache_info",
+      "description": "获取本地登录缓存。",
+      "endpoint": "/Login/GetCacheInfo",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_longlink_status",
+      "description": "查询长连接状态。",
+      "endpoint": "/Login/LongLinkStatus",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_logout",
+      "description": "退出登录。",
+      "endpoint": "/Login/LogOut",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_newinit",
+      "description": "初始化登录。",
+      "endpoint": "/Login/Newinit",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_get_status",
+      "description": "获取聚合登录状态。",
+      "endpoint": "/Login/GetLoginStatus",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_check_can_set_alias",
+      "description": "检测能否设置微信号。",
+      "endpoint": "/Login/CheckCanSetAlias",
+      "method": "GET",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_submit_verify_code",
+      "description": "提交扫码登录验证码。",
+      "endpoint": "/Login/SubmitLoginVerificationCode",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_customized_auth_batch",
+      "description": "定制化批量鉴权（统一）。",
+      "endpoint": "/Customized/WXCTDUniftyAuthBatch",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_all",
+      "description": "微信综合搜索 (文章/公众号/小程序一起)",
+      "endpoint": "/Search/All",
+      "method": "POST",
+      "params": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "desc": "搜索词"
+        },
+        "limit": {
+          "type": "integer",
+          "required": false,
+          "desc": "返回数量上限"
+        }
+      }
+    },
+    {
+      "name": "wpp_search_official_accounts",
+      "description": "公众号与账号搜索",
+      "endpoint": "/Search/OfficialAccounts",
+      "method": "POST",
+      "params": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "desc": "搜索词"
+        }
+      }
+    },
+    {
+      "name": "wpp_search_moments",
+      "description": "朋友圈搜索",
+      "endpoint": "/Search/Moments",
+      "method": "POST",
+      "params": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "desc": "搜索词"
+        }
+      }
+    },
+    {
+      "name": "wpp_search_mini_programs",
+      "description": "小程序搜索",
+      "endpoint": "/Search/MiniPrograms",
+      "method": "POST",
+      "params": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "desc": "搜索词"
+        }
+      }
+    },
+    {
+      "name": "wpp_search_articles",
+      "description": "公众号文章搜索",
+      "endpoint": "/Search/Articles",
+      "method": "POST",
+      "params": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "desc": "搜索词"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_invite_member",
+      "description": "邀请群成员 (40 人以上, 走邀请链)",
+      "endpoint": "/Group/InviteChatRoomMember",
+      "method": "POST",
+      "params": {
+        "ChatRoomName": {
+          "type": "string",
+          "required": true,
+          "desc": "群 @chatroom 标识"
+        },
+        "ToWxids": {
+          "type": "string",
+          "required": true,
+          "desc": "成员 wxid，多个逗号分隔"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_pat",
+      "description": "群拍一拍",
+      "endpoint": "/Group/SendPat",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群 @chatroom 标识"
+        },
+        "ToUserName": {
+          "type": "string",
+          "required": true,
+          "desc": "被拍成员 wxid"
+        },
+        "Scene": {
+          "type": "integer",
+          "required": false,
+          "desc": "场景"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_scan_into",
+      "description": "扫码进群 (url 是 group qr url)",
+      "endpoint": "/Group/ScanIntoGroup",
+      "method": "POST",
+      "params": {
+        "Url": {
+          "type": "string",
+          "required": true,
+          "desc": "群二维码 URL"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_facing_create",
+      "description": "创建面对面群 (基于经纬度). latitude/longitude 是数字坐标",
+      "endpoint": "/Group/FacingCreateChatRoom",
+      "method": "POST",
+      "params": {
+        "Latitude": {
+          "type": "number",
+          "required": true,
+          "desc": "纬度"
+        },
+        "Longitude": {
+          "type": "number",
+          "required": true,
+          "desc": "经度"
+        },
+        "OpCode": {
+          "type": "string",
+          "required": true,
+          "desc": "操作码"
+        },
+        "Password": {
+          "type": "string",
+          "required": false,
+          "desc": "密码"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_scan_enterprise",
+      "description": "扫码进群 (企业). url 是群二维码",
+      "endpoint": "/Group/ScanIntoGroupEnterprise",
+      "method": "POST",
+      "params": {
+        "Url": {
+          "type": "string",
+          "required": true,
+          "desc": "二维码 URL"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_consent_join",
+      "description": "同意进入群聊邀请",
+      "endpoint": "/Group/ConsentToJoin",
+      "method": "POST",
+      "params": {
+        "Url": {
+          "type": "string",
+          "required": true,
+          "desc": "入群申请 URL"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_move_contract",
+      "description": "群保存到通讯录. Val 1=保存 0=取消",
+      "endpoint": "/Group/MoveContractList",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群 @chatroom 标识"
+        },
+        "Val": {
+          "type": "string",
+          "required": true,
+          "desc": "分组值"
+        }
+      }
+    },
+    {
+      "name": "wpp_group_set_access_verify",
+      "description": "群聊邀请开关 (true=需要验证, false=直接进)",
+      "endpoint": "/Group/SetChatroomAccessVerify",
+      "method": "POST",
+      "params": {
+        "QID": {
+          "type": "string",
+          "required": true,
+          "desc": "群 @chatroom 标识"
+        },
+        "Enable": {
+          "type": "boolean",
+          "required": true,
+          "desc": "是否启用（1=开 0=关）"
+        }
+      }
+    },
+    {
+      "name": "wpp_friend_state",
+      "description": "查询好友状态 (在线/性别/地区)",
+      "endpoint": "/Friend/GetFriendstate",
+      "method": "POST",
+      "params": {
+        "toWxid": {
+          "type": "string",
+          "required": true,
+          "desc": "联系人 wxid"
+        },
+        "opCode": {
+          "type": "integer",
+          "required": false,
+          "desc": "查询类型：1=好友状态 2=陌生人状态，默认 1"
+        }
+      }
+    },
+    {
+      "name": "wpp_friend_lbs",
+      "description": "附近的人",
+      "endpoint": "/Friend/LbsFind",
+      "method": "POST",
+      "params": {
+        "latitude": {
+          "type": "number",
+          "required": true,
+          "desc": "纬度"
+        },
+        "longitude": {
+          "type": "number",
+          "required": true,
+          "desc": "经度"
+        },
+        "opCode": {
+          "type": "integer",
+          "required": false,
+          "desc": "操作类型：1=查找附近的人，默认 1"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_upload_media",
+      "description": "上传朋友圈媒体 (发朋友圈时用). base64 是要上传的图片/视频内容, key 是媒体标识",
+      "endpoint": "/FriendCircle/Upload",
+      "method": "POST",
+      "params": {
+        "key": {
+          "type": "string",
+          "required": true,
+          "desc": "媒体标识"
+        },
+        "base64": {
+          "type": "string",
+          "required": true,
+          "desc": "媒体 base64"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_upload_video",
+      "description": "上传朋友圈视频 (发视频朋友圈前置). videoData=视频 base64, thumbData=缩略图 base64",
+      "endpoint": "/FriendCircle/UploadVideo",
+      "method": "POST",
+      "params": {
+        "videoData": {
+          "type": "string",
+          "required": true,
+          "desc": "视频 base64"
+        },
+        "thumbData": {
+          "type": "string",
+          "required": true,
+          "desc": "缩略图 base64"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_upload_image",
+      "description": "上传单张朋友圈图片. imageData=图片 base64",
+      "endpoint": "/FriendCircle/UploadImage",
+      "method": "POST",
+      "params": {
+        "imageData": {
+          "type": "string",
+          "required": true,
+          "desc": "图片 base64"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_upload_images",
+      "description": "批量上传朋友圈图片. imageDataList=图片 base64 数组",
+      "endpoint": "/FriendCircle/UploadImages",
+      "method": "POST",
+      "params": {
+        "imageDataList": {
+          "type": "array",
+          "required": true,
+          "desc": "图片 base64 数组"
+        },
+        "items": {
+          "type": "string",
+          "required": false,
+          "desc": ""
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_collect_circle",
+      "description": "读取收藏的朋友圈动态详情. sourceId=收藏来源标识",
+      "endpoint": "/FriendCircle/GetCollectCircle",
+      "method": "POST",
+      "params": {
+        "sourceId": {
+          "type": "string",
+          "required": true,
+          "desc": "来源 ID"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_send_fav_item",
+      "description": "从收藏项发布朋友圈. favItemId=收藏项ID(数字), sourceId=收藏来源",
+      "endpoint": "/FriendCircle/SendFavItemCircle",
+      "method": "POST",
+      "params": {
+        "favItemId": {
+          "type": "string",
+          "required": true,
+          "desc": "收藏项 ID"
+        },
+        "sourceId": {
+          "type": "string",
+          "required": true,
+          "desc": "来源 ID"
+        },
+        "blackList": {
+          "type": "string",
+          "required": false,
+          "desc": "黑名单"
+        },
+        "locationMode": {
+          "type": "string",
+          "required": false,
+          "desc": "定位模式"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_send_one_id",
+      "description": "通过已有动态 id 再发朋友圈 (支持文字/图片/视频/链接). id=原动态id",
+      "endpoint": "/FriendCircle/SendOneIdCircle",
+      "method": "POST",
+      "params": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "desc": "ID"
+        },
+        "blackList": {
+          "type": "string",
+          "required": false,
+          "desc": "黑名单"
+        },
+        "locationMode": {
+          "type": "string",
+          "required": false,
+          "desc": "定位模式"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_set_days",
+      "description": "设置朋友圈可见范围. range=three_days/one_month/six_months/all",
+      "endpoint": "/FriendCircle/SetFriendCircleDays",
+      "method": "POST",
+      "params": {
+        "range": {
+          "type": "string",
+          "required": true,
+          "desc": "范围（如 3/30/全部）"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_active_tasks",
+      "description": "查询正在执行的朋友圈评论转发任务",
+      "endpoint": "/FriendCircle/ActiveTasks",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fc_push_comment",
+      "description": "启动评论检查后台任务, 转发 callback 形式的评论事件",
+      "endpoint": "/FriendCircle/PushCommnet",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_fc_download_video",
+      "description": "下载视频",
+      "endpoint": "/Tools/DownloadVideo",
+      "method": "POST",
+      "params": {
+        "aesKey": {
+          "type": "string",
+          "required": true,
+          "desc": "AES 密钥"
+        },
+        "fileId": {
+          "type": "string",
+          "required": true,
+          "desc": "文件 ID"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_cdn_download_video",
+      "description": "朋友圈下载 CDN 视频（key/url 来自朋友圈详情返回）。",
+      "endpoint": "/FriendCircle/DownloadVideo",
+      "method": "POST",
+      "params": {
+        "key": {
+          "type": "string",
+          "required": true,
+          "desc": "媒体访问凭据（media_key_from_circle_detail）"
+        },
+        "url": {
+          "type": "string",
+          "required": true,
+          "desc": "媒体地址"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_publish_raw",
+      "description": "发布朋友圈（带可见范围：黑名单/指定可见/提醒查看；content 为原始发布内容）。",
+      "endpoint": "/FriendCircle/MessagesRaw",
+      "method": "POST",
+      "params": {
+        "content": {
+          "type": "string",
+          "required": true,
+          "desc": "发布内容"
+        },
+        "private": {
+          "type": "integer",
+          "required": false,
+          "desc": "0=公开 1=私密，默认 0"
+        },
+        "withUserList": {
+          "type": "string",
+          "required": false,
+          "desc": "指定可见用户 wxid，逗号分隔"
+        },
+        "blackList": {
+          "type": "string",
+          "required": false,
+          "desc": "不可见用户 wxid，逗号分隔"
+        },
+        "groupUserList": {
+          "type": "string",
+          "required": false,
+          "desc": "提醒查看用户 wxid，逗号分隔"
+        }
+      }
+    },
+    {
+      "name": "wpp_fc_set_background",
+      "description": "设置朋友圈背景图。",
+      "endpoint": "/FriendCircle/SetBackgroundImage",
+      "method": "POST",
+      "params": {
+        "url": {
+          "type": "string",
+          "required": true,
+          "desc": "背景大图地址"
+        },
+        "thumbUrl": {
+          "type": "string",
+          "required": false,
+          "desc": "背景缩略图地址（留空用 url）"
+        }
+      }
+    },
+    {
+      "name": "wpp_search_channels",
+      "description": "视频号内容搜索",
+      "endpoint": "/Search/Channels",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_images",
+      "description": "图片搜索",
+      "endpoint": "/Search/Images",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_news",
+      "description": "新闻搜索",
+      "endpoint": "/Search/News",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_baike",
+      "description": "百科搜索",
+      "endpoint": "/Search/Baike",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_books",
+      "description": "读书搜索",
+      "endpoint": "/Search/Books",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_emoji",
+      "description": "表情搜索 (可分页)",
+      "endpoint": "/Search/Emoji",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_ai",
+      "description": "AI 搜索 (深度问答增强)",
+      "endpoint": "/Search/AI",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_gateway",
+      "description": "兼容旧版搜一搜网页网关",
+      "endpoint": "/Search/Gateway",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_query",
+      "description": "通用分类搜索. category 可选 (空=全部)",
+      "endpoint": "/Search/Query",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_channels_detail",
+      "description": "获取视频号内容详情. contentToken 来自视频号搜索结果",
+      "endpoint": "/Search/Channels/Detail",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_channels_comments",
+      "description": "获取视频号评论. commentToken 来自搜索结果, cursor 翻页, rootCommentId 看一级评论的回复",
+      "endpoint": "/Search/Channels/Comments",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_channels_resolve",
+      "description": "解析视频号分享链接 (weixin.qq.com/sph/... 分享链接), 返回可直接使用的业务字段",
+      "endpoint": "/Search/Channels/ResolveShare",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_ai_followup",
+      "description": "AI 搜索追问 (用首问返回的 sessionId 继续对话)",
+      "endpoint": "/Search/AI/FollowUp",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_wechat_index",
+      "description": "微信指数搜索（查询关键词的微信指数相关结果，营销分析用）。",
+      "endpoint": "/Search/WeChatIndex",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_search_live",
+      "description": "直播搜索（返回主播、标题和直播状态）。",
+      "endpoint": "/Search/Live",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_ge_ma_skd_qcode",
+      "description": "自定义个人收款单 (商家微信收款码)",
+      "endpoint": "/TenPay/GeMaSkdPayQCode",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_sj_skd_qcode",
+      "description": "自定义商家收款单",
+      "endpoint": "/TenPay/SjSkdPayQCode",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_open_redpacket",
+      "description": "拆开红包 (redPacketId 来自 inbound 红包事件)",
+      "endpoint": "/TenPay/Openwxhb",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_get_encrypt_info",
+      "description": "获取红包/支付的加密信息 (解密 inbound 红包事件)",
+      "endpoint": "/TenPay/GetEncryptInfo",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_confirm_pre_transfer",
+      "description": "确认支付",
+      "endpoint": "/TenPay/ConfirmPreTransferApi",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_generate_pay_qcode",
+      "description": "生成自定义收款二维码",
+      "endpoint": "/TenPay/GeneratePayQCode",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_redpacket_list",
+      "description": "查看红包领取列表",
+      "endpoint": "/TenPay/GetRedPacketListApi",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_open_hongbao_params",
+      "description": "抢红包 (完整参数). SendId=红包ID, SendUserName=发送者, TimingIdentifier=定时标识, Xml=红包消息",
+      "endpoint": "/TenPay/OpenHongBaoWithParams",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tenpay_receive_no_encryption",
+      "description": "打开红包 (无加密兼容模式). xml=红包消息内容",
+      "endpoint": "/TenPay/ReceivewxhbWithoutEncryption",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_download_img",
+      "description": "下载高清图片 (从 CDN). fileId 来自消息 content xml 的 image tag",
+      "endpoint": "/Tools/DownloadImg",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_download_video",
+      "description": "下载视频",
+      "endpoint": "/Tools/DownloadVideo",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_download_voice",
+      "description": "下载语音",
+      "endpoint": "/Tools/DownloadVoice",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_download_file",
+      "description": "下载文件 (v1.2.1 P1-fix: 需 appID/attachId, vendor v1 文件消息不提供, 可能失败)",
+      "endpoint": "/Tools/DownloadFile",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_cdn_download_image",
+      "description": "CDN 单独下载高清图片",
+      "endpoint": "/Tools/CdnDownloadImage",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_upload_file",
+      "description": "上传文件. fileType 例: image/png, video/mp4",
+      "endpoint": "/Tools/UploadFile",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_cdn_dns",
+      "description": "获取 CDN 服务器 DNS 信息",
+      "endpoint": "/Tools/GetCdnDns",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_set_step_count",
+      "description": "修改微信运动步数 (当天步数, 最高 98000)",
+      "endpoint": "/Tools/setproxy",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_download_file_binary",
+      "description": "完整下载微信文件 (二进制). fileNo 来自 file.download_context",
+      "endpoint": "/Tools/DownloadFileBinary",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_tool_download_voice_binary",
+      "description": "下载微信语音原文件 (二进制). msgId/newMsgId 来自语音消息",
+      "endpoint": "/Tools/DownloadVoiceBinary",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_del_device",
+      "description": "删除登录设备",
+      "endpoint": "/User/DelSafetyInfo",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_set_privacy",
+      "description": "隐私设置. opt 见 vendor 文档 (e.g. 4=加好友权限)",
+      "endpoint": "/User/PrivacySettings",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_change_password",
+      "description": "修改自己的微信登录密码",
+      "endpoint": "/User/SetPasswd",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_verify_password",
+      "description": "验证当前密码 (用于敏感操作前)",
+      "endpoint": "/User/VerifyPasswd",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_report_motion",
+      "description": "上报步数 (微信运动)",
+      "endpoint": "/User/ReportMotion",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_bind_mobile",
+      "description": "换绑手机号",
+      "endpoint": "/User/BindingMobile",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_send_verify_code",
+      "description": "发送手机验证码",
+      "endpoint": "/User/SendVerifyMobile",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_bind_qq",
+      "description": "绑定 QQ 到当前微信号",
+      "endpoint": "/User/BindQQ",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_bind_email",
+      "description": "绑定邮箱",
+      "endpoint": "/User/BindingEmail",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_friend_verification",
+      "description": "设置「加我为朋友时需要验证」. enabled=true 需验证, false 关闭",
+      "endpoint": "/User/FriendVerification",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_user_add_me_methods",
+      "description": "设置「添加我的方式」(微信: 我→设置→朋友权限→添加我的方式). 只传要修改的字段, true=允许该方式添加",
+      "endpoint": "/User/AddMeMethods",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_qr_pad_cloud",
+      "description": "获取 Pad 云登录二维码。",
+      "endpoint": "/Login/GetQRPadCloud",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_login_qr_pad_ppmt",
+      "description": "获取 Pad PPMT 登录二维码。",
+      "endpoint": "/Login/GetQRPadPPMT",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_share_video_msg",
+      "description": "发送分享视频消息",
+      "endpoint": "/Msg/ShareVideo",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_send_cdn_file",
+      "description": "发送 CDN 文件 (转发, 非上传). fileUrl 是 vendor 已上传的 cdnUrl",
+      "endpoint": "/Msg/SendCDNFile",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_start_auto_sync",
+      "description": "启动自动同步（vendor 推消息到 webhook）。",
+      "endpoint": "/Msg/StartAutoSync",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_send_app_msg",
+      "description": "发送 App 消息（Type: 5=链接 33=小程序 36=文件 42=视频 48=定位）。",
+      "endpoint": "/Msg/SendApp",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_voice_result",
+      "description": "获取语音转写结果。",
+      "endpoint": "/Voice/Result",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_history_message",
+      "description": "获取公众号历史消息 HTML (for 文章抓取)",
+      "endpoint": "/OfficialAccounts/GetMpHistoryMessage",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_article_ext",
+      "description": "阅读公众号文章, 返回在看 / 点赞 / 阅读数据",
+      "endpoint": "/OfficialAccounts/GetAppMsgExt",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_article_like",
+      "description": "点赞公众号文章, 返回分享 / 在看 / 阅读数据",
+      "endpoint": "/OfficialAccounts/GetAppMsgExtLike",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_jsapi_preverify",
+      "description": "公众号 JSAPI 预验证 (用于网页/小程序授权前置)",
+      "endpoint": "/OfficialAccounts/JSAPIPreVerify",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_oauth_authorize",
+      "description": "公众号 OAuth 授权 (url 是授权链接)",
+      "endpoint": "/OfficialAccounts/OauthAuthorize",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_qr_authorize",
+      "description": "公众号二维码授权请求 (获取授权二维码)",
+      "endpoint": "/OfficialAccounts/QRConnectAuthorize",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_qr_authorize_confirm",
+      "description": "公众号二维码授权确认 (url 是确认链接)",
+      "endpoint": "/OfficialAccounts/QRConnectAuthorizeConfirm",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_oa_article_read",
+      "description": "解析公众号文章链接 (短链转正文 Markdown + 图片)",
+      "endpoint": "/OfficialAccounts/ArticleRead",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_qw_apply",
+      "description": "申请添加企微联系人。",
+      "endpoint": "/QWContact/QWApplyAddContact",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_live_detail",
+      "description": "获取视频号直播详情",
+      "endpoint": "/Finder/FinderLiveDetail",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_decrypt_comment",
+      "description": "解密视频号评论内容 (encryptedContent 是加密串)",
+      "endpoint": "/Finder/Decrypt",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_msg_session",
+      "description": "获取视频号私信会话 ID",
+      "endpoint": "/Finder/FinderGetMsgSessionId",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_search_list",
+      "description": "获取视频号搜索列表",
+      "endpoint": "/Finder/FinderSearchList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_topic_list",
+      "description": "获取视频号主题列表",
+      "endpoint": "/Finder/Findergettopiclist",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_comment_list",
+      "description": "获取视频号评论列表 (rootCommentId 可选用于翻页)",
+      "endpoint": "/Finder/GetCommentList",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_comment_detail",
+      "description": "获取视频号评论详情",
+      "endpoint": "/Finder/GetCommentDetail",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_play_video",
+      "description": "播放视频号视频. objectId=视频内容Id, finderUsername=作者, playUrl=播放地址 (选传); loop=true 循环播放",
+      "endpoint": "/Finder/PlayVideo",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_finder_play_video_stop",
+      "description": "停止视频号播放任务. taskId=playVideo 返回的任务 ID",
+      "endpoint": "/Finder/PlayVideoStop",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_js_login",
+      "description": "授权小程序 (定制)",
+      "endpoint": "/Wxapp/JSLogin",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_js_operate_data",
+      "description": "小程序操作 (data 是 JSON.stringify)",
+      "endpoint": "/Wxapp/JSOperateWxData",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_verify_plugin",
+      "description": "小程序获取 HostSign",
+      "endpoint": "/Wxapp/Verifyplugin",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_pull_pay",
+      "description": "推送小程序支付请求",
+      "endpoint": "/Wxapp/Wxapp/GetpullPay",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_delete_oauth",
+      "description": "移除小程序授权. appid=小程序 appid",
+      "endpoint": "/Wxapp/DeleteOauthApp",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_wxapp_js_login_customized",
+      "description": "小程序定制登录. appid=小程序 appid",
+      "endpoint": "/Wxapp/JSLoginCustomized",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_create_session",
+      "description": "小微创建会话。",
+      "endpoint": "/XiaoWei/Chat/Sessions",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_history_fill",
+      "description": "小微填充历史。",
+      "endpoint": "/XiaoWei/History/Fill",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_history_delete",
+      "description": "小微删除历史。",
+      "endpoint": "/XiaoWei/History/Delete",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_reddots_read",
+      "description": "小微红点已读。",
+      "endpoint": "/XiaoWei/RedDots/Read",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_card_users",
+      "description": "小微卡片用户。",
+      "endpoint": "/XiaoWei/Cards/Users",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_card_screenshot_check",
+      "description": "小微卡片截图安全校验。",
+      "endpoint": "/XiaoWei/Cards/ScreenshotSecurityCheck",
+      "method": "POST",
+      "params": {}
+    },
+    {
+      "name": "wpp_xw_suggestions",
+      "description": "小微会话建议。",
+      "endpoint": "/XiaoWei/Conversations/Suggestions",
+      "method": "POST",
+      "params": {}
+    }
+  ],
+  "mcp_local_tools": [],
+  "_total_with_local": 221,
+  "wpp_extras_local_tools": [
+    {
+      "name": "wpp_history_search",
+      "description": "查微信消息历史 (入站/出站消息)。调用: wpp_history_search(target='张三', keyword='红包', limit=20)。target 可以是昵称/wxid/群名。返回消息列表 JSON。"
+    },
+    {
+      "name": "wpp_identity_lookup",
+      "description": "匹配微信昵称↔wxid (多源: 通讯录 / 群成员 / phoneerp 员工表)。调用: wpp_identity_lookup(name='张三') 或 wpp_identity_lookup(wxid='wxid_xxx')。用于识别 '这个wxid是谁' / '张三的wxid是什么'。"
+    }
+  ],
+  "chatrooms": {
+    "chatroom_demo_4@chatroom": {
+      "name": "💪暑促战役||益融华为",
+      "member_count": 41,
+      "owner_id": "wxid_0cuam97sl5il21",
+      "avatar_url": "https://wx.qlogo.cn/mmcrhead/YiazB4yHJvwujYKIsJDAo5u3mxcZFZ0GOAichnYnicSyTKUcHibDpaP9kGnMRmqoYeDHMlj9F0U4X2k/0",
+      "hydrated": true,
+      "source": "vendor /Group/List 2026-09-01T17:48"
+    },
+    "chatroom_demo_7@chatroom": {
+      "name": "🇨🇳移动业务对接群Ⅱ益融机友",
+      "member_count": 46,
+      "owner_id": "25984984020022987@openim",
+      "avatar_url": "https://wx.qlogo.cn/mmcrhead/XicXsXVE28mMW9Knh8a2ibsb4crcHoF0a3sUFEFR8z22JbYiaFXDSM4s7CJAUsibKDTtXbwkE1oAg5A/0",
+      "hydrated": true,
+      "source": "vendor /Group/List 2026-09-01T17:48"
+    },
+    "chatroom_demo_3@chatroom": {
+      "name": "✊🏻益融数码全员群",
+      "member_count": 36,
+      "owner_id": "25984983123646117@openim",
+      "avatar_url": "https://wx.qlogo.cn/mmcrhead/l5iaFTSTveq0tiacKg8NAYTBXVqjodYnDwBssCibzKkX8bVqoBWic50IT20gCZqicmlia0gRFmX4MkVhQ/0",
+      "hydrated": true,
+      "source": "vendor /Group/List 2026-09-01T17:48"
+    },
+    "chatroom_demo_6@chatroom": {
+      "name": "东方商城苏宁合作厅联通对接群",
+      "member_count": 23,
+      "owner_id": "wxid_hdkgew1a9c7f22",
+      "avatar_url": "https://wx.qlogo.cn/mmcrhead/LkE0BXIPs7WxiaO8FcrKALAdsNiaLicvKYoibv0bubzDdc9HnsOQjt5IGZewuaAwEYOctyg2ZTecHb4/0",
+      "hydrated": true,
+      "source": "vendor /Group/List 2026-09-01T17:48"
+    },
+    "chatroom_demo_5@chatroom": {
+      "name": "✊益融管理群",
+      "member_count": 10,
+      "owner_id": "wxid_o6bhefqyog0n22",
+      "avatar_url": "https://wx.qlogo.cn/mmcrhead/xiaVdicibjX36kP3QHhvxEhYzfFW5u7ljKZQbMXPyj6tCbY0Pbx8sHASCU3fvkooQE6ciaIhVC1WLvU/0",
+      "hydrated": true,
+      "source": "vendor /Group/List 2026-09-01T17:48"
+    },
+    "chatroom_demo_2@chatroom": {
+      "name": "测试群",
+      "member_count": 3,
+      "owner_id": "wxid_robot_demo",
+      "avatar_url": "https://wx.qlogo.cn/mmcrhead/3CuHyQEdUlFO0r7BBPxlhu9p30gejnhwMJicTYYfiaQzkQKYblAicibdH5kjSldDlsOogFST6hAM0vc/0",
+      "hydrated": true,
+      "source": "vendor /Group/List 2026-09-01T17:48"
+    },
+    "57526319277@chatroom": {
+      "name": "57526319277@chatroom",
+      "member_count": 0,
+      "owner_id": null,
+      "avatar_url": null,
+      "hydrated": false,
+      "source": "vendor /Group/List 2026-09-01T17:48"
+    },
+    "chatroom_demo_1@chatroom": {
+      "name": "调试群",
+      "member_count": 4,
+      "owner_id": "wxid_boss_demo",
+      "avatar_url": "https://wx.qlogo.cn/mmcrhead/DOePl6eUjict4ObmGNSLRynwyzicJV8sEOeN2s0ceibChA9miaNnicD17YM3UKqQJf9dCbFShE8rSHk4/0",
+      "hydrated": true,
+      "source": "vendor /Group/List 2026-09-01T17:48"
+    }
+  },
+  "_chatrooms_source": "vendor /Group/List 2026-09-01T17:48",
+  "_total_chatrooms": 8
+}
