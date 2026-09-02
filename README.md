@@ -1,144 +1,144 @@
 # wpp-hermes
 
-**WeChatPadPro (WPP) platform adapter for [Hermes Agent](https://github.com/jiexiaoyin) — Python 3 implementation.**
+**微信 WeChatPadPro (WPP) 协议的 Hermes Agent 平台适配器 — Python 3 实现**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-1.0.0-green)](https://github.com/jiexiaoyin/wpp-hermes/releases)
 [![GitHub stars](https://img.shields.io/github/stars/jiexiaoyin/wpp-hermes?style=social)](https://github.com/jiexiaoyin/wpp-hermes/stargazers)
-[![Code style](https://img.shields.io/badge/code%20style-PEP8-orange)](https://peps.python.org/pep-0008/)
 
-> Relays WeChat chats between the WPP vendor (`/ws/sync` push + `/Msg/SendTxt` send) and the Hermes agent. Migrated from [wpp-openclaw](https://github.com/jiexiaoyin/wpp-openclaw) **v1.3.80** (TypeScript) to a Hermes-native Python adapter.
+> 在 WPP vendor (`wss://.../ws/sync` 推送 + `POST /api/Msg/SendTxt` 发送) 和 Hermes agent 之间转发微信消息。
+> 从 [wpp-openclaw](https://github.com/jiexiaoyin/wpp-openclaw) **v1.3.80**(TypeScript)移植而来,改为 Hermes 原生 Python 适配器。
 
 ---
 
-## ✨ Features
+## ✨ 功能特性
 
-- **247+ tools** covering the full WeChatPadPro vendor API surface (`/Msg`, `/Friend`, `/Group`, `/FriendCircle`, `/Label`, `/Finder`, `/TenPay`, `/Wxapp`, `/Xiaowei`, etc.)
-- **Multi-account B scheme** — per-account authcode isolation, dedicated Hermes profile binding, no cross-account fallback
-- **Real-time WebSocket channel** (`wss://.../ws/sync`) with exponential backoff + Webhook fallback for legacy vendors
-- **AI augmentation modules**:
-  - `heartflow` — autonomous group participation (5-dimension scoring, independent trigger)
-  - `jargon` — group jargon mining (background LLM extraction + query tool)
-  - `affection` — interaction scoring + emotional state injection
-  - `intent-embed` — embedding fast-path for context injection
-  - `intent-llm` — LLM-based candidate selection
-- **Media pipeline**: SILK audio codec, STT transcription (SiliconFlow), OSS archive (Aliyun), thumbnail enrichment
-- **Hermes skills** (extracted reusable SKILL.md modules): `wpp-history`, `wpp-identity`, `wpp-friendcircle`, `wpp-friendcircle-stats`, `wpp-friendcircle-view`, `wpp_stt`, `oss_archive`
-- **Quote reply, file deterministic reply, group @-mention routing, group debounce**
+- **247+ 工具**,覆盖 WPP vendor 完整 API(`/Msg`、`/Friend`、`/Group`、`/FriendCircle`、`/Label`、`/Finder`、`/TenPay`、`/Wxapp`、`/Xiaowei` 等 20+ 域)
+- **多账号 B 方案** — 每个账号独立 authcode,绑定专属 Hermes profile,杜绝跨账号串号
+- **WebSocket 实时通道** (`wss://.../ws/sync`) + 指数退避重连 + Webhook 兜底(老 vendor)
+- **5 大 AI 增强模块**:
+  - `heartflow` — 主动参与群聊(5 维打分 + 独立触发)
+  - `jargon` — 群黑话挖掘(后台 LLM 提取 + 查询工具)
+  - `affection` — 互动打分 + 情绪状态注入
+  - `intent-embed` — Embedding 快路径上下文注入
+  - `intent-llm` — LLM 智能候选筛选
+- **媒体处理全链路**: SILK 语音编解码、STT 语音转写(SiliconFlow)、OSS 归档(阿里云)、缩略图富化
+- **7 个独立 Hermes skills**(可复用 SKILL.md 模块): `wpp-history`、`wpp-identity`、`wpp-friendcircle`、`wpp-friendcircle-stats`、`wpp-friendcircle-view`、`wpp_stt`、`oss_archive`
+- 引用回复、文件确定性回复、群@触发、群消息防抖
 
-## 📦 What's included
+## 📦 仓库内容
 
 ```
 wpp-hermes/
-├── plugin/                          # 📦 Hermes platform adapter (31 .py files, ~8.6k LOC)
-│   ├── adapter.py                   #   WS inbound + send outbound + account registry
-│   ├── tools.py / tools_data*.py    #   Tool registration (247+ tools, 20+ domains)
-│   ├── api_client.py                #   WPP vendor HTTP API client
-│   ├── heartflow.py / affection.py  #   AI augmentation modules
+├── plugin/                          # 📦 Hermes 平台适配器(31 个 .py,~8.6k 行)
+│   ├── adapter.py                   #   WS 入站 + 发送出站 + 账号注册表
+│   ├── tools.py / tools_data*.py    #   工具注册(247+ 工具,20+ 域)
+│   ├── api_client.py                #   WPP vendor HTTP API 客户端
+│   ├── heartflow.py / affection.py  #   AI 增强模块
 │   ├── intent_embed.py / intent_llm.py
 │   ├── message_parser.py / media.py / silk.py / stt.py
-│   ├── phoneerp_tools.py            #   PhoneERP ERP business integration
-│   ├── wecom_tools.py               #   WeCom customer management
-│   ├── accounts/boss2.example.json  #   Example multi-account config (no secrets)
-│   ├── tests/                       #   Multi-account test harness
-│   └── plugin.yaml                  #   Hermes platform manifest
-├── skills/                          # 🧩 7 reusable SKILL.md modules
-│   ├── wpp-history/                 #   Message history SQL templates
-│   ├── wpp-identity/                #   wxid ↔ nickname matching (multi-source)
-│   ├── wpp-friendcircle/            #   Friend circle publish (text/image/video)
-│   ├── wpp-friendcircle-stats/      #   Statistics (frequency / type / timing)
-│   ├── wpp-friendcircle-view/       #   View + summarize friend timelines
-│   ├── wpp_stt/                     #   Voice → text transcription
-│   ├── oss_archive/                 #   Aliyun OSS upload
-│   └── wpp_tools_map.json           #   61KB SSOT tool index (221 tools + 8 group maps)
+│   ├── phoneerp_tools.py            #   PhoneERP 业务集成
+│   ├── wecom_tools.py               #   企业微信客户管理
+│   ├── accounts/boss2.example.json  #   多账号示例配置(无敏感数据)
+│   ├── tests/                       #   多账号测试
+│   └── plugin.yaml                  #   Hermes 平台清单
+├── skills/                          # 🧩 7 个独立 SKILL.md 模块
+│   ├── wpp-history/                 #   消息历史 SQL 模板
+│   ├── wpp-identity/                #   wxid ↔ 昵称匹配(多源)
+│   ├── wpp-friendcircle/            #   朋友圈发布(文字/图片/视频)
+│   ├── wpp-friendcircle-stats/      #   朋友圈统计(频率/类型/时段)
+│   ├── wpp-friendcircle-view/       #   朋友圈查看与总结
+│   ├── wpp_stt/                     #   语音转文字
+│   ├── oss_archive/                 #   阿里云 OSS 上传
+│   └── wpp_tools_map.json           #   61KB 工具索引 SSOT(221 工具 + 8 群映射)
 ├── README.md
-├── DEVELOPMENT_RULES.md             #   Iron rules: dev → deploy order, no shortcuts
-├── PATCHES.md                       #   Framework patches (re-apply after Hermes upgrades)
-└── .gitignore                       #   Excludes accounts/default.json + deploy scripts
+├── DEVELOPMENT_RULES.md             #   铁律:dev → deploy 顺序
+├── PATCHES.md                       #   Hermes framework 补丁(Hermes 升级后需重打)
+└── .gitignore                       #   排除 accounts/default.json + 部署脚本
 ```
 
-## 🚀 Quick Start
+## 🚀 快速开始
 
-### Prerequisites
+### 前置依赖
 
 - Python **3.10+**
-- A running [WPP vendor](https://github.com/jiexiaoyin/wpp-openclaw) instance (HTTP API + WebSocket)
-- MariaDB or MySQL (for message persistence + contact cache)
-- Aliyun OSS bucket (optional, for media archive)
-- SiliconFlow API key (optional, for STT)
+- 一个跑着的 WPP vendor 实例(HTTP API + WebSocket)
+- MariaDB 或 MySQL(消息持久化 + 通讯录缓存)
+- 阿里云 OSS 桶(可选,媒体归档)
+- SiliconFlow API Key(可选,STT)
 
-### Install
+### 安装
 
 ```bash
-# Clone the repo
+# 克隆仓库
 git clone https://github.com/jiexiaoyin/wpp-hermes.git
 cd wpp-hermes
 
-# Install Python deps (pymysql + aiohttp are typical)
+# 安装 Python 依赖
 pip install pymysql aiohttp requests PyYAML
 ```
 
-### Configure
+### 配置
 
-Copy the example account config and fill in your credentials:
+复制示例账号配置并填入凭证:
 
 ```bash
 cp plugin/accounts/boss2.example.json plugin/accounts/default.json
-# Edit default.json — fill authcode / tokenKey from your WPP vendor, or set them via env vars
+# 编辑 default.json — 填 authcode/tokenKey(从你的 WPP vendor 获取),或通过环境变量注入
 ```
 
-Required env vars (recommended over hardcoding):
+推荐使用环境变量(不要硬编码):
 
 ```bash
-export WECHATPRO_AUTHCODE="your_vendor_authcode"
-export WECHATPRO_TOKEN_KEY="your_vendor_token_key"
+export WECHATPRO_AUTHCODE="你的 vendor authcode"
+export WECHATPRO_TOKEN_KEY="你的 vendor token_key"
 export WECHATPRO_ALLOWED_USERS="wxid_boss_demo,wxid_user_a_demo"
-export WECHATPRO_DB_PASSWORD="your_mariadb_password"
-export WECHATPRO_LLM_API_KEY="sk-..."        # MiniMax / DeepSeek for heartflow/affection/jargon
-export WECHATPRO_STT_API_KEY="sk-..."        # SiliconFlow for voice transcription
-export WECHATPRO_S3_ACCESS_KEY="..."         # Aliyun OSS
+export WECHATPRO_DB_PASSWORD="你的 MariaDB 密码"
+export WECHATPRO_LLM_API_KEY="sk-..."        # MiniMax / DeepSeek(心流/好感度/黑话)
+export WECHATPRO_STT_API_KEY="sk-..."        # SiliconFlow(语音转写)
+export WECHATPRO_S3_ACCESS_KEY="..."         # 阿里云 OSS
 export WECHATPRO_S3_SECRET_KEY="..."
 ```
 
-### Deploy into Hermes
+### 部署到 Hermes
 
 ```bash
-# Copy plugin → Hermes plugin directory
+# 拷贝 plugin 到 Hermes 插件目录
 cp -r plugin/ /root/.hermes/plugins/wechatpadpro/
 
-# Copy skills → Hermes skills directory
+# 拷贝 skills 到 Hermes skills 目录
 cp -r skills/wpp-history skills/wpp-identity skills/wpp-friendcircle \
       skills/wpp-friendcircle-stats skills/wpp-friendcircle-view \
       skills/wpp_stt skills/oss_archive /root/.hermes/skills/
 
-# Restart Hermes gateway
+# 重启 Hermes gateway
 hermes gateway restart
 ```
 
-The adapter will auto-register on gateway startup. Check logs for:
+适配器会在 gateway 启动时自动注册,检查日志看到下面即成功:
 
 ```
 [WPP] 平台已注册 / 工具注册 / wpp_stt / oss-archive
 ```
 
-## 🧪 Testing
+## 🧪 测试
 
 ```bash
-# Unit tests for multi-account routing
+# 多账号路由单元测试
 python3 plugin/tests/run_tests.py
 
-# Syntax check (all .py files)
+# 语法检查(全部 .py)
 python3 -m py_compile plugin/*.py
 ```
 
-## 🏗 Architecture
+## 🏗 架构
 
 ```
-┌─────────────┐    WSS /ws/sync    ┌──────────────┐    inbound     ┌─────────────┐
+┌─────────────┐    WSS /ws/sync    ┌──────────────┐    入站       ┌─────────────┐
 │ WPP vendor  │◄──────────────────►│  adapter.py  │───────────────►│   Hermes    │
-│ (wx.juhe.chat)│   webhook fallback│  (Python)    │                │   agent     │
-└─────────────┘                    │              │   outbound     │             │
+│ (wx.juhe.chat)│   webhook 兜底    │  (Python)    │                │   agent     │
+└─────────────┘                    │              │   出站       │             │
        ▲                           │              │◄───────────────│             │
        │ HTTP API                  └──────────────┘                └─────────────┘
        │                           ┌──────────────┐
@@ -148,96 +148,96 @@ python3 -m py_compile plugin/*.py
                                   ┌───────┴───────┐
                                   ▼               ▼
                           ┌─────────────┐ ┌─────────────┐
-                          │   MariaDB   │ │ Aliyun OSS  │
-                          │ (contacts,  │ │ (media      │
-                          │  messages)  │ │  archive)   │
+                          │   MariaDB   │ │ 阿里云 OSS  │
+                          │ (contacts,  │ │ (媒体       │
+                          │  messages)  │ │  归档)     │
                           └─────────────┘ └─────────────┘
 ```
 
-## 📚 Documentation
+## 📚 文档
 
-- **[DEVELOPMENT_RULES.md](DEVELOPMENT_RULES.md)** — Iron rules: dev → deploy order, no shortcuts, deploy.sh is the only sanctioned deployment path
-- **[PATCHES.md](PATCHES.md)** — Hermes framework patches (re-apply after Hermes upgrades)
-- **[plugin/](plugin/)** — Inline docstrings in every .py module
-- **[skills/*/SKILL.md](skills/)** — Per-skill usage documentation
+- **[DEVELOPMENT_RULES.md](DEVELOPMENT_RULES.md)** — 铁律:dev → deploy 顺序,严禁捷径,deploy.sh 是唯一规范部署路径
+- **[PATCHES.md](PATCHES.md)** — Hermes framework 补丁(Hermes 升级后需重打)
+- **[plugin/](plugin/)** — 每个 .py 模块都有详细的 docstring
+- **[skills/*/SKILL.md](skills/)** — 每个 skill 的使用文档
 
-## 🤝 Contributing
+## 🤝 贡献
 
-Issues and PRs welcome at [github.com/jiexiaoyin/wpp-hermes/issues](https://github.com/jiexiaoyin/wpp-hermes/issues).
+欢迎在 [github.com/jiexiaoyin/wpp-hermes/issues](https://github.com/jiexiaoyin/wpp-hermes/issues) 提 Issue 或 PR。
 
-Before opening a PR:
-1. Read [DEVELOPMENT_RULES.md](DEVELOPMENT_RULES.md)
-2. Run `python3 -m py_compile plugin/*.py` to verify syntax
-3. Run `python3 plugin/tests/run_tests.py` to verify multi-account routing
-4. Update the relevant SKILL.md if your change affects a skill's contract
+提 PR 之前:
+1. 读 [DEVELOPMENT_RULES.md](DEVELOPMENT_RULES.md)
+2. 跑 `python3 -m py_compile plugin/*.py` 验证语法
+3. 跑 `python3 plugin/tests/run_tests.py` 验证多账号路由
+4. 如果改动影响 skill 契约,更新对应 SKILL.md
 
-## 📄 License
+## 📄 许可证
 
 [MIT](LICENSE) © 2026 jiexiaoyin
 
-## 🔗 Related projects
+## 🔗 相关项目
 
-- **[wpp-openclaw](https://github.com/jiexiaoyin/wpp-openclaw)** — TypeScript OpenClaw implementation (the origin of this project, still actively maintained for the OpenClaw platform)
-- **[Hermes Agent](https://github.com/jiexiaoyin)** — The agent framework this plugin targets
+- **[wpp-openclaw](https://github.com/jiexiaoyin/wpp-openclaw)** — TypeScript OpenClaw 实现(本项目的源,OpenClaw 平台仍在维护)
+- **[Hermes Agent](https://github.com/jiexiaoyin)** — 本插件目标框架
 
 ---
 
 # wpp-hermes 开发目录
 
-> **微信插件（wechatpadpro）+ wpp skills 统一开发版**。开发只在此目录进行，改完后一键部署到 Hermes。
+> **微信插件(wechatpadpro)+ wpp skills 统一开发版**。开发只在此目录进行,改完后一键部署到 Hermes。
 
 ## 📁 目录结构
 
 ```
 /root/dev/wpp-hermes/
-├── plugin/                    # 📦 插件源码（wechatpadpro，35 个 .py）
-│   ├── adapter.py             #   平台适配器（入站/出站/多账号）
-│   ├── tools.py               #   工具注册（225+ 工具）
+├── plugin/                    # 📦 插件源码(wechatpadpro,35 个 .py)
+│   ├── adapter.py             #   平台适配器(入站/出站/多账号)
+│   ├── tools.py               #   工具注册(225+ 工具)
 │   ├── tools_data.py          #   通用工具定义
 │   ├── tools_data_extra.py    #   扩展工具定义
 │   ├── api_client.py          #   vendor API 客户端
-│   ├── triggers.py            #   触发判断（@机器人/接龙/心流）
-│   ├── ...（其余 .py）...
-│   ├── accounts/default.json  #   ⚠️ 含 authcode，勿提交 GitHub
+│   ├── triggers.py            #   触发判断(@机器人/接龙/心流)
+│   ├── ...(其余 .py)...
+│   ├── accounts/default.json  #   ⚠️ 含 authcode,勿提交 GitHub
 │   ├── tests/                 #   测试
 │   └── plugin.yaml
-├── skills/                    # 🧩 wpp skills（7 个，2026-09-01 纳入）
+├── skills/                    # 🧩 wpp skills(7 个,2026-09-01 纳入)
 │   ├── wpp-history/           #   消息历史查询
 │   ├── wpp-identity/          #   昵称↔wxid 匹配
 │   ├── wpp-friendcircle/      #   朋友圈发布
 │   ├── wpp-friendcircle-stats/#   朋友圈统计
 │   ├── wpp-friendcircle-view/ #   查看朋友圈
-│   ├── wpp_stt/               #   语音转写（python 模块，插件依赖）
-│   └── oss_archive/           #   OSS 归档（python 模块，插件依赖）
+│   ├── wpp_stt/               #   语音转写(python 模块,插件依赖)
+│   └── oss_archive/           #   OSS 归档(python 模块,插件依赖)
 ├── deploy.sh                  # 🚀 一键部署
 ├── README.md
 └── .gitignore
 ```
 
-## 🚀 快速部署（核心）
+## 🚀 快速部署(核心)
 
 ```bash
-# 开发：直接编辑本目录（plugin/ 或 skills/）
+# 开发:直接编辑本目录(plugin/ 或 skills/)
 vim /root/dev/wpp-hermes/plugin/tools.py
 vim /root/dev/wpp-hermes/skills/wpp-history/SKILL.md
 
-# 部署：一条命令（自动完成 6 步）
+# 部署:一条命令(自动完成 6 步)
 bash /root/dev/wpp-hermes/deploy.sh
 
-# 只检查不部署（语法 + 差异预览）
+# 只检查不部署(语法 + 差异预览)
 bash /root/dev/wpp-hermes/deploy.sh --check
 
 # 回滚到某次部署前的备份
 bash /root/dev/wpp-hermes/deploy.sh --rollback /data/wpp-deploy-backup/wechatpadpro-20260901-103000
 ```
 
-## 📋 部署流程（deploy.sh 自动执行）
+## 📋 部署流程(deploy.sh 自动执行)
 
 | 步骤 | 动作 | 说明 |
 |------|------|------|
-| 1 | 语法检查 | plugin + skills 全部 .py，失败中止 |
+| 1 | 语法检查 | plugin + skills 全部 .py,失败中止 |
 | 2 | 备份 | plugin + 7 skills → `/data/wpp-deploy-backup/wechatpadpro-<时间戳>/` |
 | 3 | 同步 plugin | → `/root/.hermes/plugins/wechatpadpro/` |
-| 4 | 同步 skills | 逐个 → `/root/.hermes/skills/<同名>/`（不影响其他 skills） |
-| 5 | 重启 gateway | `hermes gateway restart`（新代码生效） |
+| 4 | 同步 skills | 逐个 → `/root/.hermes/skills/<同名>/`(不影响其他 skills) |
+| 5 | 重启 gateway | `hermes gateway restart`(新代码生效) |
 | 6 | 验证 | 检查日志 `[WPP] 平台已注册/工具注册/wpp_stt/oss-archive` |
