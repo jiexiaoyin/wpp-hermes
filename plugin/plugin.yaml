@@ -1,0 +1,405 @@
+name: wechatpadpro-platform
+label: WeChatPadPro (Personal WeChat)
+kind: platform
+version: 2.0.0
+author: knowhub-ops
+
+manifest_version: 2          # v2 解析路径（未知字段 warning 而非静默丢弃）
+api_version: 2
+
+# 运行时门（plugins_loader.py:430-432 → plugins_manifest.requires_hermes_error）。
+# 不满足时 Hermes **干净跳过**：不 import、不 register、不留 traceback。
+# 本插件依赖 0.21.5 的 env_enablement_fn 调用约定（gateway/config_env.py:396-437），
+# 更早的版本没有这个挂载点 ⇒ 平台永远起不来（见 platform/enablement.py）。
+requires_hermes: ">=0.21.5"
+
+# ⚠️ provides_tools 的语义：**逐个「工具名」**，不是 toolset 名。
+#    旧版写的是 `- wechatpadpro`（那是 register_tool(..., toolset="wechatpadpro")
+#    里的 toolset），属语义用错 —— 触发 plugin_validate 的
+#    「REAL − DECLARED 非空 ⇒ 失败」+「DECLARED − REAL 非空 ⇒ WARN」。
+#
+#    本字段由 tools/gen_provides_tools.py 从**实际注册**生成，禁止手写
+#    （deploy.sh 会重新生成并 diff，不为空即中止）。
+#
+#    2026-10-01 实测：生成器 262 条 == `hermes plugins doctor` 的
+#    「registrations: 262 tool(s)」逐条一致（wecom 7 + phoneerp 4 + wpp 251）。
+provides_tools:
+  - phoneerp_imei
+  - phoneerp_location
+  - phoneerp_natural
+  - phoneerp_query
+  - wecom_all_customers
+  - wecom_corp_tags
+  - wecom_customer_detail
+  - wecom_daily_report
+  - wecom_daily_user_changes
+  - wecom_list_customers
+  - wecom_weekly_behavior
+  - wpp_accounts_context
+  - wpp_customized_auth_batch
+  - wpp_fav_del
+  - wpp_fav_info
+  - wpp_fav_item
+  - wpp_fav_sync
+  - wpp_fc_active_tasks
+  - wpp_fc_by_snsid
+  - wpp_fc_by_user
+  - wpp_fc_cdn_download_video
+  - wpp_fc_collect_circle
+  - wpp_fc_comment
+  - wpp_fc_comments
+  - wpp_fc_download_video
+  - wpp_fc_list
+  - wpp_fc_operate
+  - wpp_fc_publish_ai
+  - wpp_fc_publish_images
+  - wpp_fc_publish_raw
+  - wpp_fc_publish_text
+  - wpp_fc_publish_video
+  - wpp_fc_push_comment
+  - wpp_fc_send_fav_item
+  - wpp_fc_send_one_id
+  - wpp_fc_set_background
+  - wpp_fc_set_days
+  - wpp_fc_sync
+  - wpp_fc_upload_image
+  - wpp_fc_upload_images
+  - wpp_fc_upload_media
+  - wpp_fc_upload_video
+  - wpp_finder_comment
+  - wpp_finder_comment_detail
+  - wpp_finder_comment_list
+  - wpp_finder_decrypt_comment
+  - wpp_finder_follow
+  - wpp_finder_like
+  - wpp_finder_live_detail
+  - wpp_finder_mine
+  - wpp_finder_msg_session
+  - wpp_finder_play_video
+  - wpp_finder_play_video_stop
+  - wpp_finder_recommend
+  - wpp_finder_search
+  - wpp_finder_search_list
+  - wpp_finder_send_dm
+  - wpp_finder_topic_list
+  - wpp_finder_user_page
+  - wpp_friend_blacklist
+  - wpp_friend_contract_detail
+  - wpp_friend_delete
+  - wpp_friend_gh_list
+  - wpp_friend_lbs
+  - wpp_friend_list
+  - wpp_friend_pass_verify
+  - wpp_friend_request_list
+  - wpp_friend_search
+  - wpp_friend_send_request
+  - wpp_friend_set_remarks
+  - wpp_friend_state
+  - wpp_group_add_member
+  - wpp_group_consent_join
+  - wpp_group_create
+  - wpp_group_del_member
+  - wpp_group_facing_create
+  - wpp_group_info
+  - wpp_group_info_detail
+  - wpp_group_invite_member
+  - wpp_group_list
+  - wpp_group_mass_text
+  - wpp_group_member_detail
+  - wpp_group_move_contract
+  - wpp_group_operate_admin
+  - wpp_group_pat
+  - wpp_group_qrcode
+  - wpp_group_quit
+  - wpp_group_scan_enterprise
+  - wpp_group_scan_into
+  - wpp_group_set_access_verify
+  - wpp_group_set_announcement
+  - wpp_group_set_name
+  - wpp_group_set_remarks
+  - wpp_group_transfer_owner
+  - wpp_history_search
+  - wpp_identity_lookup
+  - wpp_jargon_query
+  - wpp_label_add
+  - wpp_label_delete
+  - wpp_label_friend_list
+  - wpp_label_list
+  - wpp_label_update_list
+  - wpp_label_update_name
+  - wpp_login_auto_heartbeat
+  - wpp_login_cache_info
+  - wpp_login_check_can_set_alias
+  - wpp_login_check_qr
+  - wpp_login_get_qr
+  - wpp_login_get_status
+  - wpp_login_heartbeat
+  - wpp_login_heartbeat_logs
+  - wpp_login_heartbeat_long
+  - wpp_login_logout
+  - wpp_login_longlink_status
+  - wpp_login_newinit
+  - wpp_login_qr_pad_cloud
+  - wpp_login_qr_pad_ppmt
+  - wpp_login_submit_verify_code
+  - wpp_mcp_get_contact
+  - wpp_mcp_get_group
+  - wpp_mcp_list_contacts
+  - wpp_mcp_list_groups
+  - wpp_mcp_recent_messages
+  - wpp_mcp_search
+  - wpp_oa_article_ext
+  - wpp_oa_article_like
+  - wpp_oa_article_list
+  - wpp_oa_article_markdown
+  - wpp_oa_article_read
+  - wpp_oa_auth_mp_login
+  - wpp_oa_follow
+  - wpp_oa_history
+  - wpp_oa_history_message
+  - wpp_oa_jsapi_preverify
+  - wpp_oa_oauth_authorize
+  - wpp_oa_qr_authorize
+  - wpp_oa_qr_authorize_confirm
+  - wpp_oa_quit
+  - wpp_quote_reply
+  - wpp_qw_add
+  - wpp_qw_apply
+  - wpp_qw_search
+  - wpp_revoke_msg
+  - wpp_sayhello_v1
+  - wpp_sayhello_v2
+  - wpp_sayhello_v3
+  - wpp_search_ai
+  - wpp_search_ai_followup
+  - wpp_search_all
+  - wpp_search_articles
+  - wpp_search_baike
+  - wpp_search_books
+  - wpp_search_channels
+  - wpp_search_channels_comments
+  - wpp_search_channels_detail
+  - wpp_search_channels_resolve
+  - wpp_search_emoji
+  - wpp_search_gateway
+  - wpp_search_images
+  - wpp_search_live
+  - wpp_search_mini_programs
+  - wpp_search_moments
+  - wpp_search_news
+  - wpp_search_official_accounts
+  - wpp_search_query
+  - wpp_search_wechat_index
+  - wpp_send_ai_image
+  - wpp_send_ai_voice
+  - wpp_send_app_msg
+  - wpp_send_card
+  - wpp_send_cdn_file
+  - wpp_send_emoji
+  - wpp_send_file
+  - wpp_send_file_v2
+  - wpp_send_image
+  - wpp_send_link
+  - wpp_send_location
+  - wpp_send_mini_program
+  - wpp_send_text
+  - wpp_send_video
+  - wpp_send_voice
+  - wpp_share_video_msg
+  - wpp_start_auto_sync
+  - wpp_sync_message
+  - wpp_tenpay_collect_money
+  - wpp_tenpay_confirm_pre_transfer
+  - wpp_tenpay_ge_ma_skd_qcode
+  - wpp_tenpay_generate_pay_qcode
+  - wpp_tenpay_get_encrypt_info
+  - wpp_tenpay_open_hongbao
+  - wpp_tenpay_open_hongbao_params
+  - wpp_tenpay_open_redpacket
+  - wpp_tenpay_query_hongbao
+  - wpp_tenpay_receive_hongbao
+  - wpp_tenpay_receive_no_encryption
+  - wpp_tenpay_redpacket_list
+  - wpp_tenpay_sj_skd_qcode
+  - wpp_tool_band_card_list
+  - wpp_tool_bound_hard_devices
+  - wpp_tool_cdn_dns
+  - wpp_tool_cdn_download_image
+  - wpp_tool_download_file
+  - wpp_tool_download_file_binary
+  - wpp_tool_download_img
+  - wpp_tool_download_video
+  - wpp_tool_download_voice
+  - wpp_tool_download_voice_binary
+  - wpp_tool_generate_pay_qrcode
+  - wpp_tool_get_a8key
+  - wpp_tool_set_step_count
+  - wpp_tool_upload_file
+  - wpp_tools_list
+  - wpp_translate_send
+  - wpp_translate_text
+  - wpp_user_add_me_methods
+  - wpp_user_bind_email
+  - wpp_user_bind_mobile
+  - wpp_user_bind_qq
+  - wpp_user_change_password
+  - wpp_user_del_device
+  - wpp_user_friend_verification
+  - wpp_user_my_profile
+  - wpp_user_online_info
+  - wpp_user_qrcode
+  - wpp_user_report_motion
+  - wpp_user_safety_info
+  - wpp_user_send_verify_code
+  - wpp_user_set_alias
+  - wpp_user_set_privacy
+  - wpp_user_update_profile
+  - wpp_user_upload_headimage
+  - wpp_user_verify_password
+  - wpp_voice_message_transcribe
+  - wpp_voice_result
+  - wpp_voice_transcribe
+  - wpp_webhook_business_set
+  - wpp_webhook_get
+  - wpp_webhook_remove
+  - wpp_webhook_set
+  - wpp_webhook_test
+  - wpp_wxapp_cloud_call
+  - wpp_wxapp_delete_oauth
+  - wpp_wxapp_js_login
+  - wpp_wxapp_js_login_customized
+  - wpp_wxapp_js_operate_data
+  - wpp_wxapp_js_session
+  - wpp_wxapp_oauth_list
+  - wpp_wxapp_openid
+  - wpp_wxapp_pull_pay
+  - wpp_wxapp_record
+  - wpp_wxapp_unionpay
+  - wpp_wxapp_verify_plugin
+  - wpp_xw_card_screenshot_check
+  - wpp_xw_card_users
+  - wpp_xw_create_session
+  - wpp_xw_history_delete
+  - wpp_xw_history_fill
+  - wpp_xw_history_list
+  - wpp_xw_invite
+  - wpp_xw_reddots
+  - wpp_xw_reddots_read
+  - wpp_xw_suggestions
+description: >
+  WeChat Pad protocol gateway adapter for Hermes Agent (vendor wx.juhe.chat).
+  Registers the ``wechatpadpro`` platform; relays WeChat chats between
+  vendors (GetQR login, /ws/sync push, /Msg/SendTxt send) and the Hermes agent.
+  v2.0.0: full Python rewrite — heartflow 9-module port (aligned to TS v1.11.0),
+  single registration entry, migration-based data layer.
+
+requires_env:
+  - name: WECHATPRO_AUTHCODE
+    description: "vendor authcode (device login token) for default account"
+    prompt: "WeChatPadPro authcode"
+    password: true
+  - name: WECHATPRO_TOKEN_KEY
+    description: "vendor client tokenKey"
+    prompt: "WeChatPadPro tokenKey"
+    password: true
+
+optional_env:
+  - name: WECHATPRO_ALLOWED_USERS
+    description: "Comma-separated DM wxids allowed to talk to the bot"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: WECHATPRO_ALLOW_ALL_USERS
+    description: "Set 1 to allow all DM users (not recommended)"
+    password: false
+  - name: WECHATPRO_HOME_CHANNEL
+    description: "Default chat ID for cron / notification delivery (format accountId:peerId)"
+    prompt: "Home channel ID"
+    password: false
+  - name: WECHATPRO_WEBHOOK_PUBLIC_URL
+    description: >
+      Public base URL for the vendor to POST inbound webhooks.
+      ⚠️ No default is applied — must be set explicitly. A wrong value here
+      silently points the vendor's inbound traffic at another host.
+    prompt: "Webhook public URL"
+    password: false
+  - name: WECHATPRO_DB_HOST
+    description: "MariaDB host (must be localhost/127.0.0.1 for this plugin)"
+    password: false
+  - name: WECHATPRO_DB_PORT
+    description: "MariaDB port (default 3306)"
+    password: false
+  - name: WECHATPRO_DB_USER
+    description: "MariaDB user"
+    password: false
+  - name: WECHATPRO_DB_NAME
+    description: "MariaDB database name"
+    password: false
+  - name: WECHATPRO_DB_PASSWORD
+    description: "MariaDB password"
+    password: true
+  - name: WECHATPRO_LLM_API_KEY
+    description: "LLM API key for heartflow / affection / jargon"
+    prompt: "LLM API key"
+    password: true
+  - name: WECHATPRO_STT_API_KEY
+    description: >
+      SiliconFlow STT key for voice transcription (fallback). Only used when the
+      vendor sends no transcript. Requires the silk decoder binary (see
+      WPP_SILK_DECODER_PATH in docs). Missing key or decoder degrades loudly once
+      (one WARNING), never silently; also accepted: SILICONFLOW_API_KEY.
+    prompt: "STT API key"
+    password: true
+  - name: WECHATPRO_ACCOUNTS_JSON
+    description: >
+      Optional: inline account table as JSON, avoiding on-disk credentials.
+      Shape: {"<account_id>": {"authcode": "...", "tokenKey": "..."}}
+    password: true
+
+# 声明性 —— Hermes **从不自动安装**（plugins_manifest.py:150-155）。
+# 部署脚本必须往 Hermes 的隔离解释器里装：
+#   $P = /root/.hermes/tools/python-*-linux-x64/bin/python3
+#   $P -m pip install -r <(printf '%s\n' "${DEPS[@]}")
+#
+# ⚠️ doctor 强制要求**上下界都给**（只写下界会报
+#    "entry 'pymysql' has no upper bound"）。上界取下一个大版本。
+python_dependencies:
+  # ⚠️ 这三条都必须是**运行时真需要**的（声明性字段，Hermes 不自动装，但
+  #    `hermes plugins doctor` / install hint 会照着显示）。
+  #    aiohttp + websockets 由 `platform/adapter.py:check_wechatpadpro_requirements`
+  #    主动探 —— 声明的与探的**必须同源**，否则 check_fn 返 False 而 install_hint
+  #    不提真因。
+  # 2026-10-01 在 .183 环境 venv 实测版本：aiohttp 3.14.3 / websockets 15.0.1 /
+  #    pymysql 1.2.3 —— 上下界按实测取，不逼降级。
+  - "aiohttp>=3.9,<4"
+  - "websockets>=12,<16"
+  - "pymysql>=1.1,<2"
+pip_dependencies:
+  - "aiohttp>=3.9,<4"
+  - "websockets>=12,<16"
+  - "pymysql>=1.1,<2"
+
+external_dependencies:
+  - name: node
+    hint: "wecom 工具需要 node + wecom-cli.js；缺失时对应工具降级为占位并告警"
+  - name: ffmpeg
+    hint: >
+      两处**可选但影响体验**：① 出站视频抽首帧做缩略图（vendor /Msg/SendVideo
+      的 ImageBase64 必填，抽不到可能被拒收）；② 出站语音转 SILK 的 PCM 前置。
+      缺失时视频照发（缩略图留空）、语音降级为**文件**发送。
+  - name: silk-encoder
+    hint: >
+      出站语音 SILK 编码器（WPP_SILK_ENCODER_PATH，默认 /root/silk_decoder/silk/encoder）。
+      **缺失时出站语音一律降级为文件** —— 厂商 /Msg/SendVoice 只收 SILK，非 SILK 会被
+      静默拒收且回一个文案误导的 Code=-2。.183 当前即为此状态（无 encoder 也无 ffmpeg）。
+  - name: silk-decoder
+    hint: >
+      入站语音 SILK 解码器（WPP_SILK_DECODER_PATH，默认 /root/silk_decoder/silk/decoder）
+      —— 只在**厂商没给转写**时用得上：解出 PCM → 套 WAV 头 → 送 SiliconFlow 转文字。
+      缺失（或 WECHATPRO_STT_API_KEY 未配）时**只降级一次 WARNING**，之后 DEBUG；
+      绝不静默 —— 语音转不出字而没人知道，是这条链上最容易踩的坑。
+      .183 当前即为此状态（无 decoder 也无 key）：正文只留 ``[语音] <url>``。
+
+# 本插件不需要任何 capability 授予：
+# - 平台注册本身不走能力门（register_platform 无 capability 检查）
+# - gateway.platform_actions 只门禁 add_reaction/set_thread_title，且只支持 telegram/discord
+capabilities: []

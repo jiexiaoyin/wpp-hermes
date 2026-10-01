@@ -1,0 +1,216 @@
+"""vendor 媒体元数据提取 —— 旧 ``message_parser.py:extract_media_meta`` 的迁址。
+
+## 为什么这个文件全是"考古"
+
+vendor 的媒体字段**三代混用**，同一份 payload 里可能同时出现：
+
+- **v1 schema**（现行）：``image.cdn_download_contexts[0].file_aes_key``、
+  ``voice.download_context.{msg_id,new_msg_id,master_buf_id,...}``、
+  ``file.download_context.{attach_id,section}``、``video.download_context.{msg_id,section}``
+- **老 schema**（已废弃但仍兜底）：``aes_key`` / ``file_no`` / ``cdn_video_file_no``
+- **裸字段**：``file_aes_key`` / ``attach_id`` / ``data_len`` / ``filename``
+
+这些字段名**不是猜的**，是 2026-08/09 逐次对真实推送抓包对齐出来的（见 TS
+``media-enrich.ts`` 的历次修复：v1.2.5 FILE-DOWNLOAD-BINARY / v1.2.6
+VOICE-DOWNLOAD-BINARY / v1.3.8 VIDEO-DOWNLOAD / v1.3.22 VENDOR-TRANSCRIPT）。
+**删任何一个兜底分支之前先确认对应老账号已迁移**，否则会静默拿不到媒体。
+
+## 产出形状
+
+统一挂在 :attr:`WppMessage.media` 上，键名与下游 ``api_client`` 的下载方法一一对应::
+
+    {"cdn": {file_aes_key, file_no, variant},   # 图片
+     "voice_ctx": {...}, "file_ctx": {...}, "video_ctx": {...},
+     "thumb_cdn": {...}, "legacy_cdn": {...},
+     "attach_id", "data_len", "filename", "msg_id", "to_wxid",
+     "vendor_transcript", "duration"}
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def _first(d: dict, *keys: str) -> Any:
+    """取第一个非空值（对齐旧实现的 ``a or b or c`` 链，但可读）。"""
+    for k in keys:
+        v = d.get(k)
+        if v:
+            return v
+    return ""
+
+
+def extract_media_meta(src: dict) -> dict:
+    """提取图片/文件/语音/视频元数据（供 :class:`core.api_client.WppClient` 下载）。"""
+    media: dict = {}
+    _extract_image(src, media)
+    _extract_flat_fields(src, media)
+    _extract_voice(src, media)
+    _extract_file(src, media)
+    _extract_video(src, media)
+    return media
+
+
+# ---------------------------------------------------------------------- 图片
+
+
+def _extract_image(src: dict, media: dict) -> None:
+    cdn = src.get("cdn") or src.get("image") or src.get("img")
+    if not isinstance(cdn, dict):
+        return
+    # vendor 真实字段: aes_key / standard_file_no / cdn_download_contexts[0].file_aes_key
+    dl = cdn.get("cdn_download_contexts")
+    ctx0 = dl[0] if isinstance(dl, list) and dl and isinstance(dl[0], dict) else {}
+    media["cdn"] = {
+        "file_aes_key": _first(cdn, "file_aes_key", "FileAesKey", "aes_key", "AesKey")
+                        or _first(ctx0, "file_aes_key", "FileAesKey"),
+        "file_no": (_first(cdn, "file_no", "FileNo", "standard_file_no", "StandardFileNo", "md5")
+                    or _first(ctx0, "file_no", "FileNo")),
+        "variant": cdn.get("variant") or ctx0.get("variant") or "standard",
+    }
+    if cdn.get("data_len"):
+        media["data_len"] = cdn["data_len"]
+
+
+# ---------------------------------------------------------------- 裸字段兜底
+
+
+def _extract_flat_fields(src: dict, media: dict) -> None:
+    """顶层裸字段。**只 setdefault** —— 结构化路径拿到的值优先。"""
+    for key, target in (("file_aes_key", "file_aes_key"), ("FileAesKey", "file_aes_key"),
+                        ("file_no", "file_no"), ("FileNo", "file_no")):
+        if src.get(key):
+            media.setdefault("cdn", {})[target] = src[key]
+
+    for key, target in (("attach_id", "attach_id"), ("AttachId", "attach_id"),
+                        ("data_len", "data_len"), ("DataLen", "data_len"),
+                        ("filename", "filename"), ("FileName", "filename")):
+        if src.get(key):
+            media[target] = src[key]
+
+    for key in ("msg_id", "MsgId"):
+        if src.get(key) and not media.get("msg_id"):
+            media["msg_id"] = src[key]
+
+    to_wxid = src.get("to_wxid") or src.get("ToWxid")
+    if to_wxid:
+        media["to_wxid"] = to_wxid
+
+
+# ---------------------------------------------------------------------- 语音
+
+
+def _extract_voice(src: dict, media: dict) -> None:
+    """voice 形态（v1.2.6 VOICE-DOWNLOAD-BINARY）。"""
+    voice = src.get("voice")
+    if not isinstance(voice, dict):
+        return
+    ctx = voice.get("download_context") or {}
+    media["voice_ctx"] = {
+        "msg_id": ctx.get("msg_id") or 0,
+        "new_msg_id": ctx.get("new_msg_id") or "",
+        "client_msg_id": ctx.get("client_msg_id") or "",
+        "master_buf_id": ctx.get("master_buf_id") or "0",
+        "format": ctx.get("format") if isinstance(ctx.get("format"), int) else 4,
+        "length": ctx.get("length") or voice.get("data_len") or 0,
+        "chat_room_name": ctx.get("chat_room_name") or "",
+        "from_user_name": ctx.get("from_user_name") or "",
+        "to_user_name": ctx.get("to_user_name") or "",
+    }
+    # vendor 自带 transcript（v1.3.22 VENDOR-TRANSCRIPT）—— 有就直接给 agent，免 STT
+    if voice.get("transcript"):
+        media["vendor_transcript"] = voice["transcript"]
+    # 老 schema 兜底
+    if voice.get("aes_key") or voice.get("file_no") or voice.get("cdn_voice_file_no"):
+        media["legacy_cdn"] = {
+            "aes_key": voice.get("aes_key") or voice.get("cdn_voice_file_no", ""),
+            "file_no": voice.get("file_no") or "",
+        }
+
+
+# ---------------------------------------------------------------------- 文件
+
+
+def _extract_file(src: dict, media: dict) -> None:
+    """file 形态（v1.2.5 FILE-DOWNLOAD-BINARY，返回原始字节而非 base64）。"""
+    file_obj = src.get("file")
+    if not isinstance(file_obj, dict):
+        return
+    ctx = file_obj.get("download_context") or {}
+    section = ctx.get("section") or {}
+    media["file_ctx"] = {
+        "attach_id": ctx.get("attach_id") or "",
+        "user_name": ctx.get("user_name") or "",
+        "data_len": ctx.get("data_len") or file_obj.get("data_len") or 0,
+        "start_pos": section.get("start_pos", 0),
+        "section_len": section.get("data_len", 0),
+        "app_id": ctx.get("app_id") or file_obj.get("app_id") or "",
+        "file_name": (ctx.get("file_name") or file_obj.get("file_name")
+                      or file_obj.get("filename") or ""),
+    }
+    # 老字段兜底
+    if file_obj.get("attach_id") and not media.get("attach_id"):
+        media["attach_id"] = file_obj["attach_id"]
+    if file_obj.get("filename") and not media.get("filename"):
+        media["filename"] = file_obj["filename"]
+    if file_obj.get("data_len"):
+        media["data_len"] = file_obj["data_len"]
+
+
+# ---------------------------------------------------------------------- 视频
+
+
+def _extract_video(src: dict, media: dict) -> None:
+    """video 形态（v1.3.8 VIDEO-DOWNLOAD）。
+
+    老 schema 的 ``aes_key`` / ``file_no`` **已废弃**（2026-09-01 修复），
+    但仍在下面留兜底分支供老账号用。
+    """
+    video = src.get("video")
+    if not isinstance(video, dict):
+        return
+    ctx = video.get("download_context") or {}
+    section = ctx.get("section") or {}
+    media["video_ctx"] = {
+        "to_wxid": ctx.get("to_wxid") or "",
+        "msg_id": ctx.get("msg_id") or 0,
+        "data_len": ctx.get("data_len") or video.get("data_len") or 0,
+        "start_pos": section.get("start_pos", 0),
+        "chunk_len": section.get("data_len", 1048576),
+    }
+    if video.get("duration_seconds"):
+        media["duration"] = video["duration_seconds"]
+    if video.get("aes_key") or video.get("cdn_video_file_no"):
+        media["legacy_cdn"] = {
+            "aes_key": video.get("aes_key", ""),
+            "file_no": video.get("cdn_video_file_no", ""),
+        }
+    thumb = video.get("thumbnail")
+    if isinstance(thumb, dict) and (thumb.get("aes_key") or thumb.get("file_no")):
+        media["thumb_cdn"] = {
+            "file_aes_key": thumb.get("aes_key") or thumb.get("file_aes_key"),
+            "file_no": thumb.get("file_no") or thumb.get("FileNo"),
+            "width": thumb.get("width"),
+            "height": thumb.get("height"),
+        }
+
+
+# ----------------------------------------------------------------- 读回（转写）
+
+
+def voice_transcript(media: dict) -> str:
+    """语音的转写文字；没有就 ``""``。
+
+    两个来源，**vendor 优先**（对齐 TS ``voice.ts:100`` VENDOR-TRANSCRIPT）：
+
+    - ``vendor_transcript`` —— 微信官方随推送给的（``voice.transcript``），免费且更准；
+    - ``stt_text`` —— 插件自己转的（:mod:`plugin.inbound.stt`），只在上面那个缺席时才有。
+
+    **不看 ``msg_type``**：这两个键只有 :func:`_extract_voice` / STT 链路会写，
+    再按类型判一次是死码（真出现别的类型带语音、也该把转写给模型看）。
+    """
+    media = media or {}
+    return str(media.get("vendor_transcript") or media.get("stt_text") or "").strip()
+
+
+__all__ = ["extract_media_meta", "voice_transcript"]

@@ -1,0 +1,404 @@
+"""账号层回归（四层解析 / 凭据安全 / 连接前守卫 / 多账号 token）—— 计划第 7 步。
+
+替代旧的 ``test_multi_account.py``（2026-08-31 的旧脚手架，第 7 步删除；它要求
+``runner.py`` 先往 ``sys.modules`` 里塞 ``_harness``，且把 ``PLUGIN_DIR`` 写死成
+``/root/.hermes/plugins/wechatpadpro`` —— 在 dev 树上根本没有那个目录）。
+
+## 覆盖面与**不覆盖**的边界（写在最前面，免得下一个人误判）
+
+本文件测的是 ``core/accounts.py`` + ``core/credentials.py``（**本机可 import**）。
+旧脚手架里另外两条意图的归属：
+
+- **多账号路由**（``_parse_chat_id`` 的 ``<account_id>:<peer>`` 首冒号切分）与
+  **``WPP_TOOLS_ONLY=1`` 纯工具模式**住在 ``platform/adapter.py``，它模块级
+  ``from gateway.config import Platform``（Hermes 独有）⇒ **本机 import 不了**。
+  覆盖它们的是 ``tools/probe_adapter_contract.py``（.183，真 Hermes 上 57 项契约）
+  与门禁里的 ``adapter-seams`` 变异套件（按调用点源码形状验）。本文件**不再假装**测过。
+- 本文件也**不**读 ``plugin/accounts/default.json``（含 authcode，见 .gitignore 红线）：
+  每个用例把 ``WECHATPRO_ACCOUNTS_DIR`` 指到 tmp_path。
+
+## 本文件守的五件事
+
+1. **四层解析顺序**（文件 → config.yaml extra → runtime override → env 兜底），
+   且 env 是**强制覆盖**而不是 ``setdefault``（``default.json`` 的 ``authcode: ""``
+   占位会让 setdefault 永远填不进去 —— 平台起不来的那个根因的下半截）。
+2. **凭据永不外泄**：``redacted()`` / 日志 / 指纹里只许出现 ``sha256[:12]``。
+3. **连接前守卫四态**：未启用 / 无凭据 / **生产 bot 身份（红线 2）** / 可连。
+4. **多账号 token 确定性**：``credential_token`` 取字典序第一个可连账号的
+   authcode（旧实现依赖 dict 插入顺序 ⇒ 多账号下不稳定）。
+5. **``agent`` 必填且禁 ``main``**（2026-09-01 拍板：防两号共用一个 agent 上下文）。
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from plugin.core import accounts as A
+from plugin.core import credentials as CR
+from plugin.core import overrides as OV
+
+
+@pytest.fixture(autouse=True)
+def _isolated_accounts_dir(tmp_path, monkeypatch):
+    """每个用例一个空账号目录 + 清掉 runtime override。
+
+    ⚠️ ``overrides._runtime_overrides`` 是**模块级可变状态**、不在 ``CACHE_REGISTRY``
+    里（root conftest 只清心流那九个缓存）⇒ 谁改了谁负责还原。本文件自己兜住。
+    """
+    d = tmp_path / "accounts"
+    d.mkdir()
+    monkeypatch.setenv("WECHATPRO_ACCOUNTS_DIR", str(d))
+    monkeypatch.delenv("WECHATPRO_ACCOUNTS_JSON", raising=False)
+    OV._runtime_overrides.clear()
+    yield d
+    OV._runtime_overrides.clear()
+
+
+def _write(dirpath, account_id: str, cfg: dict) -> None:
+    (dirpath / f"{account_id}.json").write_text(
+        json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+
+
+def _cfg(**kw) -> dict:
+    base = {"id": "default", "agent": "wpp-wechat"}
+    base.update(kw)
+    return base
+
+
+# ==================================================== 1. 四层解析
+
+def test_defaults_are_the_documented_ones(_isolated_accounts_dir, monkeypatch):
+    """默认值即规格：改这里就是改线上默认行为。"""
+    for k in ("WECHATPRO_AUTHCODE", "WECHATPRO_API_BASE", "WECHATPRO_WS_URL",
+              "WECHATPRO_WEBHOOK_HOST", "WECHATPRO_WEBHOOK_PUBLIC_URL"):
+        monkeypatch.delenv(k, raising=False)
+    _write(_isolated_accounts_dir, "default", _cfg())
+
+    acct = A.resolve("default")
+    assert acct.group_policy == "open"
+    assert acct.debounce_ms == 1500
+    assert acct.api_base_url == "https://wx.juhe.chat"
+    assert acct.ws_url == "wss://wx.juhe.chat/ws/sync"
+    assert acct.webhook_host == "127.0.0.1"
+    assert acct.webhook_port == 4398
+    assert acct.webhook_path == "/wechatpadpro/default/webhook"
+    assert acct.webhook_business_path == "/wechatpadpro/default/webhook/business"
+    assert acct.nickname == "微信助手"
+    assert acct.enabled is True and acct.auto_set_webhook is True
+    assert acct.set_webhook_retries == 3
+    assert acct.allow_from == () and acct.group_allow_from == ()
+    # 特色功能默认**关**（不在默认路径上替用户做决定）
+    assert (acct.llm_intent_enabled, acct.mcp_enabled, acct.group_context_enabled,
+            acct.dm_pairing_enabled, acct.friend_circle_publish_enabled) == \
+        (False, False, False, False, False)
+    assert acct.heartflow == {} and acct.jargon == {}
+
+
+def test_no_default_public_url_is_ever_invented(_isolated_accounts_dir, monkeypatch):
+    """``plugin.yaml`` 自称 "No default is applied" —— 旧 config.py 硬编码过域名。
+
+    未配 ``webhookPublicUrl`` 就是空串，由 ``Account.webhook_url`` 显式处理；
+    偷偷兜一个域名会让"没配"和"配了"在日志里长得一样。
+    """
+    monkeypatch.delenv("WECHATPRO_WEBHOOK_PUBLIC_URL", raising=False)
+    _write(_isolated_accounts_dir, "default", _cfg())
+    acct = A.resolve("default")
+    assert acct.webhook_public_url == ""
+    assert acct.webhook_url == ""
+
+    _write(_isolated_accounts_dir, "default", _cfg(webhookPublicUrl="https://x.test/"))
+    acct2 = A.resolve("default")
+    assert acct2.webhook_url == "https://x.test/wechatpadpro/default/webhook", "尾部斜杠不许双写"
+
+
+def test_layers_override_in_order(_isolated_accounts_dir):
+    """文件 → extra → runtime override，后者覆盖前者（顺序即优先级）。"""
+    _write(_isolated_accounts_dir, "default", _cfg(nickname="文件", debounceMs=100))
+    acct = A.resolve("default", {"nickname": "yaml"})
+    assert acct.nickname == "yaml", "config.yaml 覆盖账号文件"
+    assert acct.debounce_ms == 100, "没被覆盖的键保持文件里的值"
+
+    OV.set_override("default", "nickname", "override")
+    assert A.resolve("default", {"nickname": "yaml"}).nickname == "override", \
+        "runtime override 覆盖 extra（filehelper 热改的语义）"
+
+
+def test_a_dict_valued_override_is_merged_not_replaced(_isolated_accounts_dir):
+    """``set_override(id, "heartflow", {...})`` **浅合并** —— 不许抹掉同级键。
+
+    抹掉的后果是静默的：阈值/预算这些同级键消失 ⇒ 心流退回默认档，
+    而命令的回执还说"已开启"。
+    """
+    _write(_isolated_accounts_dir, "default",
+           _cfg(heartflow={"enabled": False, "threshold": 0.42, "budget": {"cap": 7}}))
+    OV.set_override("default", "heartflow", {"enabled": True})
+
+    hf = A.resolve("default").heartflow
+    assert hf["enabled"] is True
+    assert hf["threshold"] == 0.42, "同一层 dict 里的其它键必须留下"
+    assert hf["budget"] == {"cap": 7}
+
+
+def test_env_beats_a_placeholder_secret(_isolated_accounts_dir, monkeypatch):
+    """env 凭据是**强制覆盖**：``authcode: ""`` 占位必须被换掉，不是 setdefault。
+
+    旧实现用 ``setdefault`` ⇒ 键已存在（空串）就不动 ⇒ 凭据永远填不进去。
+    """
+    monkeypatch.setenv("WECHATPRO_AUTHCODE", "env-secret-value")
+    _write(_isolated_accounts_dir, "default", _cfg(authcode=""))
+    assert A.resolve("default").authcode == "env-secret-value"
+
+    # 字面值优先于 env
+    _write(_isolated_accounts_dir, "default", _cfg(authcode="file-secret"))
+    assert A.resolve("default").authcode == "file-secret"
+
+    # <key>Env 间接（凭据只放 env 名，不落盘）
+    monkeypatch.setenv("MY_ACCT_CODE", "indirect-secret")
+    _write(_isolated_accounts_dir, "default", _cfg(authcode="", authcodeEnv="MY_ACCT_CODE"))
+    assert A.resolve("default").authcode == "indirect-secret"
+
+
+def test_agent_is_required_and_main_is_forbidden(_isolated_accounts_dir):
+    """``agent`` 缺失 / 为 ``main`` ⇒ **raise**（配置错要当场炸，不许静默降级）。
+
+    串号是安全事故：两个微信号共用一个 agent 上下文，会互相"记得"对方的对话。
+    """
+    _write(_isolated_accounts_dir, "default", {"id": "default"})
+    with pytest.raises(A.AccountError, match="缺 agent"):
+        A.resolve("default")
+
+    _write(_isolated_accounts_dir, "default", _cfg(agent="main"))
+    with pytest.raises(A.AccountError, match="被禁止"):
+        A.resolve("default")
+
+
+def test_a_broken_account_only_skips_itself(_isolated_accounts_dir):
+    """一个坏账号不该让整插件起不来（``load_all`` 跳过它并记 error）。"""
+    _write(_isolated_accounts_dir, "good", _cfg(id="good", agent="wpp-a"))
+    _write(_isolated_accounts_dir, "bad", _cfg(id="bad", agent="main"))
+    loaded = A.load_all()
+    assert set(loaded) == {"good"}
+
+
+# ==================================================== 2. 目录扫描
+
+def test_scan_skips_notes_examples_backups(_isolated_accounts_dir):
+    """``_notes.json`` / ``*.example.json`` / ``*.bak`` 都不是账号（运维手边的东西）。"""
+    for name in ("default.json", "boss2.json"):
+        ( _isolated_accounts_dir / name).write_text("{}", encoding="utf-8")
+    for junk in ("_notes.json", "default.example.json", "acct_example.json",
+                 "default.json.bak", "old.json.tmp", "readme.txt"):
+        (_isolated_accounts_dir / junk).write_text("{}", encoding="utf-8")
+
+    assert A.list_account_ids() == ["boss2", "default"], "名单必须确定且有序"
+    # extra 给了账号表就以它为准（不扫盘 —— 那是 Hermes config.yaml 的注入路径）
+    assert A.list_account_ids({"z": {}, "a": {}}) == ["a", "z"]
+
+
+def test_a_corrupt_account_file_is_loud_but_not_fatal(_isolated_accounts_dir, caplog):
+    ( _isolated_accounts_dir / "default.json").write_text("{ not json", encoding="utf-8")
+    assert A.load_account_file("default") == {}
+    assert any("JSON 解析失败" in r.getMessage() for r in caplog.records), \
+        "坏文件要出声（否则表现成「账号莫名消失」）"
+    ( _isolated_accounts_dir / "list.json").write_text("[1,2]", encoding="utf-8")
+    assert A.load_account_file("list") == {}, "不是对象的也拒"
+
+
+# ==================================================== 3. 凭据永不外泄
+
+def test_fingerprint_is_the_only_credential_form_that_may_be_printed(_isolated_accounts_dir):
+    secret = "super-secret-authcode"
+    acct = A.resolve("default", {"agent": "wpp-a", "authcode": secret})
+    fp = acct.credential_fingerprint
+    assert len(fp) == 12 and fp != secret
+    assert fp == A.fingerprint(secret), "与厂商实例锁同构（sha256[:12]）"
+    assert A.fingerprint("") == "-"
+
+    blob = json.dumps(acct.redacted(), ensure_ascii=False)
+    assert secret not in blob, "redacted() 是跨账号上下文探查用的，绝不能带凭据"
+    assert "tokenKey" not in blob and "webhookSecret" not in blob
+    assert secret not in repr(acct), "dataclass repr 也不许带（它在日志里被到处打印）"
+
+
+def test_token_key_and_webhook_secret_never_reach_the_model_facing_summary(_isolated_accounts_dir):
+    acct = A.resolve("default", {"agent": "wpp-a", "authcode": "a1",
+                                 "tokenKey": "tk-secret", "webhookSecret": "ws-secret"})
+    assert acct.token_key == "tk-secret" and acct.webhook_secret == "ws-secret"
+    assert "tk-secret" not in json.dumps(acct.redacted())
+    assert "ws-secret" not in json.dumps(acct.redacted())
+
+
+# ==================================================== 4. 连接前守卫
+
+def _acct(**kw) -> A.Account:
+    base = dict(agent="wpp-a", authcode="code", self_wxid="wxid_someone")
+    base.update(kw)
+    return A.resolve("default", base) if "agent" in base else None
+
+
+def test_refusal_reasons_are_four_distinct_words(_isolated_accounts_dir, monkeypatch):
+    """四种"不能连"各回各的因由 —— 运维面靠它分辨，别合并成一句。"""
+    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+
+    off = A.resolve("default", {"agent": "wpp-a", "enabled": False, "authcode": "c"})
+    assert "enabled=false" in A.refusal_reason(off)
+
+    no_cred = A.resolve("default", {"agent": "wpp-a"})
+    assert "无 authcode" in A.refusal_reason(no_cred)
+
+    prod = A.resolve("default", {"agent": "wpp-a", "authcode": "c",
+                                 "selfWxid": A.PRODUCTION_WXID})
+    reason = A.refusal_reason(prod)
+    assert reason and "生产 bot" in reason and A.PRODUCTION_WXID in reason
+    assert A.ALLOW_PRODUCTION_ENV in reason, "拒因里要写清逃生阀叫什么"
+
+    ok = A.resolve("default", {"agent": "wpp-a", "authcode": "c", "selfWxid": "wxid_other"})
+    assert A.refusal_reason(ok) is None
+    A.assert_connectable(ok)                      # 不抛
+    with pytest.raises(A.AccountError):
+        A.assert_connectable(prod)
+
+
+def test_the_production_wxid_guard_can_only_be_lifted_explicitly(_isolated_accounts_dir, monkeypatch):
+    """红线 2：生产身份**默认拒连**，逃生阀必须显式置 1（且只在受控环境下用）。"""
+    cfg = {"agent": "wpp-a", "authcode": "c", "selfWxid": A.PRODUCTION_WXID}
+    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+    assert A.refusal_reason(A.resolve("default", cfg)) is not None
+
+    monkeypatch.setenv(A.ALLOW_PRODUCTION_ENV, "1")
+    assert A.refusal_reason(A.resolve("default", cfg)) is None
+
+
+def test_the_production_wxid_is_a_literal_in_the_source():
+    """守卫的判据必须是**源码里的字面量** —— 从 env 读就等于没有守卫。"""
+    import ast
+    from pathlib import Path
+
+    src = Path(A.__file__).read_text(encoding="utf-8")
+    lits = {n.value for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert A.PRODUCTION_WXID in lits, "生产 wxid 必须硬编码在 core/accounts.py"
+    assert A.PRODUCTION_WXID != "" and not A.PRODUCTION_WXID.startswith("wxid_test")
+
+
+def test_connectable_filters_and_reports(_isolated_accounts_dir, caplog):
+    _write(_isolated_accounts_dir, "good", _cfg(id="good", agent="wpp-a", authcode="c"))
+    _write(_isolated_accounts_dir, "nocred", _cfg(id="nocred", agent="wpp-a"))
+    _write(_isolated_accounts_dir, "off", _cfg(id="off", agent="wpp-a",
+                                               authcode="c", enabled=False))
+    ok = A.connectable()
+    assert [a.id for a in ok] == ["good"]
+    assert sum("跳过账号" in r.getMessage() for r in caplog.records) == 2, \
+        "每跳过一条都要留痕（否则线上只看到「账号怎么少了」）"
+
+
+# ==================================================== 5. 多账号 token
+
+def test_credential_token_is_deterministic_not_insertion_ordered(_isolated_accounts_dir):
+    """取**字典序第一个可连账号**的 authcode（旧实现取 dict 首个 ⇒ 多账号下不稳定）。
+
+    这个 token 供 Hermes ``_adapter_credential_fingerprint`` 做「同一 authcode
+    被两个 adapter 连」的冲突检测。
+    """
+    a = A.resolve("a", {"agent": "wpp-a", "authcode": "code-a"})
+    b = A.resolve("b", {"agent": "wpp-b", "authcode": "code-b"})
+    assert A.credential_token([b, a]) == "code-a"
+    assert A.credential_token([a, b]) == "code-a", "与传入顺序无关"
+    assert A.credential_token([]) == "", "没有可连账号就不参与冲突检测"
+
+    no_cred = A.resolve("z", {"agent": "wpp-z"})
+    assert A.credential_token([no_cred, b]) == "code-b", "无凭据的账号不参与"
+
+
+# ==================================================== 6. credentials：只答"有没有"
+
+def test_credentials_never_raises_and_ignores_empty_shells(monkeypatch):
+    """``credentials`` 回答「**有没有**凭据」，永不 raise（Hermes 凭证门用它）。
+
+    随仓库分发的空壳 ``default.json``（``authcode: ""``）**不算配置好** ——
+    否则平台会被启用然后连不上厂商、反复重试。
+    """
+    assert CR.any_configured({"a": {"authcode": ""}}) is False
+    assert CR.any_configured({"a": {"authcode": "x"}}) is True
+    assert CR.any_configured({}) is False
+    assert CR.any_configured(None) is False
+    assert CR.any_configured({"a": ["not-a-dict"]}) is False
+
+    monkeypatch.setenv("SOME_CODE_ENV", "v")
+    assert CR.any_configured({"a": {"authcodeEnv": "SOME_CODE_ENV"}}) is True
+    monkeypatch.delenv("SOME_CODE_ENV")
+    assert CR.any_configured({"a": {"authcodeEnv": "SOME_CODE_ENV"}}) is False
+
+
+def test_env_accounts_json_is_optional_and_forgiving(monkeypatch):
+    assert CR.env_accounts() is None
+    monkeypatch.setenv("WECHATPRO_ACCOUNTS_JSON", "{ not json")
+    assert CR.env_accounts() is None, "坏 JSON 不许抛（凭证门路径上没有从容失败）"
+    monkeypatch.setenv("WECHATPRO_ACCOUNTS_JSON", "{}")
+    assert CR.env_accounts() is None, "空表等于没配"
+    monkeypatch.setenv("WECHATPRO_ACCOUNTS_JSON", '{"a": {"authcode": "x"}}')
+    assert CR.env_accounts() == {"a": {"authcode": "x"}}
+
+
+def test_the_probe_reads_the_same_directory_as_the_loader(_isolated_accounts_dir, monkeypatch):
+    """★ 探针（credentials）与账号加载器（accounts）**必须认同一个目录**。
+
+    这条防的是 **F1 同形故障的另一个触发条件**：``credentials.load_local_accounts()``
+    原本写死 ``plugin/accounts/``，而 ``accounts.accounts_dir()`` 认
+    ``WECHATPRO_ACCOUNTS_DIR`` 覆盖 ⇒ 运维把账号目录挪走后，adapter 从新目录
+    读得到账号，探针却只看旧目录 ⇒ seed/判定为假 ⇒ 平台注册了但**永不启用**
+    （``gateway_state.platforms = {}``、``No messaging platforms enabled.``）。
+
+    这**不是**测试专用的便利设置：判定分叉就是本模块存在的原因，两处各写一份
+    "目录在哪"迟早再分一次。
+    """
+    _write(_isolated_accounts_dir, "default", {"id": "default", "authcode": "c"})
+
+    assert CR.any_local_account_configured() is True, \
+        "探针必须看 WECHATPRO_ACCOUNTS_DIR 指向的目录（与 adapter 同口径）"
+    assert set(CR.load_local_accounts()) == {"default"}
+    assert A.list_account_ids() == ["default"], "两侧得到的账号名单必须一致"
+
+
+def test_the_probe_uses_the_same_file_filter(_isolated_accounts_dir):
+    """``_notes.json`` 这类运维随手文件，**两侧都不算账号**。
+
+    只有一侧滤掉更糟：探针认它（平台被启用）而加载器不认（一个账号都没有），
+    表现就是"启用了但静默不干活"。所以筛选也必须同源。
+    """
+    ( _isolated_accounts_dir / "_notes.json").write_text(
+        json.dumps({"authcode": "oops-should-not-count"}), encoding="utf-8")
+    assert CR.any_local_account_configured() is False
+    assert A.list_account_ids() == []
+
+
+def test_the_probe_keys_accounts_by_file_name_not_by_the_id_field(_isolated_accounts_dir):
+    """账号的身份 = **文件名**（``resolve(id)`` 就是按文件名读的）。
+
+    若探针按 ``cfg["id"]`` 编号，一个 ``boss2.json``（内含 ``"id": "default"``）
+    会让探针喊「已配置」，而 ``resolve("default")`` 读的是**另一个文件**
+    —— 又一个"启用了但对不上号"。
+    """
+    _write(_isolated_accounts_dir, "boss2", {"id": "default", "authcode": "c"})
+    assert set(CR.load_local_accounts()) == {"boss2"}, "键必须是文件名"
+    assert A.list_account_ids() == ["boss2"]
+
+
+def test_local_accounts_loader_skips_the_example_file(_isolated_accounts_dir):
+    _write(_isolated_accounts_dir, "real", {"id": "real", "authcode": "x"})
+    ( _isolated_accounts_dir / "default.example.json").write_text(
+        json.dumps({"id": "default", "authcode": "SHOULD-NEVER-LOAD"}), encoding="utf-8")
+    ( _isolated_accounts_dir / "broken.json").write_text("{oops", encoding="utf-8")
+
+    got = CR.load_local_accounts()
+    assert set(got) == {"real"}, "范例与坏文件都不算账号"
+    assert CR.any_local_account_configured() is True
+    assert CR.any_configured(got) is True
+
+
+def test_the_example_shell_alone_does_not_count_as_configured(_isolated_accounts_dir):
+    """只有随仓库分发的空壳时，「已配置」必须是假 —— 否则平台空转重试。"""
+    _write(_isolated_accounts_dir, "default", {"id": "default", "authcode": ""})
+    assert CR.any_local_account_configured() is False

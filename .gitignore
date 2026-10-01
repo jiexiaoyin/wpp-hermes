@@ -1,0 +1,28 @@
+# 缓存
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 日志 / 临时
+*.log
+*.tmp
+*.orig
+*.rej
+
+# ⚠️ 凭证：账号文件含 authcode，**禁止提交**
+#    只放行 *.example.json（schema 范例，里面必须是占位值）
+plugin/accounts/*.json
+!plugin/accounts/*.example.json
+
+# 本地 env（可能含 DB 口令 / LLM key）
+.env
+.env.*
+!.env.example
+
+# 部署产物与备份（不属于源码）
+deploy.sh
+*.tar.gz
+*.zip
