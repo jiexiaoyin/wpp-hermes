@@ -26,3 +26,6 @@ plugin/accounts/*.json
 deploy.sh
 *.tar.gz
 *.zip
+
+# 技能工坊暂存区（临时产物）
+skills-workshop-staging/
