@@ -6,8 +6,8 @@
     python3 tools/gen_vendor_defs.py            # 写盘
     python3 tools/gen_vendor_defs.py --check    # 只校验（deploy.sh 回归门）
 
-源（旧树，冻结蓝本）: /root/dev/wpp-hermes/plugin/tools_data_extra.py
-源 SHA-256: 8cc698d3a83c1a3de90688dab42a749d74333926ff5f4cbabc28360951fe16e1
+源（本仓蓝本）: /root/dev/wpp-hermes-py2/tools/vendor_source/tools_data_extra.py
+源 SHA-256: e83262d7c97ddfd6047bc3bcacdc374fa97b3628db992e80709f9197231a6750
 派生组数: 15，工具条数: 107（已排除聚合项: ALL_EXTRA_TOOLS）
 
 `GROUPS` 是唯一真源；新 `registration.py` 直接 `for group, defs in GROUPS:` 迭代，
@@ -85,7 +85,7 @@ GROUPS: tuple[tuple[str, tuple[dict, ...]], ...] = (
          'params': {'videoData': {'type': 'string', 'required': True, 'desc': '视频 base64'},
                     'thumbData': {'type': 'string', 'required': True, 'desc': '缩略图 base64'}}},
         {'name': 'wpp_fc_upload_image',
-         'description': '上传单张朋友圈图片. imageData=图片 base64',
+         'description': '上传单张朋友圈图片（base64）。发布前置步骤。',
          'endpoint': '/FriendCircle/UploadImage',
          'params': {'imageData': {'type': 'string', 'required': True, 'desc': '图片 base64'}}},
         {'name': 'wpp_fc_upload_images',
@@ -137,7 +137,7 @@ GROUPS: tuple[tuple[str, tuple[dict, ...]], ...] = (
                             'desc': '媒体访问凭据（media_key_from_circle_detail）'},
                     'url': {'type': 'string', 'required': True, 'desc': '媒体地址'}}},
         {'name': 'wpp_fc_publish_raw',
-         'description': '发布朋友圈（带可见范围：黑名单/指定可见/提醒查看；content 为原始发布内容）。',
+         'description': '直接以原始 XML 发朋友圈，可带黑名单/指定可见。⚠️ 高危：绕过常规发布守卫，除明确要求不要用。',
          'endpoint': '/FriendCircle/MessagesRaw',
          'params': {'content': {'type': 'string', 'required': True, 'desc': '发布内容'},
                     'private': {'type': 'integer', 'desc': '0=公开 1=私密，默认 0'},
@@ -243,29 +243,29 @@ GROUPS: tuple[tuple[str, tuple[dict, ...]], ...] = (
     )),
     ("extra-tenpay", (
         {'name': 'wpp_tenpay_ge_ma_skd_qcode',
-         'description': '自定义个人收款单 (商家微信收款码)',
+         'description': '生成商家个人收款单/收款码（指定金额、备注）。会真实产生收款单，涉及资金，先确认金额与对象。',
          'endpoint': '/TenPay/GeMaSkdPayQCode',
          'params': {'Money': {'type': 'number', 'required': True, 'desc': '金额(分)'},
                     'Name': {'type': 'string', 'desc': '名称'},
                     'Remark': {'type': 'string', 'desc': '备注'},
                     'Wxid': {'type': 'string', 'required': True, 'desc': '收款 wxid'}}},
         {'name': 'wpp_tenpay_sj_skd_qcode',
-         'description': '自定义商家收款单',
+         'description': '生成商家收款单（商户维度）。涉及资金，调用前确认金额与备注。',
          'endpoint': '/TenPay/SjSkdPayQCode',
          'params': {'Money': {'type': 'number', 'required': True, 'desc': '金额(分)'},
                     'Name': {'type': 'string', 'desc': '名称'},
                     'Remark': {'type': 'string', 'desc': '备注'},
                     'Wxid': {'type': 'string', 'required': True, 'desc': '收款 wxid'}}},
         {'name': 'wpp_tenpay_open_redpacket',
-         'description': '拆开红包 (redPacketId 来自 inbound 红包事件)',
+         'description': '拆红包（Openwxhb）。redPacketId 取自 inbound 红包事件。',
          'endpoint': '/TenPay/Openwxhb',
          'params': {'redPacketId': {'type': 'string', 'required': True, 'desc': '红包 ID'}}},
         {'name': 'wpp_tenpay_get_encrypt_info',
-         'description': '获取红包/支付的加密信息 (解密 inbound 红包事件)',
+         'description': '解密红包/支付的加密信息，取得后续拆包/收款所需参数。',
          'endpoint': '/TenPay/GetEncryptInfo',
          'params': {'info': {'type': 'string', 'required': True, 'desc': '信息'}}},
         {'name': 'wpp_tenpay_confirm_pre_transfer',
-         'description': '确认支付',
+         'description': '确认转账支付。需要支付密码，属最高风险操作：无明确授权不得调用。',
          'endpoint': '/TenPay/ConfirmPreTransferApi',
          'params': {'wxid': {'type': 'string', 'required': True, 'desc': 'wxid'},
                     'transferId': {'type': 'string', 'required': True, 'desc': '转账 ID'},
@@ -274,13 +274,13 @@ GROUPS: tuple[tuple[str, tuple[dict, ...]], ...] = (
                     'payPassword': {'type': 'string', 'desc': '支付密码'},
                     'reqKey': {'type': 'string', 'desc': '请求 key'}}},
         {'name': 'wpp_tenpay_generate_pay_qcode',
-         'description': '生成自定义收款二维码',
+         'description': '生成自定义金额的收款二维码。',
          'endpoint': '/TenPay/GeneratePayQCode',
          'params': {'money': {'type': 'string', 'required': True, 'desc': '收款金额，单位元，最多两位小数'},
                     'name': {'type': 'string', 'required': True, 'desc': '收款项目名称'},
                     'wxid': {'type': 'string', 'desc': 'wxid'}}},
         {'name': 'wpp_tenpay_redpacket_list',
-         'description': '查看红包领取列表',
+         'description': '查红包领取明细列表（wxid + xml + 分页 offset/size）。',
          'endpoint': '/TenPay/GetRedPacketListApi',
          'params': {'wxid': {'type': 'string', 'required': True, 'desc': 'wxid'},
                     'xml': {'type': 'string', 'desc': 'XML'},
@@ -294,7 +294,7 @@ GROUPS: tuple[tuple[str, tuple[dict, ...]], ...] = (
                     'TimingIdentifier': {'type': 'string', 'desc': '定时标识'},
                     'Xml': {'type': 'string', 'desc': 'XML'}}},
         {'name': 'wpp_tenpay_receive_no_encryption',
-         'description': '打开红包 (无加密兼容模式). xml=红包消息内容',
+         'description': '打开红包的无加密兼容模式。Xml 是红包消息原文。',
          'endpoint': '/TenPay/ReceivewxhbWithoutEncryption',
          'params': {'Xml': {'type': 'string', 'required': True, 'desc': 'XML'}}},
     )),

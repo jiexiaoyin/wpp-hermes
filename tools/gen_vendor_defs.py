@@ -17,9 +17,9 @@
 
 ## 输入 / 输出
 
-输入（旧树，只读，冻结蓝本）：
-    /root/dev/wpp-hermes/plugin/tools_data.py        （20 组 / 112 条）
-    /root/dev/wpp-hermes/plugin/tools_data_extra.py  （15 组 / 107 条）
+输入（本仓蓝本，唯一真源）：
+    tools/vendor_source/tools_data.py        （20 组 / 112 条）
+    tools/vendor_source/tools_data_extra.py  （15 组 / 107 条）
 
 输出（本树，生成物，**禁止手改**）：
     plugin/toolkit/vendor_defs.py
@@ -74,8 +74,13 @@ from typing import Any, Iterable
 REPO = Path(__file__).resolve().parent.parent
 #: 产物目录
 OUT_DIR = REPO / "plugin" / "toolkit"
-#: 旧树（冻结蓝本）。只读，绝不修改。
-LEGACY = Path("/root/dev/wpp-hermes/plugin")
+#: 蓝本源表目录（**本仓内，唯一真源**）。
+#:
+#: 2026-10-18 变更：原来指向外部旧树 ``/root/dev/wpp-hermes/plugin`` —— 那棵树同时
+#: 是"已废弃的扁平实现"和"仍在被本生成器读取的蓝本"，身份冲突：删它会把生成器打断，
+#: 留它又让"唯一真源"分裂成两处（有人改旧树、有人改本仓，生成物到底反映谁说不清）。
+#: 现在蓝本已复制进本仓（复制时逐文件 SHA-256 与原文件比对一致），旧树降级为历史。
+SOURCE_DIR = REPO / "tools" / "vendor_source"
 
 #: 组变量名的正则：顶层赋值的 ``<NAME>_TOOLS =``
 _GROUP_DEF = re.compile(r"^([A-Z_]+)_TOOLS\s*=", re.M)
@@ -195,7 +200,7 @@ _HEADER = '''"""WPP 厂商端点定义表 —— {product}
     python3 tools/gen_vendor_defs.py            # 写盘
     python3 tools/gen_vendor_defs.py --check    # 只校验（deploy.sh 回归门）
 
-源（旧树，冻结蓝本）: {src}
+源（本仓蓝本）: {src}
 源 SHA-256: {sha256}
 派生组数: {ngroups}，工具条数: {ntools}{excl}
 
@@ -294,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     all_names: list[str] = []
 
     for src_name, out_name, want_unique, want_groups in TARGETS:
-        rows, meta = collect(LEGACY / src_name, src_name.replace(".py", ""))
+        rows, meta = collect(SOURCE_DIR / src_name, src_name.replace(".py", ""))
         names = _tool_names(rows)
         _assert_counts(src_name, names, want_unique, len(rows), want_groups)
         sources[src_name] = rows
