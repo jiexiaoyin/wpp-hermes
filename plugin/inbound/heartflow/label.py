@@ -28,8 +28,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 #: 命中信号种类（落 ``wpp_hf_ledger.engage_signal``，供 ``/heartflow status`` 分布与审计）
 HF_ENGAGE_SIGNALS: tuple[str, ...] = (

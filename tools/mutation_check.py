@@ -3208,7 +3208,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("★ 响应字段名大小写写错（Image → image ⇒ 每条都判「missing Image」）",
          '            b64 = _str(_as_record(_as_record(resp).get("Data")).get("Image"))',
          '            b64 = _str(_as_record(_as_record(resp).get("Data")).get("image"))'),
-        # ⚠️ 这一条的锚点**必须带整行**（含 ``# noqa`` 与那串中文注释）：只锚到
+        # ⚠️ 这一条的锚点**必须带整行**（含 noqa 指令与那串中文注释）：只锚到
         # ``except Exception as exc:`` 的话，替换后会留下 ``: —— 富化失败绝不能冒泡…``
         # 这种悬空尾巴 ⇒ 收集期 SyntaxError ⇒ 脚本自曝 BROKEN（BROKEN 不算杀，
         # 等于这条白写）。第一版就是踩了这个 —— 而 BROKEN 只打印最后一行，
@@ -4141,7 +4141,7 @@ def _restore_now(*_args: Any) -> None:
             _CURRENT[0].write_text(_ORIGINAL[0], encoding="utf-8")
             _purge_bytecode(_CURRENT[0])
             print(f"\n⚠️  收到中断信号：已把 {_CURRENT[0]} 还原（不留变异体在盘上）")
-        except Exception:  # noqa: BLE001 —— 还原失败也要让退出码说话
+        except Exception:  # noqa: S110, BLE001 —— 还原失败也要让退出码说话
             pass
     raise SystemExit(130)
 

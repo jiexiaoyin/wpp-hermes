@@ -46,9 +46,10 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Mapping, NamedTuple, Sequence
+from typing import Any, NamedTuple
 
 from .budget import hf_local_hour
 from .label import as_hf_engage_signal, hf_ambient_p, is_hf_sample_informative
@@ -222,7 +223,7 @@ class HfLayerSample:
     sent_at: int | None = None
 
     @classmethod
-    def from_db_row(cls, row: Mapping[str, Any]) -> "HfLayerSample":
+    def from_db_row(cls, row: Mapping[str, Any]) -> HfLayerSample:
         """数据层行 → 样本（只做形状转换，不判断合法性 —— 合法性归 :func:`aggregate_hf_layer_stats`）。"""
         raw_at = row.get("sent_at")
         return cls(
@@ -439,7 +440,7 @@ def load_hf_layer_stats(account_id: str) -> int:
 
     失败降级：空缓存启动，首个 sweep 会重算补全 —— 预热失败**不该**挡住账号启动。
     """
-    from ...data import repo_hf          # 延迟导入：本模块不许在加载期拉进第三方依赖（F5）
+    from ...data import repo_hf  # 延迟导入：本模块不许在加载期拉进第三方依赖（F5）
     try:
         rows = repo_hf.list_layer_stats(account_id)
     except Exception as exc:  # noqa: BLE001 —— 预热失败降级，见 docstring
@@ -488,7 +489,7 @@ def load_hf_group_hour_counts(account_id: str, now_sec: int) -> dict[str, int]:
     ⇒ 一轮 sweep 只查一次。失败**向上抛**（让调用方各自 warn + 决定降级策略），
     成功才写缓存（失败不留脏缓存）。
     """
-    from ...data import repo_messages   # 延迟导入，同上
+    from ...data import repo_messages  # 延迟导入，同上
 
     with _lock:
         hit = _hour_counts.get(account_id)
@@ -538,7 +539,7 @@ def maybe_recompute_hf_layer_stats(
     ``label_window_sec`` / ``ambient_max`` 必须由调用方从**它与调阈侧共用的那一份**
     ``LRN`` 传入（见模块 docstring 的"故意签名分歧"）。
     """
-    from ...data import repo_hf          # 延迟导入，同上
+    from ...data import repo_hf  # 延迟导入，同上
 
     LAY = resolve_hf_layered_cfg(cfg)
     if not LAY.enabled:

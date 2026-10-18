@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fix_new_msg_id_drift import connect  # noqa: E402
+from fix_new_msg_id_drift import connect
 
 T = "wpp_messages"
 

@@ -61,7 +61,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from .parser import MT_REVOKE, MT_SYSTEM, MT_VOICE, WppMessage
 
@@ -111,8 +112,8 @@ class InboundDebouncer:
         on_flush: FlushFn,
         *,
         interval_ms: int = DEFAULT_DEBOUNCE_MS,
-        is_control_command: Optional[Callable[[WppMessage], bool]] = None,
-        on_error: Optional[ErrorFn] = None,
+        is_control_command: Callable[[WppMessage], bool] | None = None,
+        on_error: ErrorFn | None = None,
     ) -> None:
         self.account_id = account_id
         self.on_flush = on_flush
@@ -222,7 +223,7 @@ class InboundDebouncer:
         if exc is not None:  # pragma: no cover —— ``_flush_batch`` 自己已经吞过一遍
             log.warning("[WPP:%s DEBOUNCE] 派发链异常: %s", self.account_id, exc)
 
-    async def _run_chain(self, prev: Optional[asyncio.Task[None]], key: str,
+    async def _run_chain(self, prev: asyncio.Task[None] | None, key: str,
                          batch: list[WppMessage]) -> None:
         if prev is not None:
             await asyncio.gather(prev, return_exceptions=True)

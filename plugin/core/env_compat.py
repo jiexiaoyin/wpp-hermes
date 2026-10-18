@@ -44,7 +44,7 @@ def secret_env(name: str, default: str = "") -> str:
         return str(os.environ.get(name) or default)
     try:
         val: Any = get_scoped_secret(name, None)
-    except Exception:  # noqa: BLE001 —— scope 异常 ⇒ 不回退进程 env（见 docstring）
+    except Exception:
         log.warning("[WPP] scoped secret 读取失败: %s", name, exc_info=True)
         return default
     return default if val is None else str(val)
@@ -63,7 +63,7 @@ def gate_env(name: str, default: str = "") -> str:
         return str(os.environ.get(name) or default).strip()
     try:
         return str(platform_gate_env(name, default) or default)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.warning("[WPP] per-profile gate env 读取失败: %s", name, exc_info=True)
         return default
 

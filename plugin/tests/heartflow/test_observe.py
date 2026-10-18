@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import ast
+import sys
 import re
 from datetime import datetime
 from pathlib import Path
@@ -576,8 +577,7 @@ def test_observe_never_imports_learn_layer_or_profile():
 
 def test_module_level_imports_have_no_third_party_dependency():
     """加载期只许 stdlib + 本包相对导入（本模块在注册链上，见 F5）。"""
-    stdlib = {"__future__", "logging", "math", "threading",
-              "dataclasses", "datetime", "decimal", "typing"}
+    stdlib = set(sys.stdlib_module_names) | {"__future__"}
     tree = ast.parse(OBSERVE_SRC)
     top: list[str] = []
     for node in tree.body:                          # 只看模块顶层，不看函数体

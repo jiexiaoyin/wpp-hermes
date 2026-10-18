@@ -45,7 +45,8 @@ import 不了 —— 模块级 ``from gateway.config import Platform`` 是 Herme
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 #: 网关只认这三个（见模块 docstring 的口径 1）
 ALLOWLIST = "allowlist"

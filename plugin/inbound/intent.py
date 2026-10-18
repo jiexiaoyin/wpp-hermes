@@ -77,8 +77,9 @@ import logging
 import math
 import os
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 

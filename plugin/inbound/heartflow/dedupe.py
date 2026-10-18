@@ -40,8 +40,9 @@ import math
 import re
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 from .runtime import CACHE_REGISTRY
 
@@ -358,7 +359,7 @@ def load_hf_dedupe_history(account_id: str, now_sec: int | None = None) -> int:
 
     返回灌进去的条数；**不抛**（预热失败 = 复读闸从空开始，比不预热松，但不该挡住接入）。
     """
-    from ...data import repo_messages       # 延迟导入：加载期不许拉第三方依赖（F5）
+    from ...data import repo_messages  # 延迟导入：加载期不许拉第三方依赖（F5）
 
     ts = int(time.time()) if now_sec is None else int(now_sec)
     cfg = resolve_dedupe_cfg(None)

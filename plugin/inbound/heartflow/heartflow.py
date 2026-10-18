@@ -73,13 +73,13 @@ import math
 import re
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..persist import pick_new_msg_id
-from . import budget, dedupe, label
+from . import budget, dedupe, label, observe, profile
 from . import learn as L
-from . import observe, profile
 from .runtime import CACHE_REGISTRY
 
 log = logging.getLogger(__name__)
@@ -724,7 +724,7 @@ async def judge_heartflow(inp: HfJudgeInput, cfg: Mapping[str, Any] | None,
     ⚠️ ``model`` 缺失 ⇒ **抛错**（不是回落）：v1.4.0 老板拍板"消除 plugin hardcode"，
     模型名必须由 accounts JSON 提供。静默回落的表现是"改了配置但线上没改"。
     """
-    from ...llm import judge as judge_mod      # 延迟导入：保持模块级零第三方依赖
+    from ...llm import judge as judge_mod  # 延迟导入：保持模块级零第三方依赖
 
     creds = creds if creds is not None else judge_mod.resolve_judge_creds()
     if not getattr(creds, "api_key", ""):
@@ -1138,7 +1138,7 @@ async def maybe_engage(adapter: Any, acct: Any, msg: Any, pipeline: Any = None) 
     account_id = str(getattr(acct, "id", "") or getattr(acct, "account_id", ""))
     group_id = getattr(msg, "chatroom_id", None) or getattr(msg, "peer_id", "")
     content = getattr(msg, "content", "") or ""
-    self_wxid = getattr(acct, "self_wxid", "") or ""
+    getattr(acct, "self_wxid", "") or ""
     nickname = getattr(acct, "nickname", "") or ""
     candidate_at = getattr(msg, "timestamp", None)
     now_ms = int(time.time() * 1000)
@@ -1226,7 +1226,7 @@ async def maybe_engage(adapter: Any, acct: Any, msg: Any, pipeline: Any = None) 
         log.debug("[WPP HF] skip (score=%.2f, threshold=%.2f): group=%s",
                   result.overall_score, eff.threshold, group_id)
         return False
-    except Exception as exc:  # noqa: BLE001 —— 心流坏了不该让这条消息整体失败
+    except Exception as exc:
         log.warning("[WPP HF] judge error (skip): account=%s group=%s: %s",
                     account_id, group_id, exc, exc_info=True)
         return False
@@ -1282,9 +1282,9 @@ def judge_interval_count() -> int:
 __all__ = [
     "HF_DEFAULTS",
     "HF_DIMENSIONS",
+    "HF_JSON_REMINDER",
     "HF_JUDGE_MAX_TOKENS",
     "HF_JUDGE_SYSTEM_PROMPT",
-    "HF_JSON_REMINDER",
     "HF_PENDING_SEND_ABSORB_SEC",
     "HF_PENDING_SEND_TTL_SEC",
     "HF_RAW_BUFFER_MAX",

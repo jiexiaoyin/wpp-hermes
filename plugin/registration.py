@@ -29,7 +29,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ def _step(label: str, fn: Callable[[], Any]) -> Any:
     """跑一个注册子步骤，失败只记日志、不向上抛（保证后续步骤继续）。"""
     try:
         return fn()
-    except Exception as exc:  # noqa: BLE001 — 故意兜底：单点失败不得中断整批注册
+    except Exception as exc:
         log.warning("[WPP] %s 注册失败: %s", label, exc, exc_info=True)
         return None
 

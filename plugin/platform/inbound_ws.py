@@ -36,7 +36,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ class WppWsClient:
             from ..core import metrics
 
             metrics.set_ws_connected(False)
-        except Exception:  # noqa: BLE001 —— 埋点失败绝不能挡住停机
+        except Exception:  # noqa: S110, BLE001 —— 埋点失败绝不能挡住停机
             pass
         if self._task is not None:
             self._task.cancel()
@@ -187,7 +188,7 @@ class WppWsClient:
             from ..core import metrics
 
             getattr(metrics, fn)(*args)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: S110, BLE001 —— noqa: BLE001
             pass
 
     async def _sleep_interruptible(self, seconds: float) -> bool:
@@ -195,7 +196,7 @@ class WppWsClient:
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=seconds)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
     def _emit(self, reason: str) -> None:

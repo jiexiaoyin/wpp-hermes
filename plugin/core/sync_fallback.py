@@ -61,7 +61,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -189,7 +190,7 @@ class SyncFallback:
         for t in timers:
             try:
                 await t
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (asyncio.CancelledError, Exception):  # noqa: S110, BLE001 —— noqa: BLE001
                 pass
         pending, self._tasks = self._tasks, set()
         for t in pending:

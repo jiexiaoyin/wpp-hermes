@@ -139,14 +139,14 @@ def _persist_tool_outbound(account_id: str, peer_id: str, content: str, resp,
             from ..core import metrics
 
             metrics.inc_outbound_persist(True)
-        except Exception:  # noqa: BLE001 —— 埋点失败不影响落库结论
+        except Exception:  # noqa: S110, BLE001 —— 埋点失败不影响落库结论
             pass
     except Exception as exc:  # noqa: BLE001
         try:
             from ..core import metrics
 
             metrics.inc_outbound_persist(False)
-        except Exception:  # noqa: BLE001 —— 埋点失败绝不能盖住原始错误
+        except Exception:  # noqa: S110, BLE001 —— 埋点失败绝不能盖住原始错误
             pass
         log.warning("[WPP:%s] 工具出站落库失败: %s", account_id, exc)
 
@@ -175,7 +175,6 @@ def _send_payload(resp, *, msg_id=None, **extra) -> dict:
 
 def register_msg_tools(ctx, adapter_getter) -> None:
     """注册 msg 域工具（迁移自 msg-meta.ts）。adapter_getter() 返回当前 adapter。"""
-    from ..core.api_client import WppApiError
 
     def acct(adapter, params):
         # ``default`` 是 schema 的**占位哨兵**，不是真账号名：单账号部署里账号文件
@@ -240,7 +239,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             base64_str = await _resolve_to_base64(img)
         resp = await client.send_image(to_wxid, base64_str)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         msg_id = data.get("Newmsgid") or data.get("Msgid")
         payload = _send_payload(resp, msg_id=msg_id)
         if payload.get("ok"):
@@ -275,7 +274,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             b64 = _b64.b64encode(f.read()).decode()
         resp = await client.send_image(to_wxid, b64)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         msg_id = data.get("Newmsgid") or data.get("Msgid")
         payload = _send_payload(resp, msg_id=msg_id, image_path=out_path)
         if payload.get("ok"):
@@ -320,7 +319,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         # 文件消息走 UploadFile + ShareLink Type=6（旧 /Msg/UploadFile 端点不存在）
         resp = await client.send_file_via_app(to_wxid, fname, b64)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         payload = _send_payload(resp, msg_id=data.get("Msgid"), voice_path=out_path)
         if payload.get("ok"):
             _persist_tool_outbound(aid, to_wxid, f"[文件] {fname}", resp, msg_type="file")
@@ -368,7 +367,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             return {"error": f"朋友圈发布无权限 ({caller} 不在白名单)"}
         resp = await client.publish_circle_images(title, image_base64_list)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         return _send_payload(resp, msg_id=data.get("Newmsgid"), code=resp.get("Code"))
 
     # publishVideo: 发布视频朋友圈（带 guard）
@@ -393,7 +392,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             return {"error": f"朋友圈发布无权限 ({caller} 不在白名单)"}
         resp = await client.publish_circle_video(title, video_base64, thumb_base64)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         return _send_payload(resp, msg_id=data.get("Newmsgid"), code=resp.get("Code"))
 
     # publishText: 发布文字朋友圈（带 guard）
@@ -416,7 +415,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             return {"error": f"朋友圈发布无权限 ({caller} 不在白名单)"}
         resp = await client.publish_circle_text(title)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         return _send_payload(resp, msg_id=data.get("Newmsgid"), code=resp.get("Code"))
 
     # Phase 5.2: AI 配图朋友圈（Hermes image_gen 注册表生成配图 → 自动发布朋友圈）
@@ -470,7 +469,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         # 发布朋友圈
         resp = await client.publish_circle_images(title, base64_list)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         return _send_payload(resp, msg_id=data.get("Newmsgid"), code=resp.get("Code"),
                              image_count=len(base64_list))
 
@@ -483,7 +482,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         aid, client = acct(adapter, params)
         resp = await client.send_emoji(to_wxid, emoji_md5, emoji_size)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
         if payload.get("ok"):
             _persist_tool_outbound(aid, to_wxid, f"[表情] {emoji_md5}".strip(),
@@ -500,7 +499,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         aid, client = acct(adapter, params)
         resp = await client.share_card(to_wxid, card_wxid, card_nickname, card_alias)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
         if payload.get("ok"):
             _persist_tool_outbound(aid, to_wxid, f"[名片] {card_nickname}".strip(),
@@ -525,7 +524,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             params.get("username", params.get("xcxUsername", "")),
         )
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
         if payload.get("ok"):
             _persist_tool_outbound(
@@ -545,7 +544,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         aid, client = acct(adapter, params)
         resp = await client.share_link(to_wxid, title, desc, link_url, thumb_url)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
         if payload.get("ok"):
             _persist_tool_outbound(aid, to_wxid, f"[链接] {title}".strip(),
@@ -560,7 +559,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         aid, client = acct(adapter, params)
         resp = await client.send_group_mass_text(to_ids, content)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
         if payload.get("ok"):
             # 群发是 N 个目标共用一次响应；逐目标落库（同一 msgId 在不同 peer 下唯一）。
@@ -579,7 +578,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         aid, client = acct(adapter, params)
         resp = await client.send_file_v2(to_wxid, file_name, base64)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
         if payload.get("ok"):
             _persist_tool_outbound(aid, to_wxid, f"[文件] {file_name}", resp, msg_type="file")
@@ -596,7 +595,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         b64 = await _resolve_to_base64(file_url)
         resp = await client.send_file_via_app(to_wxid, file_name, b64)
         data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
+        data.get("BaseResponse") or {}
         payload = _send_payload(resp, msg_id=data.get("Msgid"))
         if payload.get("ok"):
             _persist_tool_outbound(aid, to_wxid, f"[文件] {file_name}", resp, msg_type="file")
@@ -622,7 +621,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             fname = voice.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "voice.mp3"
             resp = await client.send_file_via_app(to_wxid, fname, base64_str)
             data = resp.get("Data") or {}
-            br = data.get("BaseResponse") or {}
+            data.get("BaseResponse") or {}
             payload = _send_payload(resp, msg_id=data.get("Msgid"), degraded="file")
             if payload.get("ok"):
                 _persist_tool_outbound(aid, to_wxid, f"[文件] {fname}", resp, msg_type="file")

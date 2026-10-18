@@ -28,7 +28,6 @@ W-Q1 的回查 SQL 有两个判据**在 stub 上验不出来**，只能落到真
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -82,7 +81,7 @@ def main(argv: list[str]) -> int:
 
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
+    except Exception:  # noqa: S110, BLE001 —— 异常不得冒泡打断整批（收尾/探针路径）
         pass
 
     load_env_file(args.env_file)
@@ -96,8 +95,8 @@ def main(argv: list[str]) -> int:
     #    两个模块实例（同一个库、两条连接），本探针跨层要的是**同一份**。这一点在
     #    ``probe_v2b_repos.py`` 里已经用血换过一次教训。
     sys.path.insert(0, str(Path(args.plugin).resolve().parent))
-    from plugin.data import db, repo_messages                  # noqa: E402
-    from plugin.inbound import quote_ref                       # noqa: E402
+    from plugin.data import db, repo_messages
+    from plugin.inbound import quote_ref
 
     print(f"● 目标 {db.describe()}（**必须**是 _test 库）")
     if not base.endswith("_test"):

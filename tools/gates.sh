@@ -13,6 +13,13 @@
 #   tools/gates.sh <root>     # 指到别的树（如部署目录）自查
 set -u
 
+# 剥掉**生产 profile 的环境变量**：门禁跑在运维 shell 里，而这些变量是给 gateway 进程用的。
+# 不清会把门禁变成假红（2026-10-18 实测：JUDGE_BASE_URL 让 verify_judge 期望默认端点失败；
+# WECHATPRO_SEND_ALLOWLIST 让 2 个 pytest 用例假红）。清理是幂等的，没设也无副作用。
+unset JUDGE_API_KEY JUDGE_BASE_URL JUDGE_FALLBACK_API_KEY JUDGE_FALLBACK_BASE_URL \
+      JUDGE_FALLBACK_MODEL WECHATPRO_SEND_ALLOWLIST WECHATPRO_AUTHCODE_LIVETEST \
+      WECHATPRO_ALLOW_PRODUCTION_WXID 2>/dev/null || true
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 [ $# -ge 1 ] && ROOT=$1
 cd "$ROOT" || exit 1
@@ -43,6 +50,15 @@ run "生成物幂等 port_tools_domain（--check）" "$PY" tools/port_tools_doma
 run "生成物幂等 gen_vendor_defs（--check）"   "$PY" tools/gen_vendor_defs.py --check
 run "注册探针（真跑 register()，对账 provides_tools）" "$PY" tools/probe_registration.py "$ROOT"
 run "LLM 层 judge（双格式/凭证链/关思考/空正文抛错/看图）" "$PY" tools/verify_judge.py
+
+# lint：配置在 pyproject.toml（规则集与豁免理由都写在那里）。
+# 缺席就跳过 —— 生产机上不一定有 ruff，Lint 不该成为部署的硬前置；
+# 但**装了就必须绿**，否则等于没接。
+if "$PY" -m ruff --version >/dev/null 2>&1; then
+    run "lint（ruff，规则集见 pyproject.toml）" "$PY" -m ruff check plugin tools --no-cache
+else
+    printf '\n\033[1m── lint（ruff）\033[0m\n  ⏭  跳过：当前解释器没有 ruff（pip install ruff 后自动生效）\n'
+fi
 
 # TS 差分要 node + 部署目录的 dist。**缺席就跳过**（本地没参照物不该挡住干活），
 # 但**在就位却不一致时必须 fail** —— 那才是真信号。

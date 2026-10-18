@@ -17,7 +17,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
@@ -79,7 +78,8 @@ def main() -> int:
     check("前提：源账号文件的 blacklistGroups 是空的（否则 ① 的动作看不见）",
           before.get("blacklistGroups") == [], str(before.get("blacklistGroups")))
 
-    from plugin.core import account_store, accounts as acc_mod, overrides
+    from plugin.core import account_store, overrides
+    from plugin.core import accounts as acc_mod
     from plugin.inbound.debounce import InboundDebouncer
     from plugin.platform import commands as cmd_mod
     from plugin.platform.adapter import WppAdapter

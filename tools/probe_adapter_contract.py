@@ -33,18 +33,17 @@ def check(label: str, cond: object, detail: object = "") -> None:
 
 
 # ────────────────────────────────────────────────────── ① 基类契约（实测）
-from gateway.config import Platform, PlatformConfig                      # noqa: E402
-from gateway.platform_registry import PlatformEntry, platform_registry   # noqa: E402
-from gateway.platforms.base import BasePlatformAdapter, SendResult       # noqa: E402
-from gateway.platforms.event import MessageEvent, MessageType            # noqa: E402
-from gateway.platforms.helpers import MessageDeduplicator                # noqa: E402
+from gateway.config import Platform, PlatformConfig  # noqa: E402
+from gateway.platform_registry import PlatformEntry, platform_registry  # noqa: E402
+from gateway.platforms.base import BasePlatformAdapter  # noqa: E402
+from gateway.platforms.helpers import MessageDeduplicator  # noqa: E402
 
 abstracts = sorted(BasePlatformAdapter.__abstractmethods__)
 check("基类抽象方法恰为那 4 个",
       abstracts == ["connect", "disconnect", "get_chat_info", "send"], abstracts)
 
 # ────────────────────────────────────────── ② 注册 → Platform 成员 → 实例化
-from plugin import registration                                          # noqa: E402
+from plugin import registration  # noqa: E402
 
 
 class _RealCtx:
@@ -92,7 +91,7 @@ try:
 except ValueError as exc:
     check('Platform("wechatpadpro") 成立（注册后）', False, f"ValueError: {exc}")
 
-from plugin.platform import adapter as ad                                # noqa: E402
+from plugin.platform import adapter as ad  # noqa: E402
 
 check("WppAdapter 无剩余抽象方法", not ad.WppAdapter.__abstractmethods__,
       sorted(ad.WppAdapter.__abstractmethods__))
@@ -121,9 +120,9 @@ for name in ("send_typing", "send_image", "send_image_file", "send_voice",
     check(f"覆写 {name}", name in ad.WppAdapter.__dict__)
 
 # ──────────────────────────────── ③b 红线 2：生产身份拒连守卫（R1 的验收点）
-import dataclasses                                                        # noqa: E402
+import dataclasses  # noqa: E402
 
-from plugin.core import accounts as accounts_mod                          # noqa: E402
+from plugin.core import accounts as accounts_mod  # noqa: E402
 
 
 def _fake_account(self_wxid: str, authcode: str = "x", enabled: bool = True) -> object:
@@ -173,7 +172,7 @@ check("connect() 用 refusal_reason 过滤账号",
       "refusal_reason" in _connect_src, "connect() 里找不到守卫调用")
 
 # ────────────────────────────────────────────────────── ④ 出站纯函数
-from plugin.platform import outbound                                     # noqa: E402
+from plugin.platform import outbound  # noqa: E402
 
 check("拒绝话术被识别", outbound.is_rejection_phrase("无 @提及，按群规则不回复"))
 check("拒绝话术（变体）被识别", outbound.is_rejection_phrase("按群规则不回复"))
@@ -234,7 +233,7 @@ check("群标识判定", outbound.is_group_peer("1@chatroom") and not outbound.i
 # ──────────────────────── ④b 出站语音：SILK 闸 + 降级发文件（2026-08-12 生产实证）
 # 厂商 /Msg/SendVoice 只收 SILK；非 SILK / 超限 silk 会被**静默拒收**并回一个
 # 文案为 INVALID_CREDENTIAL 的 Code=-2（误导）。所以这里断的是「不许硬发」。
-from plugin.platform import silk_encoder                                    # noqa: E402
+from plugin.platform import silk_encoder  # noqa: E402
 
 check("silk 尺寸上限 == 60000（老板 curl 实测矩阵）",
       silk_encoder.MAX_SILK_BYTES == 60_000, silk_encoder.MAX_SILK_BYTES)

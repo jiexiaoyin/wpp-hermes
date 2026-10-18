@@ -27,9 +27,10 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 from .guards import assert_not_looser
 from .runtime import CACHE_REGISTRY

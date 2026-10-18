@@ -218,7 +218,7 @@ def check_diff(legacy_text: str) -> None:
         note(f"本机缺 {'/'.join(stubbed)} —— 已用空壳替身（注册期用不到它们）")
     legacy = _import_legacy()
 
-    from plugin.toolkit import jargon_tool, mcp, msg  # noqa: PLC0415
+    from plugin.toolkit import jargon_tool, mcp, msg
 
     pairs = (
         ("msg", legacy, msg, ("register_msg_tools",)),

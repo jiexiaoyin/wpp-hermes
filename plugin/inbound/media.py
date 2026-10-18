@@ -276,4 +276,4 @@ def voice_transcript(media: dict) -> str:
     return str(media.get("vendor_transcript") or media.get("stt_text") or "").strip()
 
 
-__all__ = ["extract_media_meta", "voice_transcript", "is_file_message", "file_name_of"]
+__all__ = ["extract_media_meta", "file_name_of", "is_file_message", "voice_transcript"]

@@ -24,11 +24,11 @@ WS 收 / webhook 收 / 300s sweep 可能跑在**不同线程**，而 pymysql 连
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +272,7 @@ class Connection:
     def close(self) -> None:
         try:
             self._conn.close()
-        except Exception:                      # 关闭失败不该炸调用方
+        except Exception:  # noqa: S110, BLE001 —— 关闭失败不该炸调用方
             pass
 
     @property
@@ -284,7 +284,7 @@ def _connect() -> Connection:
     cfg = config()
     assert_host_allowed(cfg)                   # 红线先查，避免白连一次
     try:
-        import pymysql                         # 延迟导入（见模块 docstring 约束 1）
+        import pymysql  # 延迟导入（见模块 docstring 约束 1）
     except ImportError as exc:
         raise DbUnavailable(
             "pymysql 未安装 —— 注意要装在**环境 venv**里"
@@ -359,7 +359,7 @@ def is_available() -> bool:
     except DbError as exc:
         _note_health("unavailable", str(exc), ok=False)
         return False
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 异常不得冒泡打断整批（收尾/探针路径）
         _note_health("unavailable", str(exc), ok=False)
         return False
 

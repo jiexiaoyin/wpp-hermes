@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import importlib
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ def _step(label: str, fn: Callable[[], Any]) -> Any:
     """跑一个注册子步骤，失败只记日志、不向上抛（保证后续步骤继续）。"""
     try:
         return fn()
-    except Exception as exc:  # noqa: BLE001 — 故意兜底：单点失败不得中断整批注册
+    except Exception as exc:
         log.warning("[WPP] %s 注册失败: %s", label, exc, exc_info=True)
         return None
 
@@ -92,10 +93,9 @@ def _register_tools(ctx: Any) -> None:
 
     # 具名子域。⚠️ 全部在**函数内**导入：`msg` 的模块级只有标准库，但 `mcp` 等
     #    会在函数体里碰 DB —— import 期任何重依赖都会炸掉 plugin_validate 的隔离 probe。
-    from . import jargon_tool, mcp, msg, parity
+    from . import jargon_tool, mcp, msg, parity, vendor_defs, vendor_defs_extra
     from . import policy as _policy
     from . import registry as _registry
-    from . import vendor_defs, vendor_defs_extra
 
     problems: list[str] = []
     REGISTRATION_REPORT.update(ok=True, problems=problems)
@@ -109,7 +109,7 @@ def _register_tools(ctx: Any) -> None:
         before = getattr(ctx, "registered_count", 0)
         try:
             result = fn()
-        except Exception as exc:  # noqa: BLE001 —— 与 _step 同口径：单点失败不中断
+        except Exception as exc:
             log.warning("[WPP] %s 注册失败: %s", label, exc, exc_info=True)
             problems.append(f"{label}: 注册抛错（{exc}）")
             return None

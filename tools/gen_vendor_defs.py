@@ -65,8 +65,9 @@ import json
 import pprint
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 # --------------------------------------------------------------------------- 路径
 

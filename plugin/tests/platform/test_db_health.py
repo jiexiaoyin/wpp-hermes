@@ -196,4 +196,8 @@ def test_run_migrations_talks_to_the_real_health_instrument():
     tree = ast.parse((ROOT / ADAPTER_REL).read_text(encoding="utf-8"))
     imports = [(n.level, n.module, [a.name for a in n.names])
                for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
-    assert (2, "core", ["metrics"]) in imports, imports
+    # 只要求「metrics 出现在模块级 from ..core import 的名单里」——
+    # 不锁定它是否独占一行：import 合并/拆分是 ruff 的正常整理，
+    # 断言精确的 names 列表会把风格调整当成回归（2026-10-18 踩过）。
+    assert any(level == 2 and module == "core" and "metrics" in names
+               for level, module, names in imports), imports

@@ -1657,7 +1657,7 @@ def test_module_level_imports_have_no_third_party_dependency():
             top += [a.name for a in node.names]
         elif isinstance(node, ast.ImportFrom):
             top.append(("." * node.level) + (node.module or ""))
-    stdlib = {"__future__", "logging", "math", "time", "dataclasses", "decimal", "typing"}
+    stdlib = set(sys.stdlib_module_names) | {"__future__"}
     for name in top:
         assert name.startswith(".") or name.split(".")[0] in stdlib, f"模块级第三方依赖: {name}"
     for lazy in ("from ...data import repo_hf", "from ...data import repo_messages",

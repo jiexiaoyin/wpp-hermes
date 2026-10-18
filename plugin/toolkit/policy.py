@@ -45,9 +45,10 @@ TS 把某些端点**主动封闭**（AI 不该有原始 XML 能力），又在�
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -1500,12 +1501,12 @@ def _build_gate_index(gates: Iterable[RuntimeGate]) -> dict[str, RuntimeGate]:
 GATED_TOOLS: Mapping[str, RuntimeGate] = MappingProxyType(_build_gate_index(RUNTIME_GATES))
 
 
-def gate_for(tool_name: str) -> Optional[RuntimeGate]:
+def gate_for(tool_name: str) -> RuntimeGate | None:
     """这个工具受哪条运行期门禁管；不受管返回 ``None``。"""
     return GATED_TOOLS.get(tool_name)
 
 
-def raw_account_cfg(adapter: Any, account_id: str = "") -> Optional[dict]:
+def raw_account_cfg(adapter: Any, account_id: str = "") -> dict | None:
     """取账号的**原始 cfg**（账号文件里那份，camelCase 键；已并入内存覆盖）。
 
     ``None`` = **读不出来**（没有适配器 / 账号不存在 / ``raw`` 不是 dict），
@@ -1536,7 +1537,7 @@ def raw_account_cfg(adapter: Any, account_id: str = "") -> Optional[dict]:
     return dict(raw) if isinstance(raw, Mapping) else None
 
 
-def make_tool_gate(adapter_getter: Callable[[], Any]) -> Callable[[str], Optional[Callable[[Any], Optional[str]]]]:
+def make_tool_gate(adapter_getter: Callable[[], Any]) -> Callable[[str], Callable[[Any], str | None] | None]:
     """造一个**注册期问一次、调用期问每次**的门禁工厂（给 ``wrap_ctx`` 用）。
 
     形状刻意是 ``factory(tool_name) -> pre 或 None``：
@@ -1549,12 +1550,12 @@ def make_tool_gate(adapter_getter: Callable[[], Any]) -> Callable[[str], Optiona
     重新问它 —— 账号配置重载（``/xiaowei on``）之后，下一个工具调用读到的就是新值。
     """
 
-    def factory(tool_name: str) -> Optional[Callable[[Any], Optional[str]]]:
+    def factory(tool_name: str) -> Callable[[Any], str | None] | None:
         gate = gate_for(tool_name)
         if gate is None:
             return None
 
-        def pre(args: Any) -> Optional[str]:
+        def pre(args: Any) -> str | None:
             account_id = ""
             if isinstance(args, Mapping):
                 account_id = str(args.get("account_id") or "")
@@ -1567,7 +1568,7 @@ def make_tool_gate(adapter_getter: Callable[[], Any]) -> Callable[[str], Optiona
                     if reject:
                         return reject
                     account_id = str(args.get("account_id") or account_id)
-            except Exception:  # noqa: BLE001 —— 上下文只是增强，读不到就按旧行为
+            except Exception:
                 log.debug("[WPP] 门禁读不到入站上下文 tool=%s", tool_name, exc_info=True)
             try:
                 adapter = adapter_getter()

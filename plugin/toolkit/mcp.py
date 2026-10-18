@@ -73,7 +73,7 @@ def register_mcp_tools(ctx, adapter_getter) -> None:
                 vendor_mcp.call_tool(name, arguments, client.authcode),
                 timeout=_VENDOR_TIMEOUT_S,
             )
-        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+        except (TimeoutError, Exception):  # noqa: BLE001
             result = None
         if result is None:
             # ``fallback()`` 是同步 DB 查询（pymysql）—— 必须在工作线程里跑，
@@ -99,7 +99,7 @@ def register_mcp_tools(ctx, adapter_getter) -> None:
             result = await asyncio.wait_for(
                 vendor_mcp.call_tool("wechat_account_status", {}, client.authcode),
                 timeout=_VENDOR_TIMEOUT_S)
-        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+        except (TimeoutError, Exception):  # noqa: BLE001
             result = None
         if result is None:
             return "MCP wechat_account_status 调用失败 (vendor MCP 不可用)"

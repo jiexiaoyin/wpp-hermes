@@ -59,12 +59,12 @@ runner 管「整个平台掉线」的重连（见 ①）；:mod:`platform.inboun
 from __future__ import annotations
 
 import asyncio
-import json
 import base64
+import json
 import logging
 import os
 import time
-from typing import Any, Optional
+from typing import Any
 
 # ── Hermes 侧（插件只在 Hermes 进程内被 import，这些必然可用）
 from gateway.config import Platform
@@ -72,31 +72,43 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator
 
-from ..core import access_policy
+from ..core import access_policy, filehelper_auth, metrics, webhook_paths
 from ..core import accounts as accounts_mod
-from ..core import filehelper_auth
-from ..core import metrics
-from ..core import webhook_paths
 from ..core.api_client import WppApiError, WppClient
 from ..core.sync_fallback import REASON_OPEN, REASON_PUSH, SyncFallback
-from ..inbound import (FILEHELPER, MT_SYSTEM, InboundPipeline, WppMessage,
-                       is_bot_mentioned_by_text, is_filehelper_session, is_quoting_bot,
-                       should_drop)
-from ..inbound.debounce import InboundDebouncer
-from ..inbound.affection import (build_mood_system_prompt, process_affection_message,
-                                 resolve_affection_cfg)
-from ..inbound.hongbao import is_card_message, process_red_packet
+from ..inbound import (
+    FILEHELPER,
+    MT_SYSTEM,
+    InboundPipeline,
+    WppMessage,
+    is_bot_mentioned_by_text,
+    is_filehelper_session,
+    is_quoting_bot,
+    jargon_mine,
+    quote_ref,
+    should_drop,
+)
 from ..inbound import jargon as jargon_mod
-from ..inbound import jargon_mine
-from ..inbound.intent import (IntentLlmConfig, build_group_context_lines,
-                              classify_group_intent, resolve_embedding_creds,
-                              resolve_intent_llm_cfg, resolve_intent_window,
-                              select_intent_context)
+from ..inbound.affection import build_mood_system_prompt, process_affection_message, resolve_affection_cfg
+from ..inbound.debounce import InboundDebouncer
+from ..inbound.hongbao import is_card_message, process_red_packet
+from ..inbound.intent import (
+    IntentLlmConfig,
+    build_group_context_lines,
+    classify_group_intent,
+    resolve_embedding_creds,
+    resolve_intent_llm_cfg,
+    resolve_intent_window,
+    select_intent_context,
+)
 from ..inbound.media_oss import (
-    KIND_FILES, KIND_IMAGES, KIND_VIDEOS, KIND_VOICES, upload_media_bytes,
+    KIND_FILES,
+    KIND_IMAGES,
+    KIND_VIDEOS,
+    KIND_VOICES,
+    upload_media_bytes,
 )
 from ..inbound.persist import db_chat_id, db_peer_kind, persist_inbound
-from ..inbound import quote_ref
 from ..inbound.rate_limit import TriggerRateLimiter
 from ..inbound.relay import apply_relay_render
 from . import outbound, silk_encoder
@@ -125,7 +137,7 @@ _DEDUP_MAX_SIZE = 5000
 # 默认后果变成「丢」，且**词表与返回 reason 的地方只隔一个文件**，不容易再分家。
 
 #: 当前进程内的适配器实例（工具侧经 :func:`_get_adapter` 取用）
-_CURRENT_ADAPTER: Optional["WppAdapter"] = None
+_CURRENT_ADAPTER: WppAdapter | None = None
 
 
 def _resolve_platform() -> Platform:
@@ -139,7 +151,7 @@ def _resolve_platform() -> Platform:
         return Platform(PLATFORM_NAME)
     except ValueError:
         log.warning("[WPP] Platform(%r) 未注册 —— 手动补 pseudo member（仅测试/直构路径）", PLATFORM_NAME)
-        return Platform._add_pseudo_member(PLATFORM_NAME)  # noqa: SLF001 —— 无公开等价 API
+        return Platform._add_pseudo_member(PLATFORM_NAME)
 
 
 def _msg_type_to_event_type(msg: WppMessage) -> MessageType:
@@ -149,7 +161,12 @@ def _msg_type_to_event_type(msg: WppMessage) -> MessageType:
     接龙→列表文本），对 agent 就是文本。
     """
     from ..inbound.parser import (
-        MT_CARD, MT_EMOJI, MT_IMAGE, MT_LOCATION, MT_VIDEO, MT_VOICE,
+        MT_CARD,
+        MT_EMOJI,
+        MT_IMAGE,
+        MT_LOCATION,
+        MT_VIDEO,
+        MT_VOICE,
     )
 
     return {
@@ -256,7 +273,7 @@ class WppAdapter(BasePlatformAdapter):
     #: 见模块 docstring ②——基类靠 ``getattr`` 读它
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
 
-    def __init__(self, config: Any, platform: Optional[Platform] = None) -> None:
+    def __init__(self, config: Any, platform: Platform | None = None) -> None:
         super().__init__(config, platform if platform is not None else _resolve_platform())
 
         self._accounts: dict[str, accounts_mod.Account] = {}
@@ -274,7 +291,7 @@ class WppAdapter(BasePlatformAdapter):
         #: 正好是那个回路想要的效果（重启进程自然会清）。
         self._trigger_limiter = TriggerRateLimiter()
         self._pipelines: dict[str, InboundPipeline] = {}
-        self._webhook: Optional[WppWebhookServer] = None
+        self._webhook: WppWebhookServer | None = None
         #: 真正在本地 server 上注册了路由的账号 id。vendor 侧注册**只**对这批账号做 ——
         #: 否则端口/凭据不一致的账号会被推到厂商，vendor 往一个 404 打，两边日志都干净。
         self._webhook_accounts: set[str] = set()
@@ -474,7 +491,7 @@ class WppAdapter(BasePlatformAdapter):
             try:
                 from ..llm import judge as _judge_startup
                 _judge_startup.log_judge_config_once()
-            except Exception:  # noqa: BLE001 — 自述失败不许影响接入
+            except Exception:
                 log.debug("[WPP] judge 启动自述失败", exc_info=True)
 
             self._accounts = accounts_mod.load_all(self._extra().get("accounts"))
@@ -556,7 +573,7 @@ class WppAdapter(BasePlatformAdapter):
             log.error("[WPP] 账号配置错误，不再重试: %s", exc, exc_info=True)
             self._set_fatal_error("account_config", str(exc), retryable=False)
             return False
-        except Exception as exc:  # noqa: BLE001 —— 未知异常按**可重试**处理
+        except Exception as exc:
             log.error("[WPP] connect 失败（将交给 runner 重试）: %s", exc, exc_info=True)
             self._set_fatal_error("connect_failed", str(exc), retryable=True)
             return False
@@ -671,7 +688,7 @@ class WppAdapter(BasePlatformAdapter):
                             len(result["drifted"]), "; ".join(result["drifted"][:3]), result)
             else:
                 log.info("[WPP] DB 就绪: %s", result)
-        except Exception as exc:  # noqa: BLE001 —— 不阻断接入，但要留下不会消失的痕迹
+        except Exception as exc:
             metrics.inc_db_migration_failure()
             metrics.set_db_gauge(0)
             log.error("[WPP] DB migration 未完成（不影响收信，**心流/审计降级**；"
@@ -696,7 +713,7 @@ class WppAdapter(BasePlatformAdapter):
                 )
                 ws.start()
                 self._ws[acct.id] = ws
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.error("[WPP:%s] WS 启动失败: %s", acct.id, exc, exc_info=True)
 
         # 兜底**独立**于 WS 起没起来 —— WS 挂掉的时候正是它最有用的时候
@@ -725,7 +742,7 @@ class WppAdapter(BasePlatformAdapter):
             )
             sync.start()
             self._sync[acct.id] = sync
-        except Exception as exc:  # noqa: BLE001 —— 兜底起不来不该影响 WS 帧那条主通道
+        except Exception as exc:
             log.error("[WPP:%s] 增量兜底启动失败（WS 帧那条路不受影响）: %s",
                       acct.id, exc, exc_info=True)
 
@@ -992,7 +1009,7 @@ class WppAdapter(BasePlatformAdapter):
         """
         try:
             await self._handle_one(acct, msg, pipeline)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             metrics.inc_handler_onerror()
             log.warning("[WPP:%s] 处理消息 %s 失败: %s", acct.id, msg.msg_id, exc, exc_info=True)
 
@@ -1220,7 +1237,7 @@ class WppAdapter(BasePlatformAdapter):
             # adapter=self：写配置的命令（/user /group /heartflow threshold …）写回账号
             # 文件后靠它当次生效（``commands.write_back`` → ``reload_account``）。
             reply = commands.handle_command(acct.id, content, adapter=self)
-        except Exception as exc:  # noqa: BLE001 —— 命令链路坏了不该影响别的消息
+        except Exception as exc:
             log.warning("[WPP:%s] filehelper 命令处理失败: %s", acct.id, exc, exc_info=True)
             return True
 
@@ -1452,7 +1469,7 @@ class WppAdapter(BasePlatformAdapter):
                         task.get_name(), exc)
 
     def _mood_channel_prompt(self, acct: accounts_mod.Account,
-                             msg: WppMessage) -> Optional[str]:
+                             msg: WppMessage) -> str | None:
         """当前情绪 → Hermes ``MessageEvent.channel_prompt``（缝见 plan Context 缝 1）。
 
         ⚠️ **有意与 TS 不齐（而且必须写在注释里）**：TS 把 moodNote 前置进 **Body**
@@ -1486,7 +1503,7 @@ class WppAdapter(BasePlatformAdapter):
             return None
 
     def _group_profile_channel_prompt(self, acct: accounts_mod.Account,
-                                      msg: WppMessage) -> Optional[str]:
+                                      msg: WppMessage) -> str | None:
         """本群画像 → Hermes ``MessageEvent.channel_prompt``（回复侧）。
 
         2026-10-18 之前画像只进 judge：它决定"要不要说"，回复正文却看不到画像 ——
@@ -1512,7 +1529,7 @@ class WppAdapter(BasePlatformAdapter):
             return None
 
     def _channel_prompt(self, acct: accounts_mod.Account,
-                        msg: WppMessage) -> Optional[str]:
+                        msg: WppMessage) -> str | None:
         """情绪 + 本群画像 → **一个** ``channel_prompt``（Hermes 这条缝只收一个字符串）。
 
         两段都为空 ⇒ ``None``：保持"没开这两个功能时请求体逐字节相同"的既有判据。
@@ -1526,7 +1543,7 @@ class WppAdapter(BasePlatformAdapter):
             parts.append(profile)
         return "\n\n".join(parts) if parts else None
 
-    def _intent_llm_cfg(self, acct: accounts_mod.Account) -> Optional[IntentLlmConfig]:
+    def _intent_llm_cfg(self, acct: accounts_mod.Account) -> IntentLlmConfig | None:
         """账号 → LLM 意图那一半的配置；``llm_intent_enabled`` 关着 ⇒ ``None``。
 
         ⚠️ **默认值有意与 TS 相反**：TS ``resolveLlmIntentEnabled``（``dispatcher.ts:162-168``）
@@ -1542,7 +1559,7 @@ class WppAdapter(BasePlatformAdapter):
         return resolve_intent_llm_cfg(acct.raw, nickname=acct.nickname)
 
     async def _intent_channel_context(self, acct: accounts_mod.Account,
-                                      msg: WppMessage) -> Optional[str]:
+                                      msg: WppMessage) -> str | None:
         """群聊背景 → Hermes ``MessageEvent.channel_context``（缝见 plan Context 缝 2）。
 
         ``gateway/platforms/event.py:82`` 的注释写明它 ``kept out of text so run.py's
@@ -1639,7 +1656,7 @@ class WppAdapter(BasePlatformAdapter):
     async def _build_event(self, acct: accounts_mod.Account, msg: WppMessage,
                            pipeline: InboundPipeline, *,
                            media: tuple[list[str], list[str]],
-                           reply_expected: Optional[bool] = None) -> Optional[MessageEvent]:
+                           reply_expected: bool | None = None) -> MessageEvent | None:
         """把 :class:`WppMessage` 变成 Hermes :class:`MessageEvent`。
 
         ⚠️ **顺序有讲究：先取媒体，再算正文**。语音的转写就是在取媒体那一步顺出来的
@@ -1733,9 +1750,12 @@ class WppAdapter(BasePlatformAdapter):
         这条错话留在这里是因为它恰好说明了"文档说做到了、链路里其实没有"这种失效形态。
         """
         from gateway.platforms.base import (
-            cache_audio_from_bytes, cache_document_from_bytes,
-            cache_image_from_bytes, cache_video_from_bytes,
+            cache_audio_from_bytes,
+            cache_document_from_bytes,
+            cache_image_from_bytes,
+            cache_video_from_bytes,
         )
+
         from ..inbound.app_card import enrich_mini_program_asset, is_mini_program_card, parse_mini_program_card
         from ..inbound.parser import MT_APP, MT_IMAGE, MT_VIDEO, MT_VOICE
 
@@ -1766,7 +1786,7 @@ class WppAdapter(BasePlatformAdapter):
         # 对齐 TS ``handler.ts:382-455``（FILE-DOWNLOAD-BINARY → VENDOR-MCP → NO-PATH-GUESS）。
         # ⚠️ 必须排在 ``not msg.media`` 之前：没有 download_context 的文件消息
         #   ``media`` 是空 dict，排队后面就整类消息都走不到兜底。
-        from ..inbound.media import is_file_message, file_name_of
+        from ..inbound.media import file_name_of, is_file_message
 
         if mtype == MT_APP and is_file_message(msg.raw):
             fname = file_name_of(msg.raw, msg.media) or "(未知文件名)"
@@ -1977,7 +1997,7 @@ class WppAdapter(BasePlatformAdapter):
             # 走到这说明依赖齐备但对方没给文字（空音频 / 5xx 到底）—— 留痕，别静默
             log.info("[WPP:%s] 语音转写未拿到文字 ⇒ 正文只有 [语音]", account_id)
 
-    async def _download_voice(self, client: WppClient, msg: WppMessage) -> Optional[bytes]:
+    async def _download_voice(self, client: WppClient, msg: WppMessage) -> bytes | None:
         """下语音。新 schema（``voice_ctx``）优先，老 schema（``legacy_cdn``）兜底。"""
         ctx = msg.media.get("voice_ctx")
         if ctx:
@@ -1998,7 +2018,7 @@ class WppAdapter(BasePlatformAdapter):
                 legacy.get("aes_key", ""), legacy.get("file_no", ""))
         return None
 
-    async def _download_video_chunks(self, client: WppClient, msg: WppMessage) -> Optional[bytes]:
+    async def _download_video_chunks(self, client: WppClient, msg: WppMessage) -> bytes | None:
         """**分片**下完整视频。
 
         ``/Tools/DownloadVideo`` 一次只给一片（默认 1MB），要 ``start_pos += len(chunk)``
@@ -2041,8 +2061,8 @@ class WppAdapter(BasePlatformAdapter):
 
     # ================================================================ 出站
 
-    async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
-                   metadata: Optional[dict] = None) -> SendResult:
+    async def send(self, chat_id: str, content: str, reply_to: str | None = None,
+                   metadata: dict | None = None) -> SendResult:
         """发消息。``chat_id`` 形如 ``accountId:peerId``（见 :meth:`_chat_id`）。
 
         ★ 微信通道**只发结果，不发过程**（老板 2026-10-18 拍板）：Hermes 会用
@@ -2108,7 +2128,7 @@ class WppAdapter(BasePlatformAdapter):
                                   raw_response={"hfSuppressed": plan.placeholder})
 
             chunks = outbound.chunk_text(content)
-            last_id: Optional[str] = None
+            last_id: str | None = None
             for idx, chunk in enumerate(chunks):
                 result = await self._send_chunk(
                     acct, client, peer_id, chunk,
@@ -2147,13 +2167,13 @@ class WppAdapter(BasePlatformAdapter):
         except WppApiError as exc:
             log.error("[WPP] 发送失败: %s", exc)
             return SendResult(success=False, error=str(exc), error_kind="transient")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error("[WPP] 发送异常: %s", exc, exc_info=True)
             return SendResult(success=False, error=str(exc), error_kind="unknown")
 
     async def send_or_update_status(
         self, chat_id: str, status_key: str, content: str, *,
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> SendResult:
         """微信**没有状态栏**：生命周期状态（记忆召回 / 压缩 / 模型切换…）一律不落聊天。
 
@@ -2165,8 +2185,8 @@ class WppAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=None)
 
     async def send_private_notice(
-        self, chat_id: str, user_id: Optional[str], content: str,
-        reply_to: Optional[str] = None, metadata: Optional[dict] = None,
+        self, chat_id: str, user_id: str | None, content: str,
+        reply_to: str | None = None, metadata: dict | None = None,
     ) -> SendResult:
         """运营/告警类**私密通知**：群里只发结果，通知改投管理员私聊。
 
@@ -2190,8 +2210,8 @@ class WppAdapter(BasePlatformAdapter):
         return await self.send(self._chat_id(account_id, target), content, metadata=metadata)
 
     async def _send_chunk(self, acct: accounts_mod.Account, client: WppClient, peer_id: str,
-                          chunk: str, *, reply_to: Optional[str],
-                          metadata: Optional[dict]) -> SendResult:
+                          chunk: str, *, reply_to: str | None,
+                          metadata: dict | None) -> SendResult:
         """发**单片**。
 
         引用回复走 **``/Msg/ShareLink`` + ``Type=5`` + ``Xml``**（迁移自旧
@@ -2282,7 +2302,7 @@ class WppAdapter(BasePlatformAdapter):
         return ident
 
     async def _quote_prefix(self, acct: accounts_mod.Account, client: WppClient,
-                            peer_id: str, fromusr: str, metadata: Optional[dict],
+                            peer_id: str, fromusr: str, metadata: dict | None,
                             *, db_name: str = "") -> str:
         """群聊引用回复的 ``@被回复人 `` 前缀（**仅群聊**才有）。
 
@@ -2474,36 +2494,36 @@ class WppAdapter(BasePlatformAdapter):
         """
         return None
 
-    async def send_image(self, chat_id: str, image_url: str, caption: Optional[str] = None,
-                         reply_to: Optional[str] = None,
-                         metadata: Optional[dict] = None) -> SendResult:
+    async def send_image(self, chat_id: str, image_url: str, caption: str | None = None,
+                         reply_to: str | None = None,
+                         metadata: dict | None = None) -> SendResult:
         """发图（URL / 本地路径 / base64 均可）。"""
         return await self._send_media(chat_id, image_url, "image", caption, metadata)
 
-    async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None,
-                              reply_to: Optional[str] = None,
-                              metadata: Optional[dict] = None, **kwargs) -> SendResult:
+    async def send_image_file(self, chat_id: str, image_path: str, caption: str | None = None,
+                              reply_to: str | None = None,
+                              metadata: dict | None = None, **kwargs) -> SendResult:
         return await self._send_media(chat_id, image_path, "image", caption, metadata)
 
-    async def send_voice(self, chat_id: str, audio_path: str, caption: Optional[str] = None,
-                         reply_to: Optional[str] = None, metadata: Optional[dict] = None,
+    async def send_voice(self, chat_id: str, audio_path: str, caption: str | None = None,
+                         reply_to: str | None = None, metadata: dict | None = None,
                          **kwargs) -> SendResult:
         return await self._send_media(chat_id, audio_path, "voice", caption, metadata)
 
-    async def send_video(self, chat_id: str, video_path: str, caption: Optional[str] = None,
-                         reply_to: Optional[str] = None, metadata: Optional[dict] = None,
+    async def send_video(self, chat_id: str, video_path: str, caption: str | None = None,
+                         reply_to: str | None = None, metadata: dict | None = None,
                          **kwargs) -> SendResult:
         return await self._send_media(chat_id, video_path, "video", caption, metadata)
 
-    async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
-                            file_name: Optional[str] = None, reply_to: Optional[str] = None,
-                            metadata: Optional[dict] = None, **kwargs) -> SendResult:
+    async def send_document(self, chat_id: str, file_path: str, caption: str | None = None,
+                            file_name: str | None = None, reply_to: str | None = None,
+                            metadata: dict | None = None, **kwargs) -> SendResult:
         return await self._send_media(chat_id, file_path, "file", caption, metadata,
                                      file_name=file_name)
 
     async def _send_media(self, chat_id: str, ref: str, kind: str,
-                          caption: Optional[str], metadata: Optional[dict],
-                          file_name: Optional[str] = None) -> SendResult:
+                          caption: str | None, metadata: dict | None,
+                          file_name: str | None = None) -> SendResult:
         """媒体发送的统一实现。
 
         ``ref`` → base64 的解析走 :func:`outbound.resolve_to_base64`（**内建安全闸**：
@@ -2559,7 +2579,7 @@ class WppAdapter(BasePlatformAdapter):
         except (ValueError, outbound.netguard.GuardError) as exc:
             log.error("[WPP] 媒体发送被拒: %s", exc)
             return SendResult(success=False, error=str(exc), error_kind="forbidden")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error("[WPP] 媒体发送异常: %s", exc, exc_info=True)
             return SendResult(success=False, error=str(exc), error_kind="unknown")
 
@@ -2632,7 +2652,7 @@ class WppAdapter(BasePlatformAdapter):
             )
             try:
                 _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 log.warning("[WPP] ffmpeg 抽帧超时")
                 return ""
@@ -2780,8 +2800,8 @@ def check_wechatpadpro_requirements() -> bool:
 
 
 async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
-                           thread_id: Optional[str] = None,
-                           media_files: Optional[list] = None,
+                           thread_id: str | None = None,
+                           media_files: list | None = None,
                            force_document: bool = False) -> dict:
     """进程外发送（cron 无并发 gateway 时用）。
 
@@ -2838,7 +2858,7 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
                 #   ``wpp_messages`` 里隐形，事后无法核"到底发没发/发给谁"。
                 await _persist_outbound_record(acct, peer_id, chunk, ids)
             return {"success": True, "message_id": message_id}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.error("[WPP] standalone 发送失败: %s", exc, exc_info=True)
         return {"error": str(exc)}
 

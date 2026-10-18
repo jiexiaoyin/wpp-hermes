@@ -37,8 +37,9 @@ import hmac
 import json
 import logging
 import threading
+from collections.abc import Awaitable, Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from ..core import metrics
 from ..core.redact import redact_webhook_path_any
@@ -176,7 +177,7 @@ class WppWebhookServer:
         class _Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
-            def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
+            def log_message(self, fmt: str, *args: Any) -> None:
                 pass  # 静默 access log（有需要时用 debug 自行打开）
 
             # ---------------------------------------------------------- 校验
@@ -359,13 +360,13 @@ class WppWebhookServer:
                 metrics.inc_webhook_processed()
                 self._reply(200)
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 try:
                     self._handle()
-                except Exception as exc:  # noqa: BLE001 —— 兜底：不让线程挂掉
+                except Exception as exc:
                     log.warning("[WPP webhook] 处理异常: %s", exc, exc_info=True)
 
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 # v1.9.2 只读观测端点（对齐 TS）：复用监听端口、不开新端口，
                 # **只对回环来源**响应；非回环一律 404（不泄露端点存在）。
                 # 必须在任何计数之前拦截 —— 运维抓一次 /metrics 不该让"收到消息"+1。

@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
 
 from .hongbao import is_red_packet_message
 from .parser import MT_APP, MT_CHAT_HISTORY, MT_REVOKE, WppMessage, is_bot_mentioned_by_text

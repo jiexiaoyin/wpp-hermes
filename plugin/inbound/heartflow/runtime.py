@@ -39,7 +39,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any, Awaitable, Callable
+from collections.abc import Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -168,8 +169,8 @@ _sweep_tasks: dict[str, asyncio.Task] = {}
 def _effective_interval(adapter: Any, account_id: str, fallback: int) -> int:
     """取 ``learning.sweepIntervalSec``；拿不到就用 ``fallback``。"""
     try:
-        from . import learn  # 延迟导入：learn 尚未就位时不该炸
         from ...core import accounts as accounts_mod
+        from . import learn  # 延迟导入：learn 尚未就位时不该炸
 
         cfg = accounts_mod.resolve(account_id).heartflow or {}
         learning = learn.resolve_hf_learning(cfg)
@@ -210,7 +211,7 @@ async def sweep_loop(adapter: Any, account_id: str, interval: int = DEFAULT_SWEE
                 await _learn.run_sweep(adapter, account_id)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 —— 单轮失败不该终结整条循环
+            except Exception as exc:
                 log.warning("[WPP HF] sweep tick 失败（下一轮继续）: %s", exc, exc_info=True)
     except asyncio.CancelledError:
         raise

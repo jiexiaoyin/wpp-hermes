@@ -41,14 +41,6 @@ from .jargon import (
     update_from_message,
 )
 from .media import extract_media_meta
-from .persist import (
-    db_chat_id,
-    db_direction,
-    db_peer_kind,
-    persist_inbound,
-    pick_new_msg_id,
-    to_db_record,
-)
 from .parser import (
     MT_APP,
     MT_REVOKE,
@@ -66,9 +58,16 @@ from .parser import (
     strip_at_mentions,
     strip_group_prefix,
 )
+from .persist import (
+    db_chat_id,
+    db_direction,
+    db_peer_kind,
+    persist_inbound,
+    pick_new_msg_id,
+    to_db_record,
+)
 from .relay import is_relay_message
-from .triggers import (FILEHELPER, is_filehelper_session, is_quoting_bot,
-                       should_drop, should_process)
+from .triggers import FILEHELPER, is_filehelper_session, is_quoting_bot, should_drop, should_process
 
 __all__ = [
     "FILEHELPER",
@@ -91,8 +90,8 @@ __all__ = [
     "is_bot_mentioned_by_text",
     "is_card_message",
     "is_filehelper_session",
-    "is_red_packet_message",
     "is_quoting_bot",
+    "is_red_packet_message",
     "is_relay_message",
     "list_hot_jargon",
     "normalize_mention",

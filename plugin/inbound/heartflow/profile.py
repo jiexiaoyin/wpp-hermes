@@ -71,9 +71,10 @@ import logging
 import math
 import re
 import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 from .budget import BudgetConfig, resolve_budget
 from .caption import (
@@ -902,7 +903,7 @@ def load_hf_profiles(account_id: str,
     2026-10-18 回复侧也开始消费画像，这个冷窗口第一次变得可见，所以补一条启动预热
     （:func:`..runtime._preload_steps` 的第五项）。
     """
-    from ...data import repo_hf          # 延迟导入：保持模块级零第三方依赖
+    from ...data import repo_hf  # 延迟导入：保持模块级零第三方依赖
 
     rows = repo_hf.list_profiles(account_id)
     return load_hf_profiles_into_cache(account_id, rows, max_prompt_chars)
@@ -949,7 +950,7 @@ def _load_sample_lines(account_id: str, group_id: str, limit: int) -> list[str]:
     查配文失败退回旧形态 —— 增强件不是依赖件。
     """
     mx = max(1, min(int(limit) if _is_num(limit) else 1, 100))
-    from ...data import repo_messages      # 延迟导入：本模块不在加载期拉第三方依赖（F5）
+    from ...data import repo_messages  # 延迟导入：本模块不在加载期拉第三方依赖（F5）
 
     rows = list(repo_messages.list_messages_by_peer(account_id, group_id, mx * 2))
     # 批量查配文（自己查，不依赖调用方注入；失败 = 空 Map = 旧形态）
@@ -997,7 +998,7 @@ async def maybe_generate_hf_group_profiles(
     P = resolve_hf_profile_cfg(cfg)
     out = HfProfileGenResult()
     budget_cfg = resolve_budget(cfg)
-    from ...data import repo_hf, repo_messages   # 延迟导入，同上
+    from ...data import repo_hf, repo_messages  # 延迟导入，同上
 
     # 1) 预热缓存（**无论是否生成**：judge 每次都要用；也让"关掉生成但用旧画像"成立）
     existing: list[Mapping[str, Any]] = []
@@ -1032,7 +1033,7 @@ async def maybe_generate_hf_group_profiles(
         return out
 
     by_group = {str(r.get("group_id")): r for r in existing}
-    from ...llm import judge as judge_mod      # 延迟导入：LLM 层只在真要调用时拉进来
+    from ...llm import judge as judge_mod  # 延迟导入：LLM 层只在真要调用时拉进来
 
     creds = judge_mod.resolve_judge_creds()
 

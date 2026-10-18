@@ -1,8 +1,11 @@
 # 开发规范铁律（老板 2026-09-01 拍板；2026-10-01 本树生效版）
 
 > **本树 = `/root/dev/wpp-hermes-py2/`**，是 wpp-hermes Python 侧的**唯一事实来源（SSOT）**。
-> 旧树 `/root/dev/wpp-hermes/` 自 2026-10-01 起**原样冻结**，只作参照与回滚蓝本，
-> **不再接受任何修改**。两份树并存期间，以本树的文件为准。
+> 旧树 `/root/dev/wpp-hermes/` 已于 2026-10-18 **归档**到
+> `/root/dev/_archive/wpp-hermes-legacy-20261018/`：既是历史实现，也是当初的端点蓝本源。
+> 它的蓝本职责已由本仓 `tools/vendor_source/` 接管（复制时 SHA-256 逐文件一致），
+> 归档树只作历史追溯，**不再被任何主链路读取**（`tools/port_tools_domain.py` 是唯一引用者，
+> 且它是一次性移植工具）。
 
 ## 🚨 铁律 0：dev → deploy 顺序（严禁搞反）
 
@@ -35,9 +38,17 @@ bash /root/dev/wpp-hermes-py2/deploy.sh --check      # 只检查不部署
 bash /root/dev/wpp-hermes-py2/deploy.sh --rollback <备份目录>
 ```
 
-**备份目录**：⚠️ `.183` **没有 `/data`**（与 `.182` 不同）⇒ 统一放
-`/root/.hermes/backups/wpp-deploy-<epoch>/`。只备份 **deploy 侧**（dev 是 SSOT，不需要备份
-自己的产物）。
+**备份目录**：按目标机选择 ——
+
+- 本机生产（`.182`，有 `/data`）：`/data/wpp-deploy-backup/<YYYYmmdd-HHMMSS>/`
+- 远程 `.183`（**没有 `/data`**）：`/root/.hermes/backups/wpp-deploy-<epoch>/`
+
+只备份 **deploy 侧**（dev 是 SSOT，不需要备份自己的产物）。
+
+> ⚠️ `hermes gateway restart` **不能在 gateway 进程内部执行**（安全策略会拦，且会先杀掉
+> 发起命令的子进程）。部署脚本同步完代码后，重启这一步要么由人在外部 shell 跑，
+> 要么脚本自己以 detached 方式在独立会话里跑。当前约定：**agent 只做同步 + 校验，
+> 重启交给人**。
 
 ### 手动校验（任何变更后必须跑）
 

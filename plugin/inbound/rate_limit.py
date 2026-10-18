@@ -59,8 +59,8 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ class TriggerRateLimiter:
     # ------------------------------------------------------------- 唯一入口
 
     def guard(self, account_id: str, group_id: str, sender_id: str, reason: str,
-              now: Optional[float] = None) -> Decision:
+              now: float | None = None) -> Decision:
         """记一次硬触发并回答"这一条还让不让过"。
 
         **被拒时调用方必须丢弃这条消息**（不是交给心流）：心流接管时同样会产出一条回复，
@@ -162,7 +162,7 @@ class TriggerRateLimiter:
             return Decision(True, "error")
 
     def _guard(self, account_id: str, group_id: str, sender_id: str, reason: str,
-               now: Optional[float]) -> Decision:
+               now: float | None) -> Decision:
         if reason not in GUARDED_REASONS:
             return Decision(True, "unguarded")
         if not sender_id:
@@ -206,7 +206,7 @@ class TriggerRateLimiter:
 
     # ------------------------------------------------------------- 观测/清理
 
-    def reset(self, account_id: Optional[str] = None) -> None:
+    def reset(self, account_id: str | None = None) -> None:
         """清掉限速状态（**全部**或某账号）。给测试与应急用；停机/重连**不**自动清
         （重启进程自然会清，而"重连一次就把安全网清空"正好是回路想要的效果）。"""
         if account_id is None:
@@ -215,7 +215,7 @@ class TriggerRateLimiter:
         for key in [k for k in self._buckets if k[0] == account_id]:
             self._buckets.pop(key, None)
 
-    def stats(self, now: Optional[float] = None) -> dict:
+    def stats(self, now: float | None = None) -> dict:
         """``{"buckets": n, "muted": m}`` —— 数出来的运维观测（不读内容、不含 wxid）。"""
         t = self._clock() if now is None else float(now)
         return {
@@ -234,5 +234,11 @@ class TriggerRateLimiter:
             self._buckets.pop(key, None)
 
 
-__all__ = ["Decision", "GUARDED_REASONS", "MAX_TRIGGERS", "MUTE_S", "TriggerRateLimiter",
-           "WINDOW_S"]
+__all__ = [
+    "GUARDED_REASONS",
+    "MAX_TRIGGERS",
+    "MUTE_S",
+    "WINDOW_S",
+    "Decision",
+    "TriggerRateLimiter",
+]

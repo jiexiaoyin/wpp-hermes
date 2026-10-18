@@ -73,7 +73,7 @@ def main(argv: list[str]) -> int:
 
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
+    except Exception:  # noqa: S110, BLE001 —— 异常不得冒泡打断整批（收尾/探针路径）
         pass
 
     load_env_file(args.env_file)
@@ -83,7 +83,7 @@ def main(argv: list[str]) -> int:
     os.environ["WECHATPRO_DB_NAME"] = base
 
     sys.path.insert(0, str(Path(args.plugin).resolve()))
-    from data import db, repo_hf, repo_messages   # noqa: E402
+    from data import db, repo_hf, repo_messages
     # ⚠️ ``repo_affection``（W2）**只能按包导入**：它读情绪那半要跨层取
     # ``inbound.affection`` 的值对象（``MoodState`` / ``default_mood``），而上面那种
     # **扁平**导入（``from data import …``）让 ``data.repo_affection`` 里的 ``..inbound``
@@ -93,8 +93,8 @@ def main(argv: list[str]) -> int:
     #    （同一个库、两条连接）。所以下面每一处 ``repo_affection`` 调用都**显式传**
     #    ``conn=``，用本文件这条连接，别让它自己去开会话。
     sys.path.insert(0, str(Path(args.plugin).resolve().parent))
-    from plugin.data import repo_affection                    # noqa: E402
-    from plugin.inbound.affection import MoodState, default_mood   # noqa: E402
+    from plugin.data import repo_affection
+    from plugin.inbound.affection import MoodState, default_mood
 
     print(f"● 目标 {db.describe()}（**必须**是 _test 库）")
     if not base.endswith("_test"):

@@ -25,7 +25,7 @@ import logging
 import math
 import time
 from datetime import datetime
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 from . import db
 

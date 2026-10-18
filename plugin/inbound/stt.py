@@ -51,7 +51,6 @@ import logging
 import os
 import struct
 import tempfile
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +134,7 @@ def stt_api_key() -> str:
     return dashscope_api_key() if stt_backend() == "dashscope" else siliconflow_api_key()
 
 
-def unavailable_reason() -> Optional[str]:
+def unavailable_reason() -> str | None:
     """为什么现在**不可能**转写出文字 —— ``None`` 表示两样依赖都在。纯探测，无副作用。
 
     调用方拿它决定"还值不值得试"，也拿它写降级日志（缺什么写什么，别只说"失败了"）。
@@ -208,7 +207,7 @@ def build_wav_buffer(pcm: bytes) -> bytes:
 # ------------------------------------------------------------------- 解码
 
 
-async def decode_silk_to_pcm(silk: bytes) -> Optional[bytes]:
+async def decode_silk_to_pcm(silk: bytes) -> bytes | None:
     """silk → PCM（调外部 decoder）。失败一律 ``None`` + WARNING（调用方降级）。"""
     if not os.path.exists(SILK_DECODER_PATH):
         log.warning("[STT] silk 解码器不存在: %s ⇒ 无法转写", SILK_DECODER_PATH)
@@ -318,7 +317,7 @@ def _extract_text(body: str) -> str:
     return str(data.get("text") or data.get("transcript") or "").strip()
 
 
-async def _attempt(url: str, api_key: str, wav: bytes) -> tuple[Optional[str], bool, str]:
+async def _attempt(url: str, api_key: str, wav: bytes) -> tuple[str | None, bool, str]:
     """一次尝试 → ``(文本, 是否值得重试, 失败描述)``。**不抛异常**（连超时也不抛）。"""
     post = _post_dashscope if stt_backend() == "dashscope" else _post_wav
     try:
@@ -335,7 +334,7 @@ async def _attempt(url: str, api_key: str, wav: bytes) -> tuple[Optional[str], b
     return None, retryable, f"HTTP {status}: {body[:200]}"
 
 
-async def transcribe_silk_buffer(silk: bytes, api_key: str = "") -> Optional[str]:
+async def transcribe_silk_buffer(silk: bytes, api_key: str = "") -> str | None:
     """silk buffer → 转写文字；**任何失败都返回 ``None``**（调用方决定正文怎么写）。
 
     ⚠️ 返回 ``None`` 与返回空串是**两件事**，本函数只返回 ``None``：

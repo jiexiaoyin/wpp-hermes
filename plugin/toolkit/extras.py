@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import subprocess
 
 from .toolout import dump_capped, dump_error
@@ -51,7 +50,7 @@ def _phoneerp_record(args: list[str]) -> dict | None:
         data = json.loads(r.stdout)
         m = data.get("match") if isinstance(data, dict) else None
         return m.get("record") if isinstance(m, dict) else None
-    except Exception:  # noqa: BLE001 —— 脚本缺失/超时/坏 JSON 都只当"查不到"
+    except Exception:
         log.debug("[WPP] phoneerp 查询失败: %s", args, exc_info=True)
         return None
 
@@ -109,7 +108,7 @@ def register(ctx, adapter_getter) -> int:
                 from .registry import resolve_account_id
 
                 return resolve_account_id(adapter, aid)
-        except Exception:  # noqa: BLE001 —— 解析失败退回原值（查询本身会给出空结果）
+        except Exception:
             log.debug("[WPP] 历史工具解析账号失败: %s", aid, exc_info=True)
         return aid
 
@@ -261,7 +260,7 @@ def register(ctx, adapter_getter) -> int:
             JSON: {ok, count, tools: [{name, domain, description, endpoint, method, params}], source}
         """
         try:
-            from . import vendor_defs as _vd          # 函数级：与注册同源，且不拖慢加载期
+            from . import vendor_defs as _vd  # 函数级：与注册同源，且不拖慢加载期
             from . import vendor_defs_extra as _vx
         except Exception as e:  # noqa: BLE001
             return json.dumps({"ok": False, "error": f"读不到工具定义表: {e}"}, ensure_ascii=False)

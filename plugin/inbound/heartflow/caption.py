@@ -39,8 +39,9 @@ import hashlib
 import logging
 import math
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -220,7 +221,7 @@ async def caption_pending_hf_images(
         return out
 
     from ...data import repo_hf
-    from ...llm import judge as judge_mod   # 延迟导入：LLM 层只在真要调用时拉进来
+    from ...llm import judge as judge_mod  # 延迟导入：LLM 层只在真要调用时拉进来
 
     msgs = repo_hf.list_hf_image_msgs(account_id, [group_id], since_sec, cfg.scan_limit)
     if not msgs:

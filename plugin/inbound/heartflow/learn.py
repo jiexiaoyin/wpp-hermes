@@ -72,9 +72,10 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Any
 
 from . import budget, dedupe, label, layer, observe, profile
 from .runtime import CACHE_REGISTRY
@@ -806,7 +807,7 @@ class HfLedgerRecord:
 
 
 def _insert_judged(record: HfLedgerRecord) -> None:
-    from ...data import repo_hf              # 延迟导入：加载期不许拉进第三方依赖（F5）
+    from ...data import repo_hf  # 延迟导入：加载期不许拉进第三方依赖（F5）
 
     repo_hf.insert_judged(
         record.account_id, record.inbound_msg_id, record.group_id, record.judged_at,
@@ -888,7 +889,7 @@ def persist_hf_send_outcome(
     那次 INSERT 没落上时就是这种局面 —— 消息发出去、账本里零痕迹、一行日志都没有。
     故这里把行数 0 也当失败处理（只 warn，不抛）。
     """
-    from ...data import repo_hf              # 延迟导入，同上
+    from ...data import repo_hf  # 延迟导入，同上
 
     outcome = classify_hf_send(result)
     if outcome == HF_SEND_OUTCOME_SENT:
@@ -978,7 +979,7 @@ def mark_hf_group_engaged(
 
     无开窗（绝大多数情况）或本行无信号 ⇒ 立刻 return，**不做任何 DB 写**。
     """
-    from ...data import repo_hf              # 延迟导入，同上
+    from ...data import repo_hf  # 延迟导入，同上
 
     k = _key(account_id, group_id)
     w = _open_windows.get(k)
@@ -1007,7 +1008,7 @@ def load_learned_thresholds(account_id: str) -> int:
 
     失败降级：账号以**空缓存**启动（= 全群回落账号级阈值），warn 一次。
     """
-    from ...data import repo_hf              # 延迟导入，同上
+    from ...data import repo_hf  # 延迟导入，同上
 
     n = 0
     try:
@@ -1034,7 +1035,7 @@ def load_hf_budget_seed(account_id: str, now_sec: int | None = None) -> int:
 
     已知降级：``lastHumanAtSec`` 无法从账本回填（账本没有人类消息时刻）⇒ 留空。
     """
-    from ...data import repo_hf              # 延迟导入，同上
+    from ...data import repo_hf  # 延迟导入，同上
 
     ts = int(time.time()) if now_sec is None else int(now_sec)
     try:
@@ -1103,7 +1104,7 @@ async def run_sweep(adapter: Any, account_id: str, now_sec: int | None = None) -
     取不到再回落 ``accounts.resolve``（离线 / 测试）。两处都取不到 ⇒ 空配置
     （= 全缺省 + ``enabled=False``）⇒ 本轮只跑关窗与呆账收敛。
     """
-    from ...data import repo_hf              # 延迟导入，同上
+    from ...data import repo_hf  # 延迟导入，同上
 
     ts = int(time.time()) if now_sec is None else int(now_sec)
     cfg = _cfg_for(adapter, account_id)
@@ -1160,7 +1161,7 @@ async def run_sweep(adapter: Any, account_id: str, now_sec: int | None = None) -
     try:
         last = repo_hf.get_last_sent_at(account_id)
         _metrics().set_hf_last_send_age_sec(-1 if last is None else max(0, ts - int(last)))
-    except Exception:  # noqa: BLE001 —— 观测失败不影响任何功能
+    except Exception:  # noqa: S110, BLE001 —— 观测失败不影响任何功能
         pass
 
     # 7) v1.9.0 重复闸历史裁剪（防长跑进程里内存无限增长；零 IO）
@@ -1341,7 +1342,7 @@ def maybe_recompute_hf_share_guard(account_id: str, cfg: Mapping[str, Any] | Non
     **只在占比超标时才 warn**：冷清群每天 4 条发言，每轮都打日志会把 journal 刷满
     （每账号每 300s 一次）。返回命中的群数（测试与诊断用）。
     """
-    from ...data import repo_messages        # 延迟导入，同上
+    from ...data import repo_messages  # 延迟导入，同上
 
     G = observe.resolve_hf_share_guard_cfg(cfg)
     if not G.enabled:
@@ -1385,7 +1386,7 @@ def refresh_hf_reachability_caps(account_id: str, cfg: Mapping[str, Any] | None,
 
     返回被压住的群数（测试与指标用）。
     """
-    from ...data import repo_hf              # 延迟导入，同上
+    from ...data import repo_hf  # 延迟导入，同上
 
     L = resolve_hf_learning(cfg)
     if not L["recoverUnreachable"]:
@@ -1477,7 +1478,7 @@ def apply_hf_threshold_change(
     now_sec: int,
 ) -> None:
     """落一次阈值变更：群状态 + 审计行 + **内存缓存同步**（三者必须一起，缺一则读侧读到旧值）。"""
-    from ...data import repo_hf              # 延迟导入，同上
+    from ...data import repo_hf  # 延迟导入，同上
 
     repo_hf.upsert_group_state(
         account_id, group_id, learned_threshold=new_threshold, last_change_at=now_sec,
@@ -1524,9 +1525,9 @@ __all__ = [
     "HfThresholdDecision",
     "HfThresholdEval",
     "apply_hf_threshold_change",
-    "classify_hf_send",
     "clamp_hf_threshold_to_band",
     "clamp_hf_threshold_to_reachability",
+    "classify_hf_send",
     "eval_hf_threshold",
     "forget_hf_open_window",
     "get_hf_reachability_cap",

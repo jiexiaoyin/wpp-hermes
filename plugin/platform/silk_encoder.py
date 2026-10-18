@@ -41,7 +41,6 @@ import logging
 import os
 import shutil
 import tempfile
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +56,7 @@ MAX_VOICE_DURATION_MS = 60_000
 _ENCODE_TIMEOUT = 60
 
 
-def unavailable_reason() -> Optional[str]:
+def unavailable_reason() -> str | None:
     """为什么编码不可用 —— ``None`` 表示可用。纯探测，**无副作用**。"""
     if not os.path.exists(SILK_ENCODER_PATH):
         return f"silk encoder 不存在: {SILK_ENCODER_PATH}"
@@ -72,7 +71,7 @@ def is_available() -> bool:
     return unavailable_reason() is None
 
 
-async def encode_to_silk(ref: str) -> Optional[str]:
+async def encode_to_silk(ref: str) -> str | None:
     """本地音频文件 → SILK 的 **base64**；不可用/失败一律 ``None``（调用方降级发文件）。
 
     ``ref`` 必须是**本地路径** —— URL 在 :func:`plugin.platform.outbound.resolve_to_base64`

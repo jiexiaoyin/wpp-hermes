@@ -28,8 +28,8 @@ prompt injection，就能让模型把 ``account_id`` 写成另一个已连接账
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterator
 from contextvars import ContextVar
-from typing import Iterator
 
 _account_id: ContextVar[str] = ContextVar("wpp_inbound_account", default="")
 _sender: ContextVar[str] = ContextVar("wpp_inbound_sender", default="")

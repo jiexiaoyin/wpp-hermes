@@ -108,7 +108,7 @@ _EXT_RE = re.compile(r"\.([a-zA-Z0-9]+)$")
 _UNSAFE_NAME_RE = re.compile(r"[^\w.\-]", re.ASCII)
 
 #: ``路径 -> (过期时刻, 配置)``。**只放读成功且字段齐全的**（见 INVARIANT 第 2 条）。
-_CACHE: dict[str, tuple[float, "OssConfig"]] = {}
+_CACHE: dict[str, tuple[float, OssConfig]] = {}
 
 #: 本进程**见过**的密钥串 —— 只为日志脱敏（``_scrub``）而留，不参与任何判断。
 #: 用集合而不是遍历 ``_CACHE``：缓存会过期、会被清，而"日志里永远不出现密钥"不能有窗口期。
@@ -257,7 +257,7 @@ async def _run_ossutil(args: list[str], timeout_s: float) -> tuple[int, str]:
         *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # TS 的 execAsync 超时会 kill 子进程；不 kill 会留一个僵尸 ossutil 一直挂着
         try:
             proc.kill()
@@ -358,9 +358,23 @@ def _safe_err(exc: BaseException) -> str:
 
 
 __all__ = [
-    "CRED_TTL_S", "DEFAULT_ENDPOINT", "KIND_FILES", "KIND_IMAGES", "KIND_VIDEOS",
-    "KIND_VOICES", "OSS_CREDENTIALS_ENV", "OssConfig", "UPLOAD_ATTEMPTS", "UPLOAD_TIMEOUT_S",
-    "build_oss_key", "clear_oss_config_cache", "load_oss_config", "oss_credentials_path",
-    "oss_upload_buffer", "public_url", "sanitize_filename_part", "upload_media_bytes",
+    "CRED_TTL_S",
+    "DEFAULT_ENDPOINT",
+    "KIND_FILES",
+    "KIND_IMAGES",
+    "KIND_VIDEOS",
+    "KIND_VOICES",
+    "OSS_CREDENTIALS_ENV",
+    "UPLOAD_ATTEMPTS",
+    "UPLOAD_TIMEOUT_S",
+    "OssConfig",
+    "build_oss_key",
+    "clear_oss_config_cache",
+    "load_oss_config",
+    "oss_credentials_path",
+    "oss_upload_buffer",
+    "public_url",
+    "sanitize_filename_part",
+    "upload_media_bytes",
     "upload_to_oss",
 ]

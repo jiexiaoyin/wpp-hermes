@@ -92,7 +92,8 @@ def run_ts(js_path: pathlib.Path) -> dict[str, dict]:
 
 
 def run_py() -> dict[str, dict]:
-    import verify_judge as VJ          # 复用同一套假 aiohttp 夹具，免得两处漂移
+    import verify_judge as VJ  # 复用同一套假 aiohttp 夹具，免得两处漂移
+
     from plugin.llm.judge import JudgeCreds, call_judge
 
     out: dict[str, dict] = {}

@@ -50,7 +50,6 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -342,7 +341,7 @@ def calc_burst_score(term: str, group_id: str, *, now: float | None = None) -> f
 
 
 def get_jargon_candidates(
-    group_id: str, top_k: int = 20, exclude_terms: Optional[set[str]] = None,
+    group_id: str, top_k: int = 20, exclude_terms: set[str] | None = None,
     *, now: float | None = None,
 ) -> list[JargonCandidate]:
     """取群内 top-K 候选（``jargon.ts:245-290``）。
@@ -439,7 +438,7 @@ def should_filter_candidate(term: str) -> bool:
 # ===== 查询（④ 的取数端；被 ``tools/jargon_tool.py`` 的 ``wpp_jargon_query`` 调用）=====
 
 
-def query_jargon(group_id: str, term: str, min_freq: int = 3) -> Optional[dict]:
+def query_jargon(group_id: str, term: str, min_freq: int = 3) -> dict | None:
     """查询某群某词的信息。返回 ``{term, count, users, contexts, first_seen[, meaning]}`` 或 ``None``。
 
     ⚠️ ``min_freq`` 默认 **3**：TS 的查询工具是"从 DB 取全部已确认词条"，

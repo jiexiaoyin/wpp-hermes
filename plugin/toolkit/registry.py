@@ -32,7 +32,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 
 from .toolout import dump_capped, dump_error
@@ -104,7 +103,7 @@ def generic_handler(endpoint: str, method: str = "POST"):
         client = (adapter._clients or {}).get(account_id)
         if not client:
             return (f"账号 {account_id} 未连接"
-                    f"（已连接: {sorted((adapter._clients or {}))}）")
+                    f"（已连接: {sorted(adapter._clients or {})}）")
         # 过滤空参数
         body = {k: v for k, v in params.items() if v is not None}
         try:
@@ -163,7 +162,7 @@ def register_generic_tools(ctx, adapter_getter, tool_defs: list[dict]) -> int:
             client = (adapter._clients or {}).get(account_id)
             if not client:
                 return (f"账号 {account_id} 未连接"
-                        f"（已连接: {sorted((adapter._clients or {}))}）")
+                        f"（已连接: {sorted(adapter._clients or {})}）")
             body = {k: v for k, v in params.items() if v is not None}
             # 可选「请求体整形」：个别厂商端点的真实契约 schema 表达不了（二选一字段、
             # 金额 number→两位小数字符串、剔除线上 model 不存在的死字段）。规则由策略层

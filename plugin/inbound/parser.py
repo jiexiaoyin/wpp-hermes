@@ -52,7 +52,7 @@ import secrets
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -217,7 +217,7 @@ def extract_all_msg_src(payload: dict) -> list[dict]:
 _MSG_HINT_KEYS = ("msgId", "MsgId", "fromUser", "fromWxid", "content", "Content")
 
 
-def extract_msg_src(payload: dict) -> Optional[dict]:
+def extract_msg_src(payload: dict) -> dict | None:
     """从单条 payload 提取消息字典。"""
     if not isinstance(payload, dict):
         return None
@@ -308,7 +308,7 @@ def _extract_msg_type(src: dict) -> int:
         return MT_TEXT
 
 
-def parse_message(account_id: str, src: dict) -> Optional[WppMessage]:
+def parse_message(account_id: str, src: dict) -> WppMessage | None:
     """把 vendor 消息 dict 归一化为 :class:`WppMessage`。"""
     from .media import extract_media_meta
 
@@ -673,7 +673,6 @@ class InboundPipeline:
     def prepare_text(self, msg: WppMessage) -> str:
         """生成发给 agent 的文本（去 @、去群前缀、带媒体标记 + 语音转写 + 小程序卡片块）。"""
         from .app_card import mini_program_block
-        from .hongbao import is_red_packet_message
         from .media import voice_transcript
 
         text = strip_group_prefix(msg.content or "")

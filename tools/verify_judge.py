@@ -107,9 +107,9 @@ def _uninstall_fake_aiohttp() -> None:
 
 def case_creds_chain() -> None:
     print("\n① 凭证链：JUDGE_API_KEY → MINIMAX_CN_API_KEY → MINIMAX_API_KEY")
-    from plugin.llm.judge import resolve_judge_creds
-
     import os
+
+    from plugin.llm.judge import resolve_judge_creds
     saved = {k: os.environ.get(k) for k in
              ("JUDGE_API_KEY", "DEEPSEEK_API_KEY", "MINIMAX_CN_API_KEY", "MINIMAX_API_KEY")}
     try:
@@ -228,8 +228,8 @@ def case_anthropic_body() -> None:
 
 def case_empty_body_raises() -> None:
     print("\n⑤ 空正文必须 raise（09-11 静默瘫 3 天的直接对策）")
-    from plugin.llm.judge import JudgeCreds, JudgeError, call_judge
     from plugin.core import metrics
+    from plugin.llm.judge import JudgeCreds, JudgeError, call_judge
 
     oc = JudgeCreds(api_key="k", base_url="https://api.deepseek.com", format="openai")
     ac = JudgeCreds(api_key="k", base_url="https://api.minimaxi.com/anthropic",
@@ -403,7 +403,7 @@ def case_deferred_import() -> None:
             fail("模块级泄漏了 aiohttp 名字")
         else:
             ok("无模块级 aiohttp 名字泄漏")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 异常不得冒泡打断整批（收尾/探针路径）
         fail(f"缺 aiohttp 时导入失败: {type(exc).__name__}: {exc}")
     finally:
         if saved is not None:

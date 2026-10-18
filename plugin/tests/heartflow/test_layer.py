@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import ast
+import sys
 import logging
 import math
 import time
@@ -566,7 +567,7 @@ def test_module_level_imports_have_no_third_party_dependency():
             top += [a.name for a in node.names]
         elif isinstance(node, ast.ImportFrom):
             top.append(("." * node.level) + (node.module or ""))
-    stdlib = {"__future__", "logging", "math", "threading", "dataclasses", "datetime", "typing"}
+    stdlib = set(sys.stdlib_module_names) | {"__future__"}
     for name in top:
         assert name.startswith(".") or name.split(".")[0] in stdlib, f"模块级第三方依赖: {name}"
     assert "from ...data import repo_hf" in LAYER_SRC, "数据层仍是延迟导入"

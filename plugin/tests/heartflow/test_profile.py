@@ -28,6 +28,7 @@ TS §6 接线 13        循环依赖 + judge prompt 注入：注入点在 ``hear
 from __future__ import annotations
 
 import ast
+import sys
 import asyncio
 import json
 import re
@@ -985,8 +986,7 @@ def test_profile_imports_no_learn_or_heartflow_at_module_level():
 
 def test_module_level_imports_have_no_third_party_dependency():
     """加载期只许 stdlib + 本包相对导入（本模块在注册链上，见 F5）。"""
-    stdlib = {"__future__", "json", "logging", "math", "re", "threading",
-              "dataclasses", "datetime", "typing"}
+    stdlib = set(sys.stdlib_module_names) | {"__future__"}
     tree = ast.parse(PROFILE_SRC)
     top: list[str] = []
     for node in tree.body:

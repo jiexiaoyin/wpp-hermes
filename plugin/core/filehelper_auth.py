@@ -34,7 +34,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 #: 允许执行 —— 发件人确实在 ``adminUsers`` 里。
 ALLOW = "allow"

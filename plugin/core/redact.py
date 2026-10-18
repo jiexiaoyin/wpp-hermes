@@ -25,7 +25,7 @@ v1.3.61 起**一个** webhook server 服务多账号（一 server 多 path）。
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 
 def mask_secret(secret: str) -> str:

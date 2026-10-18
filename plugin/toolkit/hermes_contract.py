@@ -52,7 +52,8 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-from typing import Any, Callable, Mapping
+from collections.abc import Callable, Mapping
+from typing import Any
 
 log = logging.getLogger(__name__)
 

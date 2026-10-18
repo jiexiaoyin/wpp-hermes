@@ -209,8 +209,9 @@ async def safe_fetch_url(url: str, *, timeout: int = 30,
     302 到 ``http://127.0.0.1:8062/mcp`` 就绕过了 SSRF 闸，内容还会被当成图片发回微信。
     现在手动跟跳（≤3 跳），每一跳都重新解析/校验 IP。
     """
-    import aiohttp
     from urllib.parse import urljoin
+
+    import aiohttp
 
     current = url
     async with aiohttp.ClientSession() as sess:

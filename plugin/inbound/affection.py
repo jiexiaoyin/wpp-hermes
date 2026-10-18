@@ -63,8 +63,9 @@ import json
 import logging
 import math
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 log = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ class AffectionConfig:
     llm_classify: bool = False
 
     @classmethod
-    def from_cfg(cls, cfg: Mapping[str, Any] | None) -> "AffectionConfig":
+    def from_cfg(cls, cfg: Mapping[str, Any] | None) -> AffectionConfig:
         """从账号 cfg 的 ``affection`` 段解析（坏值一律退回默认，**不抛**）。"""
         d = cfg if isinstance(cfg, Mapping) else {}
         return cls(
@@ -349,7 +350,7 @@ class InteractionResult:
 
 
 def calculate_affection_change(
-    interaction_type: str, current_level: int, current_mood: "MoodState | None",
+    interaction_type: str, current_level: int, current_mood: MoodState | None,
     max_user_affection: int,
 ) -> InteractionResult:
     """纯函数：算这次交互让好感度变多少（``:300-340``）。

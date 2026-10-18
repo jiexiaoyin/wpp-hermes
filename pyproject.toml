@@ -1,0 +1,57 @@
+# 只放工具链配置（本仓不打包发布）。pytest 配置仍在 pytest.ini。
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [
+  "__pycache__",
+  ".git",
+  ".pytest_cache",
+  "plugin/tests",        # 测试用例密度高、风格宽松，单独处理
+  "tools/vendor_source", # 端点蓝本：生成器的输入，保持与来源逐字节一致
+]
+
+[tool.ruff.lint]
+# 只选「真问题 + 低误报」的规则；风格类交给 --fix 自动收敛。
+# 刻意**不启**：ISC（中文长串隐式拼接误报 235 处）、SIM（SIM105 与刻意宽兜底冲突）、
+# RUF046（int(round()) 在本仓是有意做类型收敛）、E741（单字母变量在数学式代码里常见）。
+select = [
+  "E4", "E7", "E9",   # pycodestyle 硬错误
+  "F",                # pyflakes（未用 import/变量、未定义名）
+  "W",                # pycodestyle 警告
+  "I",                # import 排序
+  "UP",               # pyupgrade
+  "B",                # bugbear（可变默认值、assert、循环变量捕获…）
+  "BLE",              # blind except —— 本仓的 `# noqa: BLE001` 是**纪律标记**，必须让规则生效
+  "RUF022", "RUF100", # dunder all 排序、多余 noqa
+  "ASYNC",            # async 反模式（阻塞调用）
+  "S110",             # try-except-pass
+  "G",                # logging 格式
+  "PLW1510",          # subprocess 不带 check
+]
+ignore = [
+  "E501",      # 行长由 line-length 管，中文注释难折行
+  "RUF001", "RUF002", "RUF003",  # 中文标点/全角字符误报
+  # 以下 6 条**规则级豁免**：不是"没问题"，是"问题价值低于维护成本"，且需要人判断
+  # 具体语义（改错比不改更危险）。逐条清理进 v2.1 backlog。
+  "ASYNC109",  # async 函数的 timeout 参数名（本仓沿用 vendor 的 timeout 语义）
+  "E741",      # 单字母变量 l/I/O（数学/协议字段里常见）
+  "B905",      # zip() 缺 strict= —— 这些 zip 的两边长度由构造保证
+  "B008",      # 默认参数里调函数（registry 的 mk_handler 工厂模式）
+  "UP031",     # % 格式化（对齐 vendor 日志文案）
+  "PLW1510",   # subprocess 不带 check（多数是探测/一次性工具，返回值自己判）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"plugin/toolkit/vendor_defs*.py" = ["E501", "RUF001", "RUF002", "RUF003"]
+# ── 存量（2026-10-18 审计时确认过：全部是"工具/媒体路径的一次性同步 IO"或
+#    "log.error(..., exc_info=True) 与 log.exception 等价"，不是热路径）
+#    ASYNC230/240: 读本地媒体文件（≤200MB 上限）；工具 handler 低频，不在消息热路径
+#    G201: log.error(..., exc_info=True) ≡ log.exception(...)，纯惯用法差异
+#    ASYNC221: 同上，ffmpeg 抽帧是低频工具路径
+"plugin/inbound/media_oss.py" = ["ASYNC230"]
+"plugin/inbound/stt.py" = ["ASYNC230", "ASYNC240"]
+"plugin/platform/adapter.py" = ["ASYNC230", "ASYNC240", "G201"]
+"plugin/platform/commands.py" = ["G201"]
+"plugin/platform/outbound.py" = ["ASYNC230"]
+"plugin/platform/silk_encoder.py" = ["ASYNC230", "ASYNC240"]
+"plugin/toolkit/msg.py" = ["ASYNC221", "ASYNC230", "ASYNC240"]

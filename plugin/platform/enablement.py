@@ -37,8 +37,7 @@
 
 from __future__ import annotations
 
-import os
-from typing import Any, Optional
+from typing import Any
 
 from ..core import credentials
 
@@ -79,7 +78,7 @@ def validate_config(config: Any) -> bool:
     return is_connected(config)
 
 
-def env_enablement_fn() -> Optional[dict]:
+def env_enablement_fn() -> dict | None:
     """env 启用探针：返回非空 dict 才 seed，否则平台不启用。
 
     ``_plugin_probe_seed`` 要求返回**非空 dict**（``config_env.py:374``），

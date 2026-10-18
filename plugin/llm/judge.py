@@ -54,13 +54,13 @@ partial（启动 WARNING 点名，且不重试）。**只兜端点故障，不�
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
 from ..core import metrics
@@ -260,7 +260,7 @@ def log_judge_config_once() -> None:
                 "[WPP JUDGE] 旧 env 已作废、不会被读取：%s —— 请改名成 %s / %s",
                 ", ".join(legacy), JUDGE_MAIN_VARS["base_url"], JUDGE_MAIN_VARS["api_key"],
             )
-    except Exception:  # noqa: BLE001 — 自述失败不许影响主链路
+    except Exception:
         log.debug("[WPP JUDGE] 启动自述失败", exc_info=True)
 
 
@@ -310,7 +310,7 @@ async def call_judge(
             creds=primary,
             images=images,
         )
-    except Exception as primary_err:  # noqa: BLE001 — 兜底需要接住所有端点级失败
+    except Exception as primary_err:
         state = resolve_judge_fallback()
         if state.kind != "on":
             # 兜底未配/半配 ⇒ 行为与 v1.12.0 逐字一致（原异常原样抛出）。
@@ -335,7 +335,7 @@ async def call_judge(
             )
             metrics.inc_judge_fallback_ok()
             return out
-        except Exception as fallback_err:  # noqa: BLE001
+        except Exception as fallback_err:
             metrics.inc_judge_failure()
             # 两段都失败：报错必须同时点名两个端点（describe* 不含 key）。
             raise JudgeError(
@@ -482,7 +482,7 @@ async def _post_json(url: str, headers: dict[str, str], body: dict[str, Any],
                 text = await resp.text()
                 if resp.status != 200:
                     raise JudgeError(f"HTTP {resp.status}: {text[:_ERR_BODY_CAP]}")
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise JudgeError(f"timeout after {timeout_ms}ms") from exc
     except aiohttp.ClientError as exc:
         raise JudgeError(f"HTTP 请求失败: {type(exc).__name__}: {exc}") from exc

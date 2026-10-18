@@ -56,10 +56,11 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from .budget import (
     REASON_CONSECUTIVE,

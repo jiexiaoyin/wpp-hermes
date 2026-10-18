@@ -41,9 +41,10 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 from ..inbound.heartflow import budget as hf_budget
 from ..inbound.heartflow import dedupe as hf_dedupe

@@ -68,7 +68,7 @@ TS v1.3.80 把三个白名单域（``/user`` ``/group`` ``/blacklist``）收成�
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from ..core import overrides
 
@@ -196,7 +196,7 @@ def write_back(account_id: str, key: str, value: Any, *, adapter: Any = None) ->
         log.error("[WPP:%s] 写账号配置失败 key=%s: %s", account_id, key, exc, exc_info=True)
         head = str(exc).splitlines()[0][:200] if str(exc) else "AccountWriteError"
         return f"❌ 写入账号配置失败，**本次改动没有生效**：{head}"
-    except Exception as exc:  # noqa: BLE001 —— 任何写不进去的原因都要变成一句人话
+    except Exception as exc:
         log.error("[WPP:%s] 写账号配置失败(未预期) key=%s: %s", account_id, key, exc, exc_info=True)
         return f"❌ 写入账号配置失败，**本次改动没有生效**：{exc.__class__.__name__}（详见日志）"
 
@@ -217,7 +217,7 @@ def reload_now(account_id: str, adapter: Any = None) -> bool:
     try:
         adapter.reload_account(account_id)
         return True
-    except Exception as exc:  # noqa: BLE001 —— 重载失败不该把命令链路带崩
+    except Exception as exc:
         log.warning("[WPP:%s] 配置已落盘，但重载失败 ⇒ 当次不生效（重连/重启后生效）: %s",
                     account_id, exc, exc_info=True)
         return False
@@ -241,7 +241,7 @@ def _safe_cfg(account_id: str) -> dict:
         return {}
 
 
-def _account_file_cfg(account_id: str) -> Optional[dict]:
+def _account_file_cfg(account_id: str) -> dict | None:
     """读**盘上那份**账号 cfg —— 写回/读开关时的**底稿**。读不出来返回 ``None``。
 
     ⚠️ 为什么不用 :func:`_safe_cfg`：那条路经 ``resolve()``，而它对"缺 ``agent``"这类
@@ -262,7 +262,7 @@ def _account_file_cfg(account_id: str) -> Optional[dict]:
     return raw
 
 
-def _feature_state(account_id: str, feature: str) -> Optional[bool]:
+def _feature_state(account_id: str, feature: str) -> bool | None:
     """当前开关状态。覆盖优先，读不到**盘上那份**配置时返回 ``None``。
 
     ⚠️ ``None`` 的语义是「**我读不到**」，不是「没开」—— 显示端必须分开说
@@ -284,7 +284,7 @@ def _feature_state(account_id: str, feature: str) -> Optional[bool]:
     return bool(isinstance(feat, dict) and feat.get("enabled"))
 
 
-def state_label(current: Optional[bool]) -> str:
+def state_label(current: bool | None) -> str:
     """状态页把 :func:`_feature_state` 的三种取值印成人话。
 
     第三种（``None``）是**必须**单列的那一种：把"我读不到"印成「❌ 关闭」是在撒谎，
@@ -295,14 +295,14 @@ def state_label(current: Optional[bool]) -> str:
     return "✅ 开启" if current else "❌ 关闭"
 
 
-def _state_word(current: Optional[bool]) -> str:
+def _state_word(current: bool | None) -> str:
     """同 :func:`state_label`，但印 ``on``/``off``（``/affection`` 那两条的既有口径）。"""
     if current is None:
         return UNREADABLE_STATE_MSG
     return "on" if current else "off"
 
 
-def _allowlist_items(account_id: str, key: str) -> Optional[list[str]]:
+def _allowlist_items(account_id: str, key: str) -> list[str] | None:
     """当前名单（``allowFrom`` / ``groupAllowFrom`` / ``blacklistGroups``）。
 
     底稿 = **盘上那份账号文件** + 内存覆盖（覆盖只补缺、不改序），读不出来返回 ``None``
@@ -325,7 +325,7 @@ def _allowlist_items(account_id: str, key: str) -> Optional[list[str]]:
     return items
 
 
-def _feature_cfg(account_id: str, feature: str) -> Optional[dict]:
+def _feature_cfg(account_id: str, feature: str) -> dict | None:
     """写开关时的**底稿**：保留阈值等同级键，别让开关动作把整段配置拍扁。
 
     读不出来返回 ``None`` ⇒ 调用方**必须拒绝写**（空底稿 + 整体替换那个键 =
@@ -344,7 +344,7 @@ def _feature_cfg(account_id: str, feature: str) -> Optional[dict]:
     return cfg
 
 
-def _flag_state(account_id: str, key: str) -> Optional[bool]:
+def _flag_state(account_id: str, key: str) -> bool | None:
     """读一个**标量**开关键（``xiaoweiEnabled`` 这类）的当前值。
 
     读不出来返回 ``None`` —— 调用方必须说"读不到"，**不能**说成"没开"

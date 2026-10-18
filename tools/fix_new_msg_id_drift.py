@@ -44,7 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from plugin.data import db as DB  # noqa: E402
+from plugin.data import db as DB
 
 TABLE = "wpp_messages"
 COLUMN = "new_msg_id"
@@ -56,9 +56,8 @@ DEFAULT_PROFILE_HOME = "/root/.hermes/profiles/wpp-wechat"
 def connect(profile_home: str):
     """按 profile 的 .env 连库（凭据只进内存，不打印）。"""
     import pymysql
-    from pymysql.cursors import DictCursor
-
     from agent.secret_scope import build_profile_secret_scope
+    from pymysql.cursors import DictCursor
 
     cfg = DB.config()
     secrets = build_profile_secret_scope(Path(profile_home))

@@ -38,7 +38,8 @@ def _contains_jargon(term: str, text: str) -> bool:
 def register_jargon_tools(ctx) -> None:
     """注册 jargon 黑话查询工具。"""
     async def query_jargon(**params):
-        from ..inbound.jargon import query_jargon as qj, list_hot_jargon
+        from ..inbound.jargon import list_hot_jargon
+        from ..inbound.jargon import query_jargon as qj
         group_id = params.get("groupId") or ""
         term = params.get("term") or ""
         text = params.get("text") or ""

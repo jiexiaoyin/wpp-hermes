@@ -86,7 +86,7 @@ def main(argv: list[str]) -> int:
 
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
+    except Exception:  # noqa: S110, BLE001 —— 异常不得冒泡打断整批（收尾/探针路径）
         pass
 
     load_env_file(args.env_file)
@@ -94,8 +94,8 @@ def main(argv: list[str]) -> int:
         os.environ["WECHATPRO_DB_NAME"] = args.db
 
     sys.path.insert(0, str(Path(args.plugin).resolve()))
-    from data import db, migrations            # noqa: E402
-    from data.migrations import SchemaError    # noqa: E402
+    from data import db, migrations
+    from data.migrations import SchemaError
 
     print(f"● 目标 {db.describe()}")
 

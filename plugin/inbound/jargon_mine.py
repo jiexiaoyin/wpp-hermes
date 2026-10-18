@@ -64,14 +64,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
 import re
-import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Protocol, Sequence
+from typing import Any, Protocol
 
 from . import jargon
 
@@ -127,7 +126,7 @@ class JargonCfg:
     max_candidates_per_group: int = 50
 
     @classmethod
-    def from_raw(cls, cfg: Mapping[str, Any] | None) -> "JargonCfg":
+    def from_raw(cls, cfg: Mapping[str, Any] | None) -> JargonCfg:
         """从账号 cfg 的 ``jargon`` 段解析（坏值一律退回默认，**不抛**）。"""
         d = cfg if isinstance(cfg, Mapping) else {}
         return cls(
@@ -386,7 +385,7 @@ def extract_json_object(text: str) -> Any:
 # ===== LLM 调用（``jargon.ts:525-566``）=====
 
 
-async def jargon_llm(prompt: str, cfg: JargonCfg, creds: Any) -> Optional[str]:
+async def jargon_llm(prompt: str, cfg: JargonCfg, creds: Any) -> str | None:
     """单次 LLM 调用，返回文本；**失败一律 ``None``**（TS 的 ``catch { return null }``）。
 
     两条早退的顺序与理由见模块 docstring ①②。
@@ -540,7 +539,7 @@ class MineResult:
 
 
 async def mine_jargon_for_group(
-    group_id: str, cfg: JargonCfg, creds: Any = None, store: Optional[JargonStore] = None,
+    group_id: str, cfg: JargonCfg, creds: Any = None, store: JargonStore | None = None,
     *, now: float | None = None,
 ) -> MineResult:
     """挖一轮：统计候选 → LLM 批量验证 → 三步推断 → 落库（``:645-696``）。
@@ -633,12 +632,12 @@ def reset_all() -> None:
 
 __all__ = [
     "JARGON_MAX_TOKENS",
-    "MineResult",
+    "MSG_HISTORY_MAX",
     "JargonCfg",
     "JargonConfigError",
     "JargonStore",
+    "MineResult",
     "RepoJargonStore",
-    "MSG_HISTORY_MAX",
     "build_compare_prompt",
     "build_extract_prompt",
     "build_infer_content_only_prompt",

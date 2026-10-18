@@ -104,8 +104,8 @@ def _args_from_schema(schema: dict | None) -> dict:
 
 
 # ───────────────────────────────────────────── ① 真装载（Hermes 自己的路）
-from hermes_cli.plugins import get_plugin_manager          # noqa: E402
-from tools.registry import _kwargs_accepted_by, registry   # noqa: E402
+from hermes_cli.plugins import get_plugin_manager  # noqa: E402
+from tools.registry import _kwargs_accepted_by, registry  # noqa: E402
 
 get_plugin_manager().discover_and_load()
 names = registry.get_tool_names_for_toolset(TOOLSET)

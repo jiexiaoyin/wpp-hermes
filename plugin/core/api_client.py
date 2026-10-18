@@ -253,8 +253,8 @@ class WppClient:
                     # ``close()`` 只会返回一个待 await 的对象（loop 已死就再也等不到了）；
                     # 内部的 ``_close()`` 是同步的：它会清掉连接表、放掉 protocol 引用，
                     # fd 随后由 GC 收掉。死 loop 上能做到的只有这些。
-                    connector._close()  # noqa: SLF001 —— aiohttp 无公开的同步关闭口
-            except Exception:  # noqa: BLE001 —— 清理失败不影响本次请求
+                    connector._close()
+            except Exception:
                 log.debug("[WPP] 死 loop 的会话清理失败（已丢弃）", exc_info=True)
             if self._session is session:
                 self._session, self._session_loop = None, None
@@ -276,15 +276,15 @@ class WppClient:
             if lp is running or lp.is_closed():
                 try:
                     await session.close()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.debug("[WPP] 关闭会话失败（忽略）", exc_info=True)
                 continue
             try:
                 asyncio.run_coroutine_threadsafe(session.close(), lp)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.debug("[WPP] 跨 loop 关闭会话失败（已丢弃）", exc_info=True)
 
-    async def __aenter__(self) -> "WppClient":
+    async def __aenter__(self) -> WppClient:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -461,7 +461,7 @@ class WppClient:
                 if attempt <= max_retries:
                     await asyncio.sleep(backoff(attempt))
                     continue
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # ★ 总超时抛的是 ``asyncio.TimeoutError``（3.11+ 即内置 TimeoutError），
                 #   它**不是** ``aiohttp.ClientError`` 子类 —— 旧实现让它直接穿透：
                 #   读端点一次都不重试、也不包成 WppApiError，下游 ``except WppApiError``
@@ -618,7 +618,7 @@ class WppClient:
                     if len(events) >= max_events:
                         truncated = True
                         break
-        except asyncio.TimeoutError:
+        except TimeoutError:
             truncated = True
         except Exception as exc:  # noqa: BLE001
             log.warning("[WPP] SSE %s 失败: %s", endpoint, exc)
@@ -1052,7 +1052,7 @@ def build_appmsg_xml(title: str, desc: str, url: str, thumb_url: str = "") -> st
                 .replace(">", "&gt;").replace('"', "&quot;"))
 
     return (
-        '<appmsg appid="" sdkver="0"><title>{}</title>'
-        '<des>{}</des><action>view</action><type>5</type>'
-        '<url>{}</url><thumburl>{}</thumburl></appmsg>'
-    ).format(esc(title), esc(desc), esc(url), esc(thumb_url))
+        f'<appmsg appid="" sdkver="0"><title>{esc(title)}</title>'
+        f'<des>{esc(desc)}</des><action>view</action><type>5</type>'
+        f'<url>{esc(url)}</url><thumburl>{esc(thumb_url)}</thumburl></appmsg>'
+    )

@@ -228,5 +228,5 @@ def _atomic_write(path: Path, data: dict[str, Any]) -> None:
             os.fsync(dfd)
         finally:
             os.close(dfd)
-    except OSError as exc:  # noqa: PERF203 —— 拿不到目录 fd（某些文件系统）不该让写回算失败
+    except OSError as exc:
         log.debug("[WPP] 账号目录 fsync 跳过（%s）: %s", path.parent, exc)
