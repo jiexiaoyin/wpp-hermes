@@ -2701,11 +2701,6 @@ class WppAdapter(BasePlatformAdapter):
             "groupPolicy": acct.group_policy,
             "groupAllowFrom": list(acct.group_allow_from),
             "blacklistGroups": list(acct.blacklist_groups),
-            # ⚠️ **死键**，本树与 TS 都不生效（A8）：``should_process`` 不读它，
-            #    TS 的活路径也把它硬编码成 false。配了它的人由
-            #    ``core.accounts._warn_inert_keys`` 打一行 WARN 提醒。
-            #    这里照旧透传，是为了"看配置就能对上 TS 的 cfg 形状"。
-            "requireAtMention": acct.require_at_mention,
             "adminUsers": list(acct.admin_users),
             # ★ 之前漏了这一行：``triggers.should_process`` 读 cfg["allowAllUsers"]，
             #   而访问策略层读的是 acct.raw —— 两处口径都在，唯独 pipeline 视图

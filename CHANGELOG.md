@@ -32,10 +32,12 @@ Hermes Python 侧重写完成，接管生产（profile `wpp-wechat`，单账号 
   `NOT NULL DEFAULT ''`（唯一键 `uk_account_msg` 恢复对 NULL 的去重能力）。
 - 旧树 `/root/dev/wpp-hermes` 归档到 `/root/dev/_archive/wpp-hermes-legacy-20261018`。
 - 新增 `tools/fix_new_msg_id_drift.py`（人肉执行）与 `tools/diag_new_msg_id_dups.py`（只读诊断）。
+- 群聊触发规则定稿：**被 @ 必回**（`group_mention` 直通 agent），**其余消息交心流 judge**
+  （`heartflow_candidate`）。据此移除 `requireAtMention` 死键（账号模型/适配器/示例配置/
+  死键告警一并删除）——它不是规则载体，留着只会让人以为"配了只回 @"。要收窄出声范围
+  仍用 `groupPolicy` / `blacklistGroups` / 心流预算与阈值。
 
 ### 已知未做
 
 - `platform/adapter.py` 仍是单文件 2855 行（媒体/入站/出站可继续拆 sibling）。
-- `requireAtMention` 是死键：配置了也不生效（与 TS 活路径一致），启动只打一条 WARNING。
-  收窄「什么时候出声」请用 `groupPolicy` / `blacklistGroups` / 心流预算与阈值。
 - 无 lint/type CI（ruff 配置待接入）。

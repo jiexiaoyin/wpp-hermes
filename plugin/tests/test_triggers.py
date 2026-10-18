@@ -490,22 +490,21 @@ def test_the_gate_matches_real_verdicts():
         assert T.should_drop(ok, reason) is expect_drop, (reason, ok)
 
 
-def test_require_at_mention_is_deliberately_not_honoured():
-    """★ A8：``requireAtMention`` 是**死键**，本树照旧不生效 —— 这是**对齐**不是漏做。
+def test_group_mention_forces_reply_and_others_go_to_heartflow():
+    """老板 2026-10-18 拍板：群里被 @ **必须回复**，其余消息交给心流。
 
-    查证过 TS 侧：唯一实现（``group-policy.ts``）只挂在 ``handleWebhookPayload`` 上，
-    而那个函数**零调用者**；活路径 ``shouldTrigger`` 把它硬编码成 ``false``，
-    生产账号写着 ``true`` 而心流在群里一直正常工作。
+    对齐 TS 活路径 ``src/inbound/triggers.ts``：``@`` → ``via: "at"``；
+    非 @ → ``via: "heartflow"``（由 judge 决定）。TS 的 ``requireAtMention``
+    从未参与这条判定（``shouldTrigger`` 不读它；唯一实现 ``group-policy.ts``
+    挂在零调用者的 ``handleWebhookPayload`` 上）。本树已移除该键。
 
-    所以把它实现成硬门 = **引入分叉**：群里非 @ 的消息会静默不触发（比"多说话"更糟，
-    而且症状是"它不理我"，日志里一行都没有）。配了它的人由
-    ``core.accounts._warn_inert_keys`` 一行 WARN 提醒。
+    ⚠️ 不许把它做成硬门：非 @ 消息若直接丢弃，心流就永远没有机会判断，
+    表现为"它不理人"且日志里一行都没有 —— 与 TS 和老板的规则同时分叉。
     """
-    cfg = _cfg(requireAtMention=True)
+    cfg = _cfg()
+    assert T.should_process(_group(content="@测试小助理 在吗"), cfg) == \
+        (True, "group_mention"), "@ 必须直通，绕过心流"
     assert T.should_process(_group(content="今天天气不错"), cfg) == \
-        (False, "heartflow_candidate"), "非 @ 群消息照旧进心流（不因这个键被丢）"
-    assert T.should_process(_group(content="@测试小助理 在吗"), cfg) == (True, "group_mention")
-
-    src = Path(T.__file__).read_text(encoding="utf-8")
-    assert "requireAtMention" not in src and "require_at_mention" not in src, \
-        "判据里出现这个键，就说明有人把它实现成了硬门 —— 那要与 TS 分叉，须先改这条测试"
+        (False, "heartflow_candidate"), "非 @ 群消息交给心流，不能被硬门丢掉"
+    assert T.should_drop(False, "heartflow_candidate") is False, \
+        "心流候选必须能漏到 _try_heartflow"

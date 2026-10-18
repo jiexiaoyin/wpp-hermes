@@ -153,7 +153,6 @@ class Account:
     group_allow_from: tuple[str, ...]
     admin_users: tuple[str, ...]
     blacklist_groups: tuple[str, ...]
-    require_at_mention: bool
     #: W7-6 起**真在跑**：到达层聚合窗口（同 key 多条合一批），见 ``inbound/debounce.py``。
     debounce_ms: int
 
@@ -445,7 +444,6 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         group_allow_from=_as_str_tuple(cfg.get("groupAllowFrom")),
         admin_users=_as_str_tuple(cfg.get("adminUsers")),
         blacklist_groups=_as_str_tuple(cfg.get("blacklistGroups")),
-        require_at_mention=_as_bool(cfg.get("requireAtMention"), False),
         # W7-6 起这个键**真的生效**（到达层聚合窗口）。默认值对齐 TS ``core/constants.ts:62``
         # 的 ``DEFAULT_DEBOUNCE_MS = 500`` —— 本树原先写 1500 是 v1.3.74 **之前**的旧值
         # （2026-08-22 老板拍板降到 500：webhook 到达延迟中位数 < 200ms，等 1.5s 纯属浪费）。
@@ -477,49 +475,7 @@ def load_all(extra_accounts: dict[str, Any] | None = None) -> dict[str, Account]
             out[account_id] = resolve(account_id, (extra_accounts or {}).get(account_id))
         except AccountError as exc:
             log.error("[WPP] 账号 %s 配置错误，已跳过: %s", account_id, exc)
-    _warn_inert_keys(out.values())
     return out
-
-
-#: 已就"死键"提醒过的账号（每进程每人一条，防日志刷屏）
-_INERT_WARNED: set[str] = set()
-
-
-def reset_inert_warnings() -> None:
-    """清掉去重表（**唯一用途是测试**，与心流那些 ``reset_*_cache`` 同款）。"""
-    _INERT_WARNED.clear()
-
-
-def _warn_inert_keys(accounts: Iterable[Account]) -> None:
-    """配置里出现**本树不认的键**时，每人每进程提醒一次（审阅 A8）。
-
-    目前只有 ``requireAtMention`` 一个，它在 TS 侧**也不生效**：
-
-    * 唯一实现 ``src/inbound/group-policy.ts`` 只被 ``handleWebhookPayload`` 调用，
-      而那个函数**零调用者**；
-    * 活路径 ``createWppInboundHandler`` → ``shouldTrigger`` 把 ``requireAtMention``
-      **硬编码成 false**（``triggers.ts``），``enrich.ts`` 的注释也明说
-      非 @ 消息照样会进心流；
-    * 生产 TS 账号写着 ``requireAtMention: true``，而心流在群里一直正常工作。
-
-    所以"只在被 @ 时回复"这个语义**从来没生效过**，本树照抄"不生效"才是
-    **行为对齐**（实现成硬门反而是引入分叉 —— 群里会静默不出声）。
-
-    但**不实现不等于可以静默**：配了 ``true`` 的人以为群里只在被 @ 时才说话，
-    实际每条群消息都进心流 —— 这中间隔着一次"它怎么乱插话"的事故。宁可打一行 WARN。
-    """
-    for acct in accounts:
-        if not acct.require_at_mention or acct.id in _INERT_WARNED:
-            continue
-        _INERT_WARNED.add(acct.id)
-        log.warning(
-            "[WPP] 账号 %s 配了 requireAtMention=true，但本插件**不生效**"
-            "（与 TS 行为对齐：TS 的活路径也把它硬编码成 false，唯一实现挂在"
-            "零调用者的 handleWebhookPayload 上）。群消息仍会全部进心流判定 ——"
-            "要收窄「什么时候出声」，请用心流的预算 / 阈值 / 沉默段，或用 "
-            "groupPolicy / blacklistGroups 收窄「在哪些群出声」。",
-            acct.id,
-        )
 
 
 # ================================================================ 连接前守卫

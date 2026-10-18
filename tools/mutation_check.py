@@ -1625,14 +1625,9 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("拒绝理由永不丢（deny 全落到下游「交心流」那条路上 ⇒ 撤回/黑名单消息进 LLM）",
          "    return reason_class(reason) != CLASS_HEARTFLOW",
          "    return False"),
-        ("★ requireAtMention 被实现成硬门（与 TS 分叉：群里非 @ 消息静默不触发、零日志）",
-         '    # ⑦ @机器人 → 100% 必回\n'
-         "    if is_bot_mentioned_by_text(content, self_wxid, self_nickname):",
-         '    if cfg.get("requireAtMention") and not is_bot_mentioned_by_text(\n'
-         '            content, self_wxid, self_nickname):\n'
-         '        return False, "group_mention"\n'
-         "    # ⑦ @机器人 → 100% 必回\n"
-         "    if is_bot_mentioned_by_text(content, self_wxid, self_nickname):"),
+        ("★ 非 @ 群消息被硬门丢掉（@必回/其余交心流 的规则被打破：群里只剩被叫才说话，零日志）",
+         '    return False, "heartflow_candidate"',
+         '    return False, "group_disabled"'),
     ]),
 
     # ------------------------------------------------- 数据层（test_db.py）
@@ -2188,16 +2183,6 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("agent='main' 不再拦截（两个微信号共用 agent 上下文 ⇒ 串号）",
          "    if agent == FORBIDDEN_AGENT:",
          "    if False:"),
-        # -- 死键（A8）：不生效可以，**静默**不行。
-        ("★ 死键提醒没接线（配了 requireAtMention 的人以为群里只回 @，实际每条都进心流）",
-         "    _warn_inert_keys(out.values())",
-         "    pass"),
-        ("死键提醒对谁都发（连没配这个键的账号也刷）",
-         "        if not acct.require_at_mention or acct.id in _INERT_WARNED:",
-         "        if True:"),
-        ("死键提醒不设去重（每次加载刷一遍 journald）",
-         "        if not acct.require_at_mention or acct.id in _INERT_WARNED:",
-         "        if not acct.require_at_mention:"),
     ]),
     "registration": (ROOT / "plugin" / "toolkit" / "registration.py",
                      "plugin/tests/test_registration.py", [

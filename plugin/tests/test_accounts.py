@@ -586,22 +586,14 @@ def test_the_example_shell_alone_does_not_count_as_configured(_isolated_accounts
     assert CR.any_local_account_configured() is False
 
 
-def test_an_inert_key_is_flagged_once_per_account(_isolated_accounts_dir, caplog):
-    """A8：配了 ``requireAtMention`` 必须留一行 WARN —— **不生效可以，静默不行**。
+def test_legacy_require_at_mention_key_is_ignored(_isolated_accounts_dir):
+    """老板 2026-10-18 拍板：群聊规则 = 被 @ 必回，其余交给心流。
 
-    "只在被 @ 时回复"是配置者写下来的意图；本树（与 TS 一致地）不执行它。
-    没有这行日志的话，配置者只能通过"它怎么在群里乱插话"来发现。
-    每人每进程**一条**：去重表是模块级状态，所以本文件自己清（同 ``overrides``）。
+    所以 ``requireAtMention`` 不再建模、不再告警：它不是规则载体（TS 活路径
+    ``shouldTrigger`` 也不读它），留着只会让人以为"配了只回 @"。生产账号里
+    残留同名键不影响行为，解析时直接忽略。
     """
-    A.reset_inert_warnings()
     _write(_isolated_accounts_dir, "default", _cfg(authcode="c", requireAtMention=True))
-    with caplog.at_level("WARNING"):
-        A.load_all()
-        A.load_all()                      # 再加载一次不该再刷一条
-
-    hits = [r.getMessage() for r in caplog.records if "requireAtMention" in r.getMessage()]
-    assert len(hits) == 1, f"要留痕、且只留一条，实际 {len(hits)} 条"
-    assert "不生效" in hits[0]
-    assert A.resolve("default").require_at_mention is True, \
-        "解析仍照实透传（cfg 形状与 TS 对齐），只是没人读它"
-    A.reset_inert_warnings()
+    acct = A.resolve("default")
+    assert not hasattr(acct, "require_at_mention"), \
+        "账号模型里不应再有这个键；规则由 inbound.triggers 的 @ / 心流分流实现"

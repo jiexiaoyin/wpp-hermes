@@ -504,9 +504,9 @@ def strip_at_mentions(content: str, bot_wxid: str) -> str:
        TS 逐字一致（实测：不加时 ``你好wxid_bot 在吗`` 原样返回，加了得 ``你好在吗``）。
     2. **超过 4096 的尾巴会被**截掉**（TS 同）**：返回的是处理后的**截断文本**，
        不是"原文减去提及"。所以它只能喂给"看正文"的路径，绝不能拿它当正文落库
-       —— 本树也因此**没有生产调用方**（TS 的调用者 ``cleanGroupMessage`` 挂在
-       ``requireAtMention`` 下，而那个键在本树是死键，见 ``core/accounts.py`` 与
-       ``tests/test_triggers.py::test_require_at_mention_is_deliberately_not_honoured``）。
+       —— 本树也因此**没有生产调用方**（@ 判定只需要
+       :func:`is_bot_mentioned_by_text`，不需要清洗正文；TS 侧的调用者
+       ``cleanGroupMessage`` 也只存在于零调用者的 ``group-policy.ts`` 路径里）。
        它作为对外 helper 保留并在此钉住行为，是为了将来真接上时不用重新推一遍。
     """
     if not bot_wxid or not content:

@@ -45,7 +45,6 @@
   "selfWxid": "wxid_replace_me_boss2",
   "nickname": "益融小助理-老板副号",
 
-  "requireAtMention": true,
   "debounceMs": 1500,
 
   "agent": "wpp-wechat-boss2",

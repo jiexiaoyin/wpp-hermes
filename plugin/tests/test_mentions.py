@@ -174,7 +174,8 @@ def test_the_tail_past_the_cap_is_dropped_not_just_the_mention() -> None:
     """★ 钉住"有损"这个事实：≥4096 的正文**尾巴整段没了**（TS 同）。
 
     正因为它有损，它只能喂"看正文"的路径、不能落库；本树也因此没有生产调用方
-    （``requireAtMention`` 是死键）。将来真要接上，必须先看这条。
+    （@ 判定只需要 :func:`is_bot_mentioned_by_text`，不需要清洗正文）。
+    将来真要接上，必须先看这条。
     """
     long = "哈哈 " + "x" * _RE_MAX_TEXT + " 尾巴"
     got = strip_at_mentions(long, BOT)
