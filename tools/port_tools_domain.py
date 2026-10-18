@@ -57,7 +57,9 @@ ROOT = Path(__file__).resolve().parent.parent
 #: 两个理由：① 本树那份已被 ``plugin/toolkit/`` 目录**遮蔽**（同名包优先于模块），
 #: 且它本身在删除清单上；② 旧树按决策「原样冻结」作参照与回滚蓝本 ⇒ 生成器
 #: 永远可复现，不会因为本树清理而失效。
-LEGACY = Path("/root/dev/wpp-hermes/plugin/tools.py")
+#: 旧树（2026-10-18 归档到 _archive，只作参照）。本脚本是**一次性移植工具**，
+#: 只有显式跑它时才读这个文件；主链路（注册/生成/deploy）不依赖旧树。
+LEGACY = Path("/root/dev/_archive/wpp-hermes-legacy-20261018/plugin/tools.py")
 OUT_DIR = ROOT / "plugin" / "toolkit"
 
 #: 每个目标文件的「锚点区间」——用函数名定位，不写死行号（行号会漂）。

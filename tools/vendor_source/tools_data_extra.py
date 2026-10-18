@@ -9,7 +9,7 @@ from __future__ import annotations
 EXTRA_GROUP_TOOLS = [
     {
         "name": "wpp_group_invite_member",
-        "description": "邀请群成员 (40 人以上, 走邀请链)",
+        "description": "邀请进群（40 人以上走邀请链，需对方同意）。40 人以内用 wpp_group_add_member。",
         "endpoint": "/Group/InviteChatRoomMember",
         "params": {
             "ChatRoomName": {"type": "string", "required": True, "desc": "群 @chatroom 标识"},
@@ -18,7 +18,7 @@ EXTRA_GROUP_TOOLS = [
     },
     {
         "name": "wpp_group_pat",
-        "description": "群拍一拍",
+        "description": "群内拍一拍。ToUserName 是成员 wxid，Scene 是场景值。",
         "endpoint": "/Group/SendPat",
         "params": {
             "QID": {"type": "string", "required": True, "desc": "群 @chatroom 标识"},
@@ -51,13 +51,13 @@ EXTRA_GROUP_TOOLS = [
     },
     {
         "name": "wpp_group_consent_join",
-        "description": "同意进入群聊邀请",
+        "description": "同意入群邀请。Url 来自入群邀请事件，不能构造。",
         "endpoint": "/Group/ConsentToJoin",
         "params": {"Url": {"type": "string", "required": True, "desc": "入群申请 URL"}},
     },
     {
         "name": "wpp_group_move_contract",
-        "description": "群保存到通讯录. Val 1=保存 0=取消",
+        "description": "把群保存到通讯录：Val=1 保存，0 取消。",
         "endpoint": "/Group/MoveContractList",
         "params": {
             "QID": {"type": "string", "required": True, "desc": "群 @chatroom 标识"},
@@ -79,7 +79,7 @@ EXTRA_GROUP_TOOLS = [
 EXTRA_FRIEND_TOOLS = [
     {
         "name": "wpp_friend_state",
-        "description": "查询好友状态 (在线/性别/地区)",
+        "description": "查好友状态（在线/性别/地区）。toWxid + opCode。",
         "endpoint": "/Friend/GetFriendstate",
         "params": {
             "toWxid": {"type": "string", "required": True, "desc": "联系人 wxid"},
@@ -88,7 +88,7 @@ EXTRA_FRIEND_TOOLS = [
     },
     {
         "name": "wpp_friend_lbs",
-        "description": "附近的人",
+        "description": "附近的人（经纬度 + opCode）。会暴露当前定位。",
         "endpoint": "/Friend/LbsFind",
         "params": {
             "latitude": {"type": "number", "required": True, "desc": "纬度"},
@@ -165,7 +165,7 @@ EXTRA_FRIENDCIRCLE_TOOLS = [
     },
     {
         "name": "wpp_fc_active_tasks",
-        "description": "查询正在执行的朋友圈评论转发任务",
+        "description": "查正在执行的朋友圈评论/转发任务。",
         "endpoint": "/FriendCircle/ActiveTasks",
         "params": {},
     },
@@ -177,7 +177,7 @@ EXTRA_FRIENDCIRCLE_TOOLS = [
     },
     {
         "name": "wpp_fc_download_video",
-        "description": "下载视频",
+        "description": "下载视频。aesKey + fileId 来自消息体。",
         "endpoint": "/Tools/DownloadVideo",
         "params": {
             "aesKey": {"type": "string", "required": True, "desc": "AES 密钥"},
@@ -207,7 +207,7 @@ EXTRA_FRIENDCIRCLE_TOOLS = [
     },
     {
         "name": "wpp_fc_set_background",
-        "description": "设置朋友圈背景图。",
+        "description": "设置朋友圈背景图（url + 缩略图 url）。",
         "endpoint": "/FriendCircle/SetBackgroundImage",
         "params": {
             "url": {"type": "string", "required": True, "desc": "背景大图地址"},
@@ -218,23 +218,23 @@ EXTRA_FRIENDCIRCLE_TOOLS = [
 
 # ------------------------------------------------------------------ search 域补全
 EXTRA_SEARCH_TOOLS = [
-    {"name": "wpp_search_channels", "description": "视频号内容搜索", "endpoint": "/Search/Channels",
+    {"name": "wpp_search_channels", "description": "搜视频号内容（query，cursor/limit 翻页）。要详情用 wpp_search_channels_detail。", "endpoint": "/Search/Channels",
      "params": {"query": {"type": "string", "required": True, "desc": "搜索词"}, "cursor": {"type": "string", "desc": "分页游标"}, "limit": {"type": "integer", "desc": "数量限制"}}},
-    {"name": "wpp_search_images", "description": "图片搜索", "endpoint": "/Search/Images",
+    {"name": "wpp_search_images", "description": "搜图片（cursor/limit 翻页）。", "endpoint": "/Search/Images",
      "params": {"query": {"type": "string", "required": True, "desc": "搜索词"}, "cursor": {"type": "string", "desc": "分页游标"}, "limit": {"type": "integer", "desc": "数量限制"}}},
-    {"name": "wpp_search_news", "description": "新闻搜索", "endpoint": "/Search/News",
+    {"name": "wpp_search_news", "description": "搜新闻，时效性内容优先。", "endpoint": "/Search/News",
      "params": {"query": {"type": "string", "required": True, "desc": "搜索词"}, "cursor": {"type": "string", "desc": "分页游标"}, "limit": {"type": "integer", "desc": "数量限制"}}},
-    {"name": "wpp_search_baike", "description": "百科搜索", "endpoint": "/Search/Baike",
+    {"name": "wpp_search_baike", "description": "搜百科词条，适合查概念/名词解释。", "endpoint": "/Search/Baike",
      "params": {"query": {"type": "string", "required": True, "desc": "搜索词"}, "cursor": {"type": "string", "desc": "分页游标"}, "limit": {"type": "integer", "desc": "数量限制"}}},
-    {"name": "wpp_search_books", "description": "读书搜索", "endpoint": "/Search/Books",
+    {"name": "wpp_search_books", "description": "搜书籍/读书内容。", "endpoint": "/Search/Books",
      "params": {"query": {"type": "string", "required": True, "desc": "搜索词"}, "cursor": {"type": "string", "desc": "分页游标"}, "limit": {"type": "integer", "desc": "数量限制"}}},
     {"name": "wpp_search_emoji", "description": "表情搜索 (可分页)", "endpoint": "/Search/Emoji",
      "params": {"query": {"type": "string", "required": True, "desc": "搜索词"}, "cursor": {"type": "string", "desc": "分页游标"}, "limit": {"type": "integer", "desc": "数量限制"}}},
-    {"name": "wpp_search_ai", "description": "AI 搜索 (深度问答增强)", "endpoint": "/Search/AI",
+    {"name": "wpp_search_ai", "description": "AI 搜索（深度问答）。返回 session_id，追问用 wpp_search_ai_followup。", "endpoint": "/Search/AI",
      "params": {"query": {"type": "string", "required": True, "desc": "搜索词"}, "model": {"type": "string", "desc": "模型，默认 deepseek"}, "session_id": {"type": "string", "desc": "会话 ID"}, "turn": {"type": "integer", "desc": "轮次，默认 1"}}},
-    {"name": "wpp_search_gateway", "description": "兼容旧版搜一搜网页网关", "endpoint": "/Search/Gateway",
+    {"name": "wpp_search_gateway", "description": "旧版搜一搜网页网关，仅兼容用；优先用分类搜索工具。", "endpoint": "/Search/Gateway",
      "params": {"query": {"type": "string", "required": True, "desc": "搜索词"}}},
-    {"name": "wpp_search_query", "description": "通用分类搜索. category 可选 (空=全部)", "endpoint": "/Search/Query",
+    {"name": "wpp_search_query", "description": "通用分类搜索。category 留空=全部，cursor 翻页。", "endpoint": "/Search/Query",
      "params": {"query": {"type": "string", "required": True, "desc": "搜索词"}, "category": {"type": "string", "desc": "分类"}, "cursor": {"type": "string", "desc": "分页游标"}}},
     {"name": "wpp_search_channels_detail", "description": "获取视频号内容详情. contentToken 来自视频号搜索结果", "endpoint": "/Search/Channels/Detail",
      "params": {"content_token": {"type": "string", "required": True, "desc": "内容 token（来自视频号搜索结果）"}}},
@@ -276,19 +276,19 @@ EXTRA_TENPAY_TOOLS = [
 EXTRA_TOOLS_TOOLS = [
     {"name": "wpp_tool_download_img", "description": "下载高清图片 (从 CDN). fileId 来自消息 content xml 的 image tag", "endpoint": "/Tools/DownloadImg",
      "params": {"aesKey": {"type": "string", "required": True, "desc": "AES 密钥"}, "fileId": {"type": "string", "required": True, "desc": "文件 ID"}}},
-    {"name": "wpp_tool_download_video", "description": "下载视频", "endpoint": "/Tools/DownloadVideo",
+    {"name": "wpp_tool_download_video", "description": "下载视频。参数同图片下载（aesKey + fileId）。", "endpoint": "/Tools/DownloadVideo",
      "params": {"aesKey": {"type": "string", "required": True, "desc": "AES 密钥"}, "fileId": {"type": "string", "required": True, "desc": "文件 ID"}}},
-    {"name": "wpp_tool_download_voice", "description": "下载语音", "endpoint": "/Tools/DownloadVoice",
+    {"name": "wpp_tool_download_voice", "description": "下载语音。需 aesKey/fileId/durationMs（来自消息体）。", "endpoint": "/Tools/DownloadVoice",
      "params": {"aesKey": {"type": "string", "required": True, "desc": "AES 密钥"}, "fileId": {"type": "string", "required": True, "desc": "文件 ID"}, "durationMs": {"type": "integer", "desc": "时长毫秒"}}},
     {"name": "wpp_tool_download_file", "description": "下载文件 (v1.2.1 P1-fix: 需 appID/attachId, vendor v1 文件消息不提供, 可能失败)", "endpoint": "/Tools/DownloadFile",
      "params": {"appID": {"type": "string", "required": True, "desc": "appID"}, "attachId": {"type": "string", "required": True, "desc": "附件 ID"}, "userName": {"type": "string", "desc": "用户名"}}},
-    {"name": "wpp_tool_cdn_download_image", "description": "CDN 单独下载高清图片", "endpoint": "/Tools/CdnDownloadImage",
+    {"name": "wpp_tool_cdn_download_image", "description": "从 CDN 单独下载高清图片（aesKey + fileId）。", "endpoint": "/Tools/CdnDownloadImage",
      "params": {"aesKey": {"type": "string", "required": True, "desc": "AES 密钥"}, "fileId": {"type": "string", "required": True, "desc": "文件 ID"}}},
-    {"name": "wpp_tool_upload_file", "description": "上传文件. fileType 例: image/png, video/mp4", "endpoint": "/Tools/UploadFile",
+    {"name": "wpp_tool_upload_file", "description": "上传文件，fileType 例 image/png、video/mp4。返回可发送的引用。", "endpoint": "/Tools/UploadFile",
      "params": {"fileBase64": {"type": "string", "required": True, "desc": "文件 base64"}, "fileType": {"type": "string", "desc": "文件类型"}}},
-    {"name": "wpp_tool_cdn_dns", "description": "获取 CDN 服务器 DNS 信息", "endpoint": "/Tools/GetCdnDns",
+    {"name": "wpp_tool_cdn_dns", "description": "取 CDN 服务器 DNS 信息，下载失败时排障用。", "endpoint": "/Tools/GetCdnDns",
      "params": {}},
-    {"name": "wpp_tool_set_step_count", "description": "修改微信运动步数 (当天步数, 最高 98000)", "endpoint": "/Tools/setproxy",
+    {"name": "wpp_tool_set_step_count", "description": "改当天微信运动步数（上限 98000）。会写真实账号数据。", "endpoint": "/Tools/setproxy",
      "params": {"steps": {"type": "integer", "required": True, "desc": "步数（最高 98000）"}}},
     {"name": "wpp_tool_download_file_binary", "description": "完整下载微信文件 (二进制). fileNo 来自 file.download_context", "endpoint": "/Tools/DownloadFileBinary",
      "params": {"fileNo": {"type": "string", "required": True, "desc": "文件号"}, "fileName": {"type": "string", "desc": "文件名"}, "toWxid": {"type": "string", "desc": "目标 wxid"}}},
@@ -332,11 +332,11 @@ EXTRA_LOGIN_TOOLS = [
 
 # ------------------------------------------------------------------ msg 域补全（特殊处理）
 EXTRA_MSG_TOOLS = [
-    {"name": "wpp_share_video_msg", "description": "发送分享视频消息", "endpoint": "/Msg/ShareVideo",
+    {"name": "wpp_share_video_msg", "description": "发送分享视频消息。Xml 是分享卡片原文，来自转发事件。", "endpoint": "/Msg/ShareVideo",
      "params": {"ToWxid": {"type": "string", "required": True, "desc": "目标 wxid"}, "Xml": {"type": "string", "required": True, "desc": "视频 XML"}}},
     {"name": "wpp_send_cdn_file", "description": "发送 CDN 文件 (转发, 非上传). fileUrl 是 vendor 已上传的 cdnUrl", "endpoint": "/Msg/SendCDNFile",
      "params": {"Content": {"type": "string", "required": True, "desc": "收到文件消息的 XML"}, "ToWxid": {"type": "string", "required": True, "desc": "目标 wxid"}}},
-    {"name": "wpp_start_auto_sync", "description": "启动自动同步（vendor 推消息到 webhook）。", "endpoint": "/Msg/StartAutoSync",
+    {"name": "wpp_start_auto_sync", "description": "启动自动同步，让 vendor 把消息推到 TargetURL。⚠️ 改错会把消息流引到外部地址。", "endpoint": "/Msg/StartAutoSync",
      "params": {"TargetURL": {"type": "string", "desc": "回调 URL（可忽略，用已配置 webhook）"}}},
     {"name": "wpp_send_app_msg", "description": "发送 App 消息（Type: 5=链接 33=小程序 36=文件 42=视频 48=定位）。", "endpoint": "/Msg/SendApp",
      "params": {"ToWxid": {"type": "string", "required": True, "desc": "接收方 wxid 或群 ID"}, "Type": {"type": "integer", "required": True, "desc": "应用消息类型 5/33/36/42/48"}, "Xml": {"type": "string", "required": True, "desc": "业务卡片或已接收消息的应用消息内容"}}},
@@ -344,21 +344,21 @@ EXTRA_MSG_TOOLS = [
 
 # ------------------------------------------------------------------ voice 域补全
 EXTRA_VOICE_TOOLS = [
-    {"name": "wpp_voice_result", "description": "获取语音转写结果。", "endpoint": "/Voice/Result",
+    {"name": "wpp_voice_result", "description": "取异步语音转写结果，voice_id 来自 transcribe 调用。", "endpoint": "/Voice/Result",
      "params": {"voice_id": {"type": "string", "required": True, "desc": "语音 ID（转写返回的 voice_id）"}}},
 ]
 
 # ------------------------------------------------------------------ officialaccounts 域补全
 EXTRA_OA_TOOLS = [
-    {"name": "wpp_oa_history_message", "description": "获取公众号历史消息 HTML (for 文章抓取)", "endpoint": "/OfficialAccounts/GetMpHistoryMessage",
+    {"name": "wpp_oa_history_message", "description": "取公众号历史消息 HTML（抓文章正文用，比 json 接口全）。", "endpoint": "/OfficialAccounts/GetMpHistoryMessage",
      "params": {"url": {"type": "string", "required": True, "desc": "文章 URL"}}},
-    {"name": "wpp_oa_article_ext", "description": "阅读公众号文章, 返回在看 / 点赞 / 阅读数据", "endpoint": "/OfficialAccounts/GetAppMsgExt",
+    {"name": "wpp_oa_article_ext", "description": "读文章并返回在看/点赞/阅读数（数据面，不发内容）。", "endpoint": "/OfficialAccounts/GetAppMsgExt",
      "params": {"url": {"type": "string", "required": True, "desc": "文章 URL"}}},
-    {"name": "wpp_oa_article_like", "description": "点赞公众号文章, 返回分享 / 在看 / 阅读数据", "endpoint": "/OfficialAccounts/GetAppMsgExtLike",
+    {"name": "wpp_oa_article_like", "description": "给公众号文章点赞，返回分享/在看/阅读数据。会改变文章状态。", "endpoint": "/OfficialAccounts/GetAppMsgExtLike",
      "params": {"url": {"type": "string", "required": True, "desc": "文章 URL"}}},
     {"name": "wpp_oa_jsapi_preverify", "description": "公众号 JSAPI 预验证 (用于网页/小程序授权前置)", "endpoint": "/OfficialAccounts/JSAPIPreVerify",
      "params": {"appId": {"type": "string", "required": True, "desc": "appId"}}},
-    {"name": "wpp_oa_oauth_authorize", "description": "公众号 OAuth 授权 (url 是授权链接)", "endpoint": "/OfficialAccounts/OauthAuthorize",
+    {"name": "wpp_oa_oauth_authorize", "description": "公众号 OAuth 授权。url 是授权链接，会跳转并回填授权态。", "endpoint": "/OfficialAccounts/OauthAuthorize",
      "params": {"url": {"type": "string", "required": True, "desc": "授权 URL"}}},
     {"name": "wpp_oa_qr_authorize", "description": "公众号二维码授权请求 (获取授权二维码)", "endpoint": "/OfficialAccounts/QRConnectAuthorize",
      "params": {"url": {"type": "string", "required": True, "desc": "授权 URL"}}},
@@ -370,25 +370,25 @@ EXTRA_OA_TOOLS = [
 
 # ------------------------------------------------------------------ qwcontact 域补全
 EXTRA_QW_TOOLS = [
-    {"name": "wpp_qw_apply", "description": "申请添加企微联系人。", "endpoint": "/QWContact/QWApplyAddContact",
+    {"name": "wpp_qw_apply", "description": "申请添加企微联系人，可带上下文说明（context）。", "endpoint": "/QWContact/QWApplyAddContact",
      "params": {"username": {"type": "string", "required": True, "desc": "用户名"}, "v1": {"type": "string", "desc": "v1 参数"}, "context": {"type": "string", "desc": "上下文"}}},
 ]
 
 # ------------------------------------------------------------------ finder 域补全
 EXTRA_FINDER_TOOLS = [
-    {"name": "wpp_finder_live_detail", "description": "获取视频号直播详情", "endpoint": "/Finder/FinderLiveDetail",
+    {"name": "wpp_finder_live_detail", "description": "取视频号直播详情（标题/在线人数/状态）。需 FinderObjectID + FinderNonceID，来自直播入口。", "endpoint": "/Finder/FinderLiveDetail",
      "params": {"FinderObjectID": {"type": "string", "required": True, "desc": "objectId"}, "FinderNonceID": {"type": "string", "required": True, "desc": "nonceId"}}},
     {"name": "wpp_finder_decrypt_comment", "description": "解密视频号评论内容 (encryptedContent 是加密串)", "endpoint": "/Finder/Decrypt",
      "params": {"Content": {"type": "string", "required": True, "desc": "加密内容"}}},
-    {"name": "wpp_finder_msg_session", "description": "获取视频号私信会话 ID", "endpoint": "/Finder/FinderGetMsgSessionId",
+    {"name": "wpp_finder_msg_session", "description": "取与视频号作者的私信会话 ID。发私信前必须先调这个。", "endpoint": "/Finder/FinderGetMsgSessionId",
      "params": {"FinderUsername": {"type": "string", "required": True, "desc": "目标视频号 ID"}}},
-    {"name": "wpp_finder_search_list", "description": "获取视频号搜索列表", "endpoint": "/Finder/FinderSearchList",
+    {"name": "wpp_finder_search_list", "description": "视频号搜索列表（按 TopTitle 分类，LastBuffer 翻页）。", "endpoint": "/Finder/FinderSearchList",
      "params": {}},
-    {"name": "wpp_finder_topic_list", "description": "获取视频号主题列表", "endpoint": "/Finder/Findergettopiclist",
+    {"name": "wpp_finder_topic_list", "description": "取视频号话题列表，用于按话题找内容。", "endpoint": "/Finder/Findergettopiclist",
      "params": {"TopTitle": {"type": "string", "desc": "话题标题"}, "LastBuffer": {"type": "string", "desc": "分页游标"}}},
     {"name": "wpp_finder_comment_list", "description": "获取视频号评论列表 (rootCommentId 可选用于翻页)", "endpoint": "/Finder/GetCommentList",
      "params": {"Id": {"type": "string", "required": True, "desc": "视频号 ID"}, "RootCommentId": {"type": "string", "desc": "根评论 ID"}}},
-    {"name": "wpp_finder_comment_detail", "description": "获取视频号评论详情", "endpoint": "/Finder/GetCommentDetail",
+    {"name": "wpp_finder_comment_detail", "description": "取单条视频号评论的详情。", "endpoint": "/Finder/GetCommentDetail",
      "params": {"FinderUsername": {"type": "string", "required": True, "desc": "用户名"}, "Id": {"type": "string", "required": True, "desc": "ID"}, "RootCommentId": {"type": "string", "desc": "根评论 ID"}}},
     {"name": "wpp_finder_play_video", "description": "播放视频号视频. objectId=视频内容Id, finderUsername=作者, playUrl=播放地址 (选传); loop=true 循环播放", "endpoint": "/Finder/PlayVideo",
      "params": {"object_id": {"type": "string", "desc": "内容 objectId"}, "finder_username": {"type": "string", "desc": "视频号 username"}, "play_url": {"type": "string", "desc": "播放地址"}, "loop": {"type": "boolean", "desc": "是否循环，默认 false"}, "loop_count": {"type": "integer", "desc": "循环次数，默认 0"}, "play_seconds": {"type": "integer", "desc": "播放秒数，默认 0"}, "async": {"type": "boolean", "desc": "是否异步，默认 true"}}},

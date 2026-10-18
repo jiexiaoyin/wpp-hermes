@@ -13,6 +13,12 @@ api_version: 2
 # 更早的版本没有这个挂载点 ⇒ 平台永远起不来（见 platform/enablement.py）。
 requires_hermes: ">=0.21.5"
 
+# 注册期 hook（plugin/registration.py:118 → ctx.register_hook("pre_llm_call", …)）。
+# doctor 拿「实际注册的 hook」与「声明」对账，缺这段会报
+#   WARN: registration adds hook 'pre_llm_call' not listed in provides_hooks
+provides_hooks:
+  - pre_llm_call
+
 # ⚠️ provides_tools 的语义：**逐个「工具名」**，不是 toolset 名。
 #    旧版写的是 `- wechatpadpro`（那是 register_tool(..., toolset="wechatpadpro")
 #    里的 toolset），属语义用错 —— 触发 plugin_validate 的

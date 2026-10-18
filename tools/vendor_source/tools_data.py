@@ -250,26 +250,26 @@ FRIEND_TOOLS = [
 
 # ------------------------------------------------------------------ label 域
 LABEL_TOOLS = [
-    {"name": "wpp_label_list", "description": "获取标签列表。", "endpoint": "/Label/GetList", "params": {}},
-    {"name": "wpp_label_add", "description": "创建标签。", "endpoint": "/Label/Add", "params": {"LabelName": {"type": "string", "required": True, "desc": "标签名"}}},
-    {"name": "wpp_label_delete", "description": "删除标签。", "endpoint": "/Label/Delete", "params": {"labelId": {"type": "string", "required": True, "desc": "标签ID"}}},
-    {"name": "wpp_label_update_name", "description": "修改标签名。", "endpoint": "/Label/UpdateName", "params": {"labelId": {"type": "string", "required": True, "desc": "标签ID"}, "labelName": {"type": "string", "required": True, "desc": "新标签名"}}},
-    {"name": "wpp_label_update_list", "description": "给好友打/移除标签。", "endpoint": "/Label/UpdateList", "params": {"LabelID": {"type": "string", "required": True, "desc": "标签ID"}, "ToWxids": {"type": "string", "required": True, "desc": "好友 wxid，逗号分隔"}}},
-    {"name": "wpp_label_friend_list", "description": "获取标签下的好友。", "endpoint": "/Label/GetWXFriendListByLabel", "params": {"labelId": {"type": "integer", "required": True, "desc": "标签ID"}}},
+    {"name": "wpp_label_list", "description": "取标签列表（含 labelId）。其它标签操作都要先拿到 labelId。", "endpoint": "/Label/GetList", "params": {}},
+    {"name": "wpp_label_add", "description": "新建标签，LabelName 是标签名。", "endpoint": "/Label/Add", "params": {"LabelName": {"type": "string", "required": True, "desc": "标签名"}}},
+    {"name": "wpp_label_delete", "description": "删除标签。只删标签本身，不影响好友关系；不可恢复。", "endpoint": "/Label/Delete", "params": {"labelId": {"type": "string", "required": True, "desc": "标签ID"}}},
+    {"name": "wpp_label_update_name", "description": "重命名标签（labelId + 新名字）。", "endpoint": "/Label/UpdateName", "params": {"labelId": {"type": "string", "required": True, "desc": "标签ID"}, "labelName": {"type": "string", "required": True, "desc": "新标签名"}}},
+    {"name": "wpp_label_update_list", "description": "给好友批量打/移除标签（LabelID + ToWxids）。", "endpoint": "/Label/UpdateList", "params": {"LabelID": {"type": "string", "required": True, "desc": "标签ID"}, "ToWxids": {"type": "string", "required": True, "desc": "好友 wxid，逗号分隔"}}},
+    {"name": "wpp_label_friend_list", "description": "取某个标签下的全部好友。", "endpoint": "/Label/GetWXFriendListByLabel", "params": {"labelId": {"type": "integer", "required": True, "desc": "标签ID"}}},
 ]
 
 # ------------------------------------------------------------------ translate 域
 TRANSLATE_TOOLS = [
-    {"name": "wpp_translate_text", "description": "翻译文本。", "endpoint": "/Translate/Text", "params": {"text": {"type": "string", "required": True, "desc": "要翻译的文本"}, "source_lang": {"type": "string", "desc": "源语言，默认 auto"}, "target_lang": {"type": "string", "required": True, "desc": "目标语言，如 en/zh"}}},
-    {"name": "wpp_translate_send", "description": "翻译并发送消息。", "endpoint": "/Translate/Send", "params": {"text": {"type": "string", "required": True, "desc": "待翻译并发送的文字，最多 5000 字符"}, "target_lang": {"type": "string", "required": True, "desc": "目标语言代码"}, "to_wxid": {"type": "string", "required": True, "desc": "接收人 wxid、群 ID 或 filehelper"}, "source_lang": {"type": "string", "desc": "源语言代码，省略时自动识别，默认 zh"}, "at": {"type": "string", "desc": "群消息中需要 @ 的成员 wxid"}}},
+    {"name": "wpp_translate_text", "description": "翻译文本，可指定 source_lang/target_lang。", "endpoint": "/Translate/Text", "params": {"text": {"type": "string", "required": True, "desc": "要翻译的文本"}, "source_lang": {"type": "string", "desc": "源语言，默认 auto"}, "target_lang": {"type": "string", "required": True, "desc": "目标语言，如 en/zh"}}},
+    {"name": "wpp_translate_send", "description": "翻译后直接发到指定会话（to_wxid）。", "endpoint": "/Translate/Send", "params": {"text": {"type": "string", "required": True, "desc": "待翻译并发送的文字，最多 5000 字符"}, "target_lang": {"type": "string", "required": True, "desc": "目标语言代码"}, "to_wxid": {"type": "string", "required": True, "desc": "接收人 wxid、群 ID 或 filehelper"}, "source_lang": {"type": "string", "desc": "源语言代码，省略时自动识别，默认 zh"}, "at": {"type": "string", "desc": "群消息中需要 @ 的成员 wxid"}}},
 ]
 
 # ------------------------------------------------------------------ tools 域
 TOOLS_TOOLS = [
-    {"name": "wpp_tool_get_a8key", "description": "公众号 A8 Key (open 文章用)", "endpoint": "/Tools/GetA8Key", "params": {"url": {"type": "string", "required": True, "desc": "URL"}}},
-    {"name": "wpp_tool_generate_pay_qrcode", "description": "生成支付二维码 (GET)", "endpoint": "/Tools/GeneratePayQCode", "method": "GET", "params": {}},
-    {"name": "wpp_tool_band_card_list", "description": "获取余额和银行卡信息", "endpoint": "/Tools/GetBandCardList", "params": {}},
-    {"name": "wpp_tool_bound_hard_devices", "description": "获取绑定的硬件设备。", "endpoint": "/Tools/GetBoundHardDevices", "params": {}},
+    {"name": "wpp_tool_get_a8key", "description": "取公众号文章的 A8 Key，打开文章链接的前置步骤。", "endpoint": "/Tools/GetA8Key", "params": {"url": {"type": "string", "required": True, "desc": "URL"}}},
+    {"name": "wpp_tool_generate_pay_qrcode", "description": "生成支付二维码（无参 GET）。", "endpoint": "/Tools/GeneratePayQCode", "method": "GET", "params": {}},
+    {"name": "wpp_tool_band_card_list", "description": "取当前账号绑定的银行卡与余额信息。", "endpoint": "/Tools/GetBandCardList", "params": {}},
+    {"name": "wpp_tool_bound_hard_devices", "description": "取绑定的硬件设备列表。", "endpoint": "/Tools/GetBoundHardDevices", "params": {}},
 ]
 
 # ------------------------------------------------------------------ tenpay 域
@@ -293,30 +293,30 @@ FRIENDCIRCLE_TOOLS = [
 
 # ------------------------------------------------------------------ finder 域
 FINDER_TOOLS = [
-    {"name": "wpp_finder_search", "description": "搜索视频号用户", "endpoint": "/Finder/Search", "params": {"keyword": {"type": "string", "required": True, "desc": "搜索关键词"}}},
-    {"name": "wpp_finder_recommend", "description": "获取视频号推荐流", "endpoint": "/Finder/GetRecommend", "params": {}},
+    {"name": "wpp_finder_search", "description": "搜索视频号用户或内容。keyword 支持昵称/主题词；要内容列表用 wpp_finder_search_list。", "endpoint": "/Finder/Search", "params": {"keyword": {"type": "string", "required": True, "desc": "搜索关键词"}}},
+    {"name": "wpp_finder_recommend", "description": "拉取视频号推荐流（无需参数，返回推荐内容列表）。", "endpoint": "/Finder/GetRecommend", "params": {}},
     {"name": "wpp_finder_follow", "description": "关注视频号用户. finderId 是视频号 ID（只支持关注，无取关）", "endpoint": "/Finder/Follow", "params": {"finderId": {"type": "string", "required": True, "desc": "视频号 ID"}}},
     {"name": "wpp_finder_like", "description": "点赞视频号内容. Id 是作品 ID（只支持点赞，无取消）", "endpoint": "/Finder/Like", "params": {"Id": {"type": "string", "required": True, "desc": "作品 ID"}}},
-    {"name": "wpp_finder_comment", "description": "评论视频号内容", "endpoint": "/Finder/Comment", "params": {"Username": {"type": "string", "required": True, "desc": "内容作者 username"}, "Id": {"type": "string", "required": True, "desc": "内容 ID"}, "Content": {"type": "string", "required": True, "desc": "评论文字"}, "OpType": {"type": "integer", "desc": "操作类型，默认 1"}, "RootCommentId": {"type": "string", "desc": "根评论 ID（回复评论时用）"}, "ReplyCommentId": {"type": "string", "desc": "要回复的评论 ID"}}},
-    {"name": "wpp_finder_send_dm", "description": "发视频号私信", "endpoint": "/Finder/FinderSendText", "params": {"FinderUsername": {"type": "string", "required": True, "desc": "视频号"}, "Text": {"type": "string", "required": True, "desc": "私信内容"}}},
-    {"name": "wpp_finder_user_page", "description": "获取指定视频号用户主页数据", "endpoint": "/Finder/TargetUserPage", "params": {"Target": {"type": "string", "required": True, "desc": "视频号目标"}}},
-    {"name": "wpp_finder_mine", "description": "获取当前账号的视频号中心信息", "endpoint": "/Finder/UserPrepare", "params": {}},
+    {"name": "wpp_finder_comment", "description": "评论视频号作品。回复某条评论时传 RootCommentId + ReplyCommentId。", "endpoint": "/Finder/Comment", "params": {"Username": {"type": "string", "required": True, "desc": "内容作者 username"}, "Id": {"type": "string", "required": True, "desc": "内容 ID"}, "Content": {"type": "string", "required": True, "desc": "评论文字"}, "OpType": {"type": "integer", "desc": "操作类型，默认 1"}, "RootCommentId": {"type": "string", "desc": "根评论 ID（回复评论时用）"}, "ReplyCommentId": {"type": "string", "desc": "要回复的评论 ID"}}},
+    {"name": "wpp_finder_send_dm", "description": "给视频号作者发私信。发之前先用 wpp_finder_msg_session 建会话。", "endpoint": "/Finder/FinderSendText", "params": {"FinderUsername": {"type": "string", "required": True, "desc": "视频号"}, "Text": {"type": "string", "required": True, "desc": "私信内容"}}},
+    {"name": "wpp_finder_user_page", "description": "取指定视频号用户的主页数据（简介/作品数）。Target 是用户名或 ID。", "endpoint": "/Finder/TargetUserPage", "params": {"Target": {"type": "string", "required": True, "desc": "视频号目标"}}},
+    {"name": "wpp_finder_mine", "description": "取当前账号自己的视频号中心信息。", "endpoint": "/Finder/UserPrepare", "params": {}},
 ]
 
 # ------------------------------------------------------------------ officialaccounts 域
 OA_TOOLS = [
-    {"name": "wpp_oa_follow", "description": "关注公众号. operation: follow|unfollow", "endpoint": "/OfficialAccounts/Follow", "params": {"biz": {"type": "string", "required": True, "desc": "公众号 biz"}, "operation": {"type": "integer", "desc": "操作"}}},
-    {"name": "wpp_oa_quit", "description": "取消关注公众号", "endpoint": "/OfficialAccounts/Quit", "params": {"biz": {"type": "string", "required": True, "desc": "公众号 biz"}}},
-    {"name": "wpp_oa_history", "description": "获取公众号历史消息", "endpoint": "/OfficialAccounts/GetMpHistory", "params": {"url": {"type": "string", "required": True, "desc": "公众号文章 URL"}}},
+    {"name": "wpp_oa_follow", "description": "关注或取关公众号：operation=follow|unfollow，biz 是公众号 __biz 标识。", "endpoint": "/OfficialAccounts/Follow", "params": {"biz": {"type": "string", "required": True, "desc": "公众号 biz"}, "operation": {"type": "integer", "desc": "操作"}}},
+    {"name": "wpp_oa_quit", "description": "取消关注公众号（biz 是 __biz）。不可逆，需要时用 wpp_oa_follow 重新关注。", "endpoint": "/OfficialAccounts/Quit", "params": {"biz": {"type": "string", "required": True, "desc": "公众号 biz"}}},
+    {"name": "wpp_oa_history", "description": "取公众号历史消息列表。url 是公众号主页链接。", "endpoint": "/OfficialAccounts/GetMpHistory", "params": {"url": {"type": "string", "required": True, "desc": "公众号文章 URL"}}},
     {"name": "wpp_oa_article_markdown", "description": "把公众号文章 URL 转成 Markdown (返回标题/公众号/正文/图片)", "endpoint": "/OfficialAccounts/ArticleMarkdown", "params": {"url": {"type": "string", "required": True, "desc": "文章 URL"}}},
     {"name": "wpp_oa_article_list", "description": "获取公众号文章列表. accountId=公众号 __biz 标识 或 historyUrl=历史页链接 (二选一), limit=数量", "endpoint": "/OfficialAccounts/ArticleList", "params": {"url": {"type": "string", "required": True, "desc": "公众号 URL"}}},
-    {"name": "wpp_oa_auth_mp_login", "description": "授权公众号登录 (web 扫码)", "endpoint": "/OfficialAccounts/AuthMpLogin", "params": {"url": {"type": "string", "required": True, "desc": "授权 URL"}}},
+    {"name": "wpp_oa_auth_mp_login", "description": "公众号网页登录授权（扫码）。用于拿公众号后台会话。", "endpoint": "/OfficialAccounts/AuthMpLogin", "params": {"url": {"type": "string", "required": True, "desc": "授权 URL"}}},
 ]
 
 # ------------------------------------------------------------------ qwcontact 域
 QWC_TOOLS = [
     {"name": "wpp_qw_search", "description": "搜索企业微信联系人。", "endpoint": "/QWContact/SearchQWContact", "params": {"username": {"type": "string", "required": True, "desc": "企微账号"}}},
-    {"name": "wpp_qw_add", "description": "添加企业微信联系人。", "endpoint": "/QWContact/QWAddContact", "params": {"username": {"type": "string", "required": True, "desc": "企微账号"}, "v1": {"type": "string", "desc": "验证 v1"}}},
+    {"name": "wpp_qw_add", "description": "添加企业微信联系人（username + v1）。", "endpoint": "/QWContact/QWAddContact", "params": {"username": {"type": "string", "required": True, "desc": "企微账号"}, "v1": {"type": "string", "desc": "验证 v1"}}},
 ]
 
 # ------------------------------------------------------------------ favorites 域
@@ -346,24 +346,24 @@ WXAPP_TOOLS = [
 
 # ------------------------------------------------------------------ voice 域
 VOICE_TOOLS = [
-    {"name": "wpp_voice_transcribe", "description": "语音转写文字（base64 输入）。", "endpoint": "/Voice/Transcribe", "params": {"audio_base64": {"type": "string", "required": True, "desc": "语音 base64（silk/amr）"}, "from_user_name": {"type": "string", "desc": "发送人 wxid"}, "to_user_name": {"type": "string", "desc": "接收人 wxid"}, "scene": {"type": "integer", "desc": "场景，默认 0"}, "encode_type": {"type": "integer", "desc": "编码类型，默认 2"}, "sample_rate": {"type": "integer", "desc": "采样率，默认 16000"}}},
-    {"name": "wpp_voice_message_transcribe", "description": "语音消息转写（按消息 ID）。", "endpoint": "/Voice/MessageTranscribe", "params": {"msg_id": {"type": "integer", "required": True, "desc": "语音消息 ID"}, "new_msg_id": {"type": "string", "desc": "新消息 ID"}, "from_user_name": {"type": "string", "desc": "发送人 wxid"}, "chat_room_name": {"type": "string", "desc": "群标识（群语音时）"}, "client_msg_id": {"type": "string", "desc": "客户端消息 ID"}, "voice_id": {"type": "string", "desc": "语音 ID"}, "length": {"type": "integer", "desc": "语音长度"}}},
+    {"name": "wpp_voice_transcribe", "description": "语音转文字（传 base64 音频）。已拿到音频字节时用。", "endpoint": "/Voice/Transcribe", "params": {"audio_base64": {"type": "string", "required": True, "desc": "语音 base64（silk/amr）"}, "from_user_name": {"type": "string", "desc": "发送人 wxid"}, "to_user_name": {"type": "string", "desc": "接收人 wxid"}, "scene": {"type": "integer", "desc": "场景，默认 0"}, "encode_type": {"type": "integer", "desc": "编码类型，默认 2"}, "sample_rate": {"type": "integer", "desc": "采样率，默认 16000"}}},
+    {"name": "wpp_voice_message_transcribe", "description": "按消息 ID 转写语音。消息已在库里时优先用这个，省得自己下载。", "endpoint": "/Voice/MessageTranscribe", "params": {"msg_id": {"type": "integer", "required": True, "desc": "语音消息 ID"}, "new_msg_id": {"type": "string", "desc": "新消息 ID"}, "from_user_name": {"type": "string", "desc": "发送人 wxid"}, "chat_room_name": {"type": "string", "desc": "群标识（群语音时）"}, "client_msg_id": {"type": "string", "desc": "客户端消息 ID"}, "voice_id": {"type": "string", "desc": "语音 ID"}, "length": {"type": "integer", "desc": "语音长度"}}},
 ]
 
 # ------------------------------------------------------------------ webhook 域
 WEBHOOK_TOOLS = [
-    {"name": "wpp_webhook_set", "description": "设置 webhook 回调地址。", "endpoint": "/Webhook/Set", "params": {"url": {"type": "string", "required": True, "desc": "回调 URL"}}},
-    {"name": "wpp_webhook_get", "description": "读取当前 webhook 配置", "endpoint": "/Webhook/Get", "method": "GET", "params": {}},
-    {"name": "wpp_webhook_remove", "description": "删除 webhook 配置", "endpoint": "/Webhook/Remove", "params": {}},
-    {"name": "wpp_webhook_business_set", "description": "设置业务 webhook。", "endpoint": "/Webhook/Business/Set", "params": {"url": {"type": "string", "required": True, "desc": "业务回调 URL"}}},
+    {"name": "wpp_webhook_set", "description": "设置回调地址。⚠️ 改错会直接收不到消息；调试期请配合出站白名单。", "endpoint": "/Webhook/Set", "params": {"url": {"type": "string", "required": True, "desc": "回调 URL"}}},
+    {"name": "wpp_webhook_get", "description": "读当前回调配置，确认 vendor 侧指向哪里。", "endpoint": "/Webhook/Get", "method": "GET", "params": {}},
+    {"name": "wpp_webhook_remove", "description": "删除回调配置。删后 vendor 不再推消息，等于平台静默掉线。", "endpoint": "/Webhook/Remove", "params": {}},
+    {"name": "wpp_webhook_business_set", "description": "设置业务回调（登录/掉线等事件）。", "endpoint": "/Webhook/Business/Set", "params": {"url": {"type": "string", "required": True, "desc": "业务回调 URL"}}},
     {"name": "wpp_webhook_test", "description": "测试发送 Webhook 消息（按授权码，验证回调配置是否生效）。", "endpoint": "/Webhook/Test", "params": {"MessageType": {"type": "string", "desc": "测试消息类型，默认 sync_message"}, "TestData": {"type": "object", "desc": "测试数据（发送到配置的 Webhook）"}}},
 ]
 
 # ------------------------------------------------------------------ sayhello 域
 SAYHELLO_TOOLS = [
-    {"name": "wpp_sayhello_v1", "description": "打招呼（模型 v1）。", "endpoint": "/SayHello/Modelv1", "params": {"url": {"type": "string", "required": True, "desc": "打招呼链接"}, "verifyContent": {"type": "string", "desc": "验证内容"}}},
-    {"name": "wpp_sayhello_v2", "description": "通过微信号/手机号申请好友。", "endpoint": "/SayHello/Modelv2", "params": {"content": {"type": "string", "required": True, "desc": "申请说明"}, "toUserName": {"type": "string", "required": True, "desc": "对方微信号或手机号"}, "scene": {"type": "integer", "desc": "场景，默认 15"}, "fromScene": {"type": "integer", "desc": "来源场景"}, "searchScene": {"type": "integer", "desc": "搜索场景"}}},
-    {"name": "wpp_sayhello_v3", "description": "使用搜索结果申请好友。", "endpoint": "/SayHello/Modelv3", "params": {"v3": {"type": "string", "required": True, "desc": "搜索结果 contact_id"}, "v4": {"type": "string", "required": True, "desc": "搜索结果验证凭据"}, "verifyContent": {"type": "string", "desc": "申请说明"}, "scene": {"type": "integer", "desc": "场景，默认 15"}}},
+    {"name": "wpp_sayhello_v1", "description": "打招呼 v1（url + 验证语）。老流程，新场景优先 v2/v3。", "endpoint": "/SayHello/Modelv1", "params": {"url": {"type": "string", "required": True, "desc": "打招呼链接"}, "verifyContent": {"type": "string", "desc": "验证内容"}}},
+    {"name": "wpp_sayhello_v2", "description": "按微信号或手机号申请加好友（content 是验证语）。", "endpoint": "/SayHello/Modelv2", "params": {"content": {"type": "string", "required": True, "desc": "申请说明"}, "toUserName": {"type": "string", "required": True, "desc": "对方微信号或手机号"}, "scene": {"type": "integer", "desc": "场景，默认 15"}, "fromScene": {"type": "integer", "desc": "来源场景"}, "searchScene": {"type": "integer", "desc": "搜索场景"}}},
+    {"name": "wpp_sayhello_v3", "description": "用搜索结果申请加好友（v3/v4 来自搜索返回，不能手填）。", "endpoint": "/SayHello/Modelv3", "params": {"v3": {"type": "string", "required": True, "desc": "搜索结果 contact_id"}, "v4": {"type": "string", "required": True, "desc": "搜索结果验证凭据"}, "verifyContent": {"type": "string", "desc": "申请说明"}, "scene": {"type": "integer", "desc": "场景，默认 15"}}},
 ]
 
 # ------------------------------------------------------------------ login 域
