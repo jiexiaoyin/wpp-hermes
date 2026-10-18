@@ -7,13 +7,28 @@
 **配置层反向依赖命令层**。命令层又回头 ``from .config import resolve_account_config``，
 两边互相 import。搬到 ``core/`` 之后方向是单向的：
 
-    platform/commands.py ──→ core/overrides.py
-    core/accounts.py     ──→ core/overrides.py
+    platform/commands.py     ──→ core/overrides.py（只读：判当前状态）
+    core/account_store.py    ──→ core/overrides.py（写回后清同键覆盖）
+    core/accounts.py         ──→ core/overrides.py（解析时并入 ③ 层）
+
+## 2026-10-02（W6）：**命令面不再写这里**
+
+在此之前 filehelper 命令写的就是本模块，于是六条命令全是「回了 ✅、当次不生效
+（``Account`` 是 frozen 的、``connect()`` 只解析一次并缓存）、重启就丢」。
+现在命令走 ``core/account_store.write_account_key`` **落盘**，本模块只剩两个用途：
+
+1. **读**：``core.accounts.resolve()`` 的 ③ 层（优先级见该模块 docstring）；命令面
+   判状态时也顺带看它（``commands._feature_state`` 等）。
+2. **测试 / 紧急热改的注入点**：``set_override`` 仍在（``test_accounts`` 用它钉住
+   分层优先级），但**线上没有调用方**。
+
+⚠️ 正因如此，``account_store.write_account_key`` 写完文件**必须**顺手
+``clear_override(account_id, key)``：③ 层压在 ① 层之上，残留的覆盖会把刚写的新值
+影子掉 —— 那就成了"文件改了、链路读到的还是旧值"，比不做更坏。
 
 ## 语义（照抄旧实现，一处未改）
 
-- **只在内存里**：进程重启即失效，不回写 ``accounts/*.json``。这是刻意的 ——
-  调试期改开关不该污染落盘配置；要持久化请改 ``config.yaml`` / 账号文件。
+- **只在内存里**：进程重启即失效，不回写 ``accounts/*.json``。
 - ``set_override(account_id, key, value)`` 的 ``key`` 是**原始 cfg 键**
   （``heartflow`` / ``allowFrom`` / ``groupAllowFrom`` …），因为
   ``core.accounts.resolve()`` 是把覆盖项**并入 cfg 字典**再解析成 ``Account`` 的。
@@ -25,9 +40,10 @@
 
 ## 生效时机
 
-``resolve()`` 每次调用都重读覆盖 ⇒ 命令只影响**此后**的解析结果。
+``resolve()`` 每次调用都重读覆盖 ⇒ 覆盖只影响**此后**的解析结果。
 ``Account`` 是 frozen 的，且 ``adapter.connect()`` 只解析一次并缓存 ——
-所以覆盖在**下一次账号解析**（重连 / reload / 进程重启）后才对已在跑的链路生效。
+所以覆盖在**下一次账号解析**（``adapter.reload_account`` / 重连 / 进程重启）后
+才对已在跑的链路生效。命令面那条路已经改走账号文件 + ``reload_account``（见上）。
 """
 from __future__ import annotations
 

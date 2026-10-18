@@ -42,9 +42,12 @@ from typing import Any
 import pytest
 import yaml
 
-#: 复用注册面那套空壳环境与 ``register()`` 调用（见本文件 docstring 末段，
-#: 以及 ``plugin/tests/test_registration.py`` 顶部的分工说明）。
-from .test_registration import _register, stubbed  # noqa: F401 —— stubbed 是本模块要用的夹具
+#: 复用注册面那套 ``register()`` 调用（见本文件 docstring 末段）。
+#: ⚠️ ``stubbed`` **不再从 test_registration 导入**：空壳夹具 2026-10-02 已提到
+#: ``conftest.py``（理由：``tools/mutation_check.py`` 是单文件跑测试的，夹具留在
+#: 别的测试模块里会让变异体一律判 BROKEN ⇒ 不计入杀死数）。pytest 按名字从
+#: conftest 解析夹具，**这里不需要 import** —— 写了反而会在收集期 ImportError。
+from .test_registration import _register
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILLS_DIR = ROOT / "skills"

@@ -555,6 +555,20 @@ def test_cache_warm_then_read_and_replace():
     assert P.hf_profile_cache_size() == 0
 
 
+def test_cache_keeps_quiet_hours_for_the_explicit_switch():
+    """★ 主路径：静默段必须进缓存。
+
+    2026-10-18 实测 bug：缓存只存了 ``budget``，而 ``clamp_hf_profile_budget`` 按口径
+    **不含** ``quietHours`` ⇒ ``applyQuietHours=true`` 时生效值永远空（开关是摆设）。
+    这里钉住原始静默段可被显式开关那条路取到，同时预算建议的口径不变。
+    """
+    P.load_hf_profiles_into_cache("acc1", [prof_row("g1@chatroom")], 400)
+    assert P.get_hf_profile_quiet_hours("acc1", "g1@chatroom") == ((23, 7),)
+    assert "quietHours" not in (P.get_hf_profile_budget("acc1", "g1@chatroom") or {}), \
+        "预算建议口径不变 —— 静默段只走显式开关"
+    assert P.get_hf_profile_quiet_hours("acc1", "nope@chatroom") == ()
+
+
 def test_cache_truncates_at_warm_time():
     P.load_hf_profiles_into_cache("acc", [prof_row("g")], 30)
     text = P.get_hf_profile_prompt_text("acc", "g")
@@ -597,6 +611,33 @@ def test_mute_pattern_table_has_known_gaps():
             "test_strip_mute_phrases_kills_every_pattern 并同步 HF_MUTE_PATTERNS 的条数"
         )
     assert len(P.HF_MUTE_PATTERNS) == 6
+
+
+def test_startup_preload_reads_rows_once_into_cache(monkeypatch):
+    """启动预热（2026-10-18）：只读画像行灌缓存，不生成、不查第二次。"""
+    calls: list[str] = []
+
+    def fake_list(account_id):
+        calls.append(account_id)
+        return [prof_row("g1@chatroom"), prof_row("g2@chatroom", profile_json="{坏")]
+
+    monkeypatch.setattr(repo_hf, "list_profiles", fake_list)
+    P.reset_hf_profile_cache()
+    assert P.load_hf_profiles("acc1") == 1, "坏行跳过（与 sweep 预热同一套解析）"
+    assert calls == ["acc1"]
+    assert P.get_hf_profile_prompt_text("acc1", "g1@chatroom")
+    assert P.get_hf_profile_prompt_text("acc1", "g2@chatroom") is None
+    P.reset_hf_profile_cache()
+
+
+def test_reply_side_prompt_wraps_the_same_text_without_changing_it():
+    """回复侧注入 = 前缀 + 画像正文；空画像 ⇒ None（= 与没开功能时逐字节相同）。"""
+    assert P.build_hf_profile_channel_prompt(None) is None
+    assert P.build_hf_profile_channel_prompt("  \n ") is None
+    out = P.build_hf_profile_channel_prompt("群性质: 手机店\n说话基调: 简短")
+    assert out.startswith("[系统提示-本群画像]")
+    assert out.endswith("群性质: 手机店\n说话基调: 简短")
+    assert "不要向群友复述" in out, "必须明确它不是用户消息（channel_prompt 会进 system prompt）"
 
 
 def test_cache_rows_without_group_id_are_skipped():
@@ -917,7 +958,9 @@ def test_profile_imports_no_learn_or_heartflow_at_module_level():
     """成环会把加载期异常吞成 WARNING ⇒ 真实表现是**整批工具静默不注册**（F5 的形态）。
 
     ``learn`` / ``heartflow`` 都要 import 本模块（值导入），所以本模块只能在**函数体里**
-    延迟 import 它们（band 区间那一条）。模块级允许的只有 ``.budget`` / ``.runtime``。
+    延迟 import 它们（band 区间那一条）。模块级允许的只有 ``.budget`` / ``.runtime`` /
+    ``.caption`` —— 前两个无包内依赖，``caption`` 模块级只用 stdlib（它对本包
+    ``heartflow`` 的依赖也在函数体里延迟导入，正是为了避开这条环）。
     """
     tree = ast.parse(PROFILE_SRC)
     top: list[str] = []
@@ -929,7 +972,8 @@ def test_profile_imports_no_learn_or_heartflow_at_module_level():
     assert top, "切片自检：模块级导入必须被扫到（否则这条断言是假绿）"
     for name in top:
         if name.startswith("."):
-            assert name in (".budget", ".runtime"), f"模块级只许 .budget/.runtime，得到 {name}"
+            assert name in (".budget", ".runtime", ".caption"), \
+                f"模块级只许 .budget/.runtime/.caption，得到 {name}"
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             mod = (node.module or "").split(".")[-1]

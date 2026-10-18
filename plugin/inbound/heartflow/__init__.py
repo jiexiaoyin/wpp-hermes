@@ -25,7 +25,7 @@
 表现是"**平台没注册上**"或"**工具数对不上**"，而不是"心流挂了"。
 这正是 F5 的形态（见 ``tools/verify_tree.py`` 的 R3），**只是换个位置复发**。
 
-所以：``plugin/tools/`` 与 ``plugin/llm/`` 之后，本包是**第三处**零 import 的
+所以：``plugin/toolkit/`` 与 ``plugin/llm/`` 之后，本包是**第三处**零 import 的
 ``__init__``，并已在 R3 的 :data:`NO_EAGER_INIT_PACKAGES` 里上锁。
 
 调用方一律**显式导入子模块**（``adapter.py`` 已经是这么写的）::

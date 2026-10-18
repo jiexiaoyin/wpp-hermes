@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -76,7 +77,11 @@ class FakeMsg:
     peer_id: str = "g1@chatroom"
     content: str = "这批货什么时候到"
     msg_id: str = "m100"
-    new_msg_id: str = "n100"
+    #: ⚠️ **没有** ``new_msg_id`` 字段：真的 ``WppMessage`` 也没有。服务端 id 只能从
+    #: 原始 payload 取（``persist.pick_new_msg_id``）。这里以前凭空给 FakeMsg 加了
+    #: 一个 ``new_msg_id`` 属性，于是 ``getattr(msg, "new_msg_id", "")`` 在测试里恒有值、
+    #: 在线上恒为空 —— 假件的形状漂移把真 bug 盖住了。
+    raw: dict = field(default_factory=lambda: {"NewMsgId": "n100"})
     from_wxid: str = "wxid_alice"
     from_nickname: str = "阿丽"
     msg_type: str = "text"
@@ -726,6 +731,37 @@ def test_judge_business_context_prefixes_the_system_prompt(monkeypatch):
     assert got[0]["system_prompt"].startswith("我们是手机店\n\n")
 
 
+def test_a_group_business_context_overrides_the_account_wide_one(monkeypatch):
+    """账号级那段写的是全员群口径；别的群必须能用群级值覆盖它（2026-10-18）。"""
+    got = fake_judge(monkeypatch, [good_json()])
+    cfg = cfg_on(businessContext="全员群晒单口径",
+                 groupBusinessContexts={"g1": "移动业务对接群口径"})
+    asyncio.run(HF.judge_heartflow(HF.HfJudgeInput(chat_id="g1", content="x"),
+                                   cfg, creds=creds()))
+    assert got[0]["system_prompt"].startswith("移动业务对接群口径\n\n")
+    assert "全员群晒单口径" not in got[0]["system_prompt"]
+
+
+def test_an_unknown_or_blank_group_context_falls_back_to_the_account_level(monkeypatch):
+    got = fake_judge(monkeypatch, [good_json(), good_json()])
+    cfg = cfg_on(businessContext="账号口径",
+                 groupBusinessContexts={"g1": "   ", "other": "别的群"})
+    asyncio.run(HF.judge_heartflow(HF.HfJudgeInput(chat_id="g1", content="x"),
+                                   cfg, creds=creds()))
+    asyncio.run(HF.judge_heartflow(HF.HfJudgeInput(chat_id="g2", content="x"),
+                                   cfg, creds=creds()))
+    assert got[0]["system_prompt"].startswith("账号口径\n\n"), "空白群级值不许把背景整段丢掉"
+    assert got[1]["system_prompt"].startswith("账号口径\n\n")
+
+
+def test_resolve_business_context_is_pure_and_trimmed():
+    cfg = {"businessContext": " 账号 ", "groupBusinessContexts": {"g1": " 群级 "}}
+    assert HF.resolve_business_context("g1", cfg) == "群级"
+    assert HF.resolve_business_context("g2", cfg) == "账号"
+    assert HF.resolve_business_context("g1", {}) == ""
+    assert HF.resolve_business_context("g1", {"groupBusinessContexts": "bad"}) == ""
+
+
 def test_judge_falls_back_to_env_creds(monkeypatch):
     """``creds=None`` ⇒ 走 ``resolve_judge_creds()``（环境变量链）。"""
     from plugin.llm import judge as judge_mod
@@ -892,6 +928,30 @@ def test_effective_budget_quiet_hours_need_explicit_optin(monkeypatch):
         == ((23, 7),), "账号档的静默段是配置，不是建议"
 
 
+def test_effective_budget_quiet_hours_come_from_the_profile_cache():
+    """★ 主路径回归：开关打开后，静默段必须真的从**画像缓存**并进生效预算。
+
+    上面那条用例手工把 ``quietHours`` 塞进 ``get_hf_profile_budget`` 的返回值里 ——
+    而真实缓存从不这么给（``clamp_hf_profile_budget`` 的口径不含静默段）。2026-10-18
+    实测正是这个缝：``applyQuietHours=true`` 但每个群生效的 ``quiet_hours`` 全是空。
+    这里只灌缓存、不 mock getter，走真实合成路径。
+    """
+    rows = [{"group_id": "g1@chatroom", "generated_at": NOW_SEC,
+             "profile_json": json.dumps({"summary": "零售售后群",
+                                         "quietHours": [[1, 5]]})}]
+    assert P.load_hf_profiles_into_cache("acc1", rows, 400) == 1
+    base_cfg = cfg_on(budget={"enabled": True, "minGapSec": 180, "maxPerHour": 8,
+                              "maxPerDay": 60})
+    off = HF.resolve_hf_effective_budget("acc1", "g1@chatroom", base_cfg, NOW_SEC)
+    assert off.quiet_hours == (), "默认关 —— 缓存里有也不生效"
+
+    on_cfg = cfg_on(budget={"enabled": True, "minGapSec": 180, "maxPerHour": 8,
+                            "maxPerDay": 60}, profile={"applyQuietHours": True})
+    on = HF.resolve_hf_effective_budget("acc1", "g1@chatroom", on_cfg, NOW_SEC)
+    assert [tuple(x) for x in on.quiet_hours] == [(1, 5)], \
+        "开了开关，缓存里的静默段必须并进生效预算"
+
+
 def test_effective_budget_shares_the_outer_ring(monkeypatch):
     """占比外环（observe）也走同一条合成路径。"""
     from plugin.inbound.heartflow import observe as O
@@ -971,8 +1031,13 @@ def test_engage_pass_path(monkeypatch):
     assert rec.judge_overall == 1.0 and rec.dim_r == 10.0 and rec.dim_c == 10.0
     assert abs(rec.effective_threshold - L.HF_REPLY_THRESHOLD_FALLBACK) < 1e-9
     assert rec.energy == 1.0
-    # 通过 ⇒ 记一次主动回复（精力递减）+ 登记待交付
-    assert HF._chat_states["g1@chatroom"].total_replies == 1
+    # ★ B8（2026-10-02 修）：**判了 ≠ 发过了** —— 这里只登记待交付，回复状态一律不动。
+    #   旧断言 ``total_replies == 1`` 钉的正是那个 bug：话还没进群（还要过生成 + 复读闸 +
+    #   发送），却已经按"回过"扣精力、推 ``last_reply_time`` ⇒ 冷却闸接下来的
+    #   ``minReplyIntervalSec`` 内一律装死（老板看到的就是"该接的话不接"）。
+    st = HF._chat_states["g1@chatroom"]
+    assert (st.total_replies, st.last_reply_time) == (0, 0), \
+        "只判过还没发出 ⇒ 不许记回复状态（冷却不许在这儿起算）"
     assert HF.pending_send_count() == 1
     assert HF._pending["acc1:g1@chatroom"].inbound_msg_id == "m100"
     assert HF.judge_interval_count() == 1, "judge 频率闸要记上"
@@ -1155,6 +1220,10 @@ def test_pre_send_suppresses_a_repeat_and_settles_the_ledger(monkeypatch):
     assert args[2].ok is True and args[2].msg_id == HF.HF_REPEAT_PLACEHOLDER
     assert kw["label_window_sec"] == 0 and kw["observe_sec"] == 0, \
         "占位路径不许开窗（0/0 ⇒ learn 侧判 suppressed，不占额度不开窗）"
+    # ★ B8：静默不发 ⇒ 群里一个字都没有 ⇒ 回复状态一个都不许动（适配器拿到占位符就
+    #   直接返回了，压根不会调 note_sent；这条钉的是"别有人在交付缝顺手补记一笔"）。
+    assert HF.seconds_since_last_reply("g1", NOW_MS + 1_000) == 0.0, \
+        "静默不发 ⇒ 冷却不许起算（老板看到的「装死」就是这个）"
 
 
 def test_pre_send_respects_dedupe_off(monkeypatch):
@@ -1166,6 +1235,108 @@ def test_pre_send_respects_dedupe_off(monkeypatch):
     HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
     plan = HF.pre_send("acc1", "g1", "今天下午三点到货一批新机", NOW_SEC)
     assert plan is not None and plan.placeholder is None, "关掉重复闸 ⇒ 放行"
+
+
+def test_pre_send_ignores_an_expired_registration(monkeypatch):
+    """B2：**过期登记不是心流交付** —— 不能继续拿重复闸去卡该群后面每一条出站。
+
+    修前 `pre_send` 只 `.get()` 不看 TTL（只有 `take_pending_send` 看），于是"判定通过
+    但 agent 最终没产出回复"的那条登记会一直挂着：老板 @ 之后的正常回复也会被当心流插话
+    过闸，命中就静默丢弃（还返回 success=True）—— 日志干净、消息没发。
+    """
+    monkeypatch.setattr(HF, "_cfg_for", lambda a: cfg_on())
+    ledger_recorder(monkeypatch)
+    B.reset_budget_cache()
+    D.reset_dedupe_store()
+    dcfg = D.resolve_dedupe_cfg({})
+    D.note_recent_reply("acc1", "g1", "今天下午三点到货一批新机", NOW_SEC - 600, dcfg)
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+
+    # 对照：同一文案在 TTL 内**会**被拦（证明这条测试有咬合力，不是恒真）
+    assert HF.pre_send("acc1", "g1", "今天下午三点到货一批新机", NOW_SEC + 119) is not None
+
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+    assert HF.pre_send("acc1", "g1", "今天下午三点到货一批新机", NOW_SEC + 121) is None, \
+        "过期（>120s）⇒ 按普通发送放行，一个字都不改"
+    # B6（2026-10-02）改了这里：闸门过期**不再顺手删登记**。删了就没人给慢模型那次
+    # 出站归账（它真发出去了，却被记成"没发生"）。登记留着等 ``note_sent`` 用宽时钟
+    # 去认；每群至多一条，不会堆积。
+    assert HF.pending_send_count() == 1, "过期只是不再拦人，登记要留给归账（B6）"
+
+
+def test_pre_send_ignores_a_registration_after_a_bot_mention(monkeypatch):
+    """B3：登记之后有人 @/引用机器人 ⇒ 这批出站回的是**那一条**，不是心流插话。
+
+    这条正是"群里 @ 机器人它不回"的直接成因：@ 之后框架产出的回复被当成心流插话，
+    命中重复闸 ⇒ 静默丢弃。
+    """
+    monkeypatch.setattr(HF, "_cfg_for", lambda a: cfg_on())
+    ledger_recorder(monkeypatch)
+    B.reset_budget_cache()
+    D.reset_dedupe_store()
+    dcfg = D.resolve_dedupe_cfg({})
+    D.note_recent_reply("acc1", "g1", "好的老板，马上处理", NOW_SEC - 600, dcfg)
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+
+    # 对照：没有 @ 时，同样这句**会**被重复闸拦下
+    assert HF.pre_send("acc1", "g1", "好的老板，马上处理", NOW_SEC + 5) is not None
+
+    HF.note_bot_mention("acc1", "g1")
+    plan = HF.pre_send("acc1", "g1", "好的老板，马上处理", NOW_SEC + 6)
+    assert plan is None, "@ 之后的出站必须放行（重复闸不适用）"
+    assert HF.pending_send_count() == 1, "登记**留着**：真正那条心流插话可能还在生成中"
+
+
+def test_note_bot_mention_is_keyed_by_account_and_group(monkeypatch):
+    """标记只作用于**那个群**：多账号 / 多群共享同一进程，串台就是别的群漏闸。"""
+    monkeypatch.setattr(HF, "_cfg_for", lambda a: cfg_on())
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+    HF.begin_pending_send("acc1", "g2", "m2", NOW_SEC)
+    HF.begin_pending_send("acc2", "g1", "m3", NOW_SEC)
+    HF.note_bot_mention("acc1", "g1")
+    assert HF._pending["acc1:g1"].newer_mention_at_sec is not None
+    assert HF._pending["acc1:g2"].newer_mention_at_sec is None
+    assert HF._pending["acc2:g1"].newer_mention_at_sec is None, "账号维度也要隔离"
+
+
+def test_a_new_registration_clears_a_previous_mention_flag(monkeypatch):
+    """@ **自己**触发了心流接管时不能自我否决。
+
+    时序：`_handle_one` 的 ④a 旁路观测（打标记）排在 ⑤ 交给 runner 之前，而
+    `begin_pending_send` 在 ④a 之后 ⇒ 标记落在**旧**登记上，随即被整条替换掉。
+    """
+    monkeypatch.setattr(HF, "_cfg_for", lambda a: cfg_on())
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+    HF.note_bot_mention("acc1", "g1")
+    HF.begin_pending_send("acc1", "g1", "m9", NOW_SEC + 1)
+    plan = HF.pre_send("acc1", "g1", "一句全新的话", NOW_SEC + 2)
+    assert plan is not None and plan.placeholder is None
+
+
+def test_note_group_message_flags_a_mention_for_the_delivery_seam(monkeypatch):
+    """接线：适配器那条旁路（`_hf_note_group`）走的就是 `note_group_message`。
+
+    少了这条，B3 的判据在真机上永远不置位 —— 单元测试全绿而故障照旧。
+    """
+    monkeypatch.setattr(HF, "_cfg_for", lambda a: cfg_on())
+    HF.reset_heartflow_cache()
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+    HF.note_group_message("acc1", "g1", sender_name="老板", content="@机器人 在吗",
+                          ts_sec=NOW_SEC + 3, mentions_bot=True)
+    assert HF._pending["acc1:g1"].newer_mention_at_sec is not None
+
+    # 反例：同一群里只是闲聊 ⇒ **不**置位（否则闲聊群里去重闸整体失效，
+    # 而那条闸正是老板 2026-09-26 拍板的"别换个日期说同一段话"）
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+    HF.note_group_message("acc1", "g1", sender_name="路人", content="今天天气不错",
+                          ts_sec=NOW_SEC + 3)
+    assert HF._pending["acc1:g1"].newer_mention_at_sec is None
+
+    # 引用机器人同样算"在跟机器人说话"（触发判定第 ⑨ 路 quote_bot 会产出回复）
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+    HF.note_group_message("acc1", "g1", sender_name="路人", content="[引用]",
+                          ts_sec=NOW_SEC + 3, quotes_bot=True)
+    assert HF._pending["acc1:g1"].newer_mention_at_sec is not None
 
 
 def test_note_sent_translates_platform_send_result(monkeypatch):
@@ -1227,20 +1398,128 @@ def test_note_sent_without_a_pending_is_a_noop(monkeypatch):
     assert calls == [], "不是心流交付 ⇒ 不落账（否则主 LLM 的每条回复都会污染台账）"
 
 
+# ===== 13b. 回复状态只认「真发出去」（B8，2026-10-02 修）=====
+#
+# 旧写法在 judge 通过时就记 ``last_reply_time``（TS ``handler.ts:827`` 同形）。可判过之后
+# 这条回复还要过生成与交付缝两道，两道都能让它**进不了群**：复读闸静默不发、发送失败等重试。
+# 而冷却闸（``check_gate`` 的 ``cooling``）只认 ``last_reply_time`` ⇒ "没发出去的那次"
+# 照样把接下来 ``minReplyIntervalSec`` 的窗口占掉，群里再喊它也不应 ——
+# 老板看到的正是"明明该接的话它装死"。
+
+
+def test_reply_state_is_recorded_only_after_the_send_lands(monkeypatch):
+    """★ B8 正题：闭环走一遍 —— judge 通过不动状态，真发出之后才动（冷却这才起算）。"""
+    fake_judge(monkeypatch, [good_json(reasoning="该接")])
+    ledger_recorder(monkeypatch)
+    monkeypatch.setattr(HF, "_cfg_for", lambda a: cfg_on(minReplyIntervalSec=300))
+    msg = FakeMsg()
+    assert asyncio.run(_engage(msg)) is True
+    st = HF._chat_states[msg.chatroom_id]
+    assert (st.total_replies, st.last_reply_time, st.total_messages) == (0, 0, 0), \
+        "判过而已：话还没进群，状态一律不动"
+
+    sent_at = int(time.time())
+    HF.note_sent("acc1", msg.chatroom_id, "今天下午三点到货", success=True,
+                 message_id="848526155-179", now_sec=sent_at)
+    st = HF._chat_states[msg.chatroom_id]
+    assert (st.total_replies, st.total_messages) == (1, 1), "一条真发出的回复只算一次"
+    assert st.last_reply_time == sent_at * 1000
+    assert st.energy < 1.0, "真发出去才算消耗"
+    g = HF.check_gate(msg.chatroom_id, "有人吗", cfg_on(minReplyIntervalSec=300),
+                      sent_at * 1000 + 5_000)
+    assert (g.allowed, g.reason) == (False, "cooling"), "冷却只该在真发出之后起算"
+
+
+def test_a_failed_send_does_not_start_the_cooldown(monkeypatch):
+    """发送失败（等重试）⇒ 状态不动 —— 否则重试成功之前那段窗口里群里喊它也不应。
+
+    这里直接用 :func:`seconds_since_last_reply` 断言：它就是 ``cooling`` 闸读的那个数
+    （``0`` = 从未回复）。
+    """
+    monkeypatch.setattr(HF, "_cfg_for", lambda a: cfg_on(minReplyIntervalSec=300))
+    ledger_recorder(monkeypatch)
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+    HF.note_sent("acc1", "g1", "文本", success=False, message_id=None, now_sec=NOW_SEC)
+    assert HF.pending_send_count() == 1, "失败 ⇒ 登记留着等重试"
+    assert HF.seconds_since_last_reply("g1", NOW_MS) == 0.0, \
+        "没发出去 ⇒ 冷却不许起算（0 = 从未回复）"
+
+    HF.note_sent("acc1", "g1", "文本", success=True, message_id="v9", now_sec=NOW_SEC + 5)
+    assert HF.seconds_since_last_reply("g1", NOW_MS + 6_000) == 1.0, \
+        "重试真发出去的那次才起算"
+    assert HF.pending_send_count() == 0
+
+
+@pytest.mark.parametrize("dropped", list(L.HF_PLACEHOLDER_MSG_IDS))
+def test_a_framework_dropped_send_does_not_start_the_cooldown(monkeypatch, dropped):
+    """账本判 ``suppressed`` = 框架把它丢了 ⇒ 群里没有这句话 ⇒ 一样不许起算冷却。
+
+    （``msg_id=""`` 到不了这里：``note_sent`` 的 ``message_id or None`` 会把它归一成
+    ``None`` = "vendor 没回 id"，那是 **sent** —— 与"框架丢了"是两回事。）
+    """
+    monkeypatch.setattr(HF, "_cfg_for", lambda a: cfg_on(minReplyIntervalSec=300))
+    calls = ledger_recorder(monkeypatch)
+    HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
+    HF.note_sent("acc1", "g1", "文本", success=True, message_id=dropped, now_sec=NOW_SEC)
+    assert calls and calls[0][0] == "send", "账本照样收敛（那行不许停在 judged）"
+    assert calls[0][1][2].msg_id == dropped, "落的是 suppressed，占位符原样带上"
+    assert HF.seconds_since_last_reply("g1", NOW_MS + 1_000) == 0.0, \
+        "框架丢了 ⇒ 没进群 ⇒ 冷却不许起算"
+
+
+def test_reply_state_is_written_in_exactly_one_place_and_only_when_sent():
+    """★ B8 源级：``record_active_reply`` 只许出现在 ``note_sent``，且只在账本判成 sent 时。
+
+    行为级那两条管"这一次对不对"；这条管"有人把 ``handler.ts:827`` 那行搬回来" ——
+    群状态是内存里的，下一个用例一清就看不出差别，那种回归会一路溜到生产
+    （表现是生产上"该接的话不接"，本地全绿）。
+    """
+    assert "record_active_reply" not in _fn_code("maybe_engage"), \
+        "judge 通过不许记回复状态（B8：判了 ≠ 发过了）"
+    tree = ast.parse(HF_SRC)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "note_sent")
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", "") == "record_active_reply"]
+    assert len(calls) == 1, f"记回复状态只该有一处（实际 {len(calls)}）"
+    guard = next(ast.unparse(n.test) for n in ast.walk(fn)
+                 if isinstance(n, ast.If) and any(c is calls[0] for c in ast.walk(n)))
+    assert guard == "outcome == L.HF_SEND_OUTCOME_SENT", \
+        f"守卫必须是「账本判成 sent」（实际 {guard}）—— suppressed = 框架把它丢了，一样没进群"
+
+
 def test_pending_expires_after_ttl(monkeypatch):
-    """TTL 是**120 秒**这个具体数字，不是"某个常数"。
+    """两个时钟都是**写死的具体数字**，不是"某个常数"。
 
     写死字面量是刻意的：用 ``HF.HF_PENDING_SEND_TTL_SEC`` 写断言，常数被改大多少
-    测试就跟着放水多少 —— 而这条守卫的全部意义就在于"agent 卡了一下之后，
-    下一条无关发言不许被算成心流交付"。
+    测试就跟着放水多少 —— 而这两条守卫的全部意义就在于"agent 卡了一下之后，
+    下一条无关发言不许被算成心流交付"（闸门）与"卡太久之后的交付不许被算成没发生"
+    （归账）。
+
+    B6（2026-10-02）把**拦人**与**归账**分成两个时钟：120s / 600s。混成一个数的
+    两个方向都坏 —— 取 120 则慢模型那次真发出的回复不记账（B6 的原始症状）；
+    取 600 则 agent 挂掉后 10 分钟内所有无关出站都被重复闸当心流插话去卡（B2 回潮）。
     """
     monkeypatch.setattr(HF, "_cfg_for", lambda a: cfg_on())
     assert HF.HF_PENDING_SEND_TTL_SEC == 120
+    assert HF.HF_PENDING_SEND_ABSORB_SEC == 600
     calls = ledger_recorder(monkeypatch)
+    # ① 闸门时钟：>120s 不再拿重复闸卡该群出站（B2），但登记**留着**
     HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
-    HF.note_sent("acc1", "g1", "太晚了", success=True, message_id="x",
-                 now_sec=NOW_SEC + 121)
-    assert calls == [], "过期 ⇒ 丢弃（agent 挂了以后的下一条无关发言不许被算成心流交付）"
+    assert HF.pre_send("acc1", "g1", "一句会被重复闸盯上的话", NOW_SEC + 121) is None
+    assert HF.pending_send_count() == 1, "闸门过期只是不再拦人，登记留给归账（B6）"
+    # ② 归账时钟：慢模型 200s 才把回复发出去，仍然**算数**（B6 的正题）
+    HF.note_sent("acc1", "g1", "慢吞吞但真发出去了", success=True, message_id="x",
+                 now_sec=NOW_SEC + 200)
+    assert len(calls) == 1, "真发出去的回复不许因为「那次生成慢」就被记成没发生"
+    assert calls[0][1][1] == "m1", "归到那条判定行上"
+    assert HF.pending_send_count() == 0, "归账即消费掉"
+    # ③ 超过归账时钟 ⇒ 丢弃（agent 挂了以后的下一条无关发言不许被算成心流交付）
+    HF.begin_pending_send("acc1", "g1", "m2", NOW_SEC)
+    HF.note_sent("acc1", "g1", "太晚了", success=True, message_id="y",
+                 now_sec=NOW_SEC + 601)
+    assert len(calls) == 1, ">600s 的交付尝试不再归账（对准哪条行已经不可信）"
     assert HF.pending_send_count() == 0
     HF.begin_pending_send("acc1", "g1", "m1", NOW_SEC)
     assert HF.take_pending_send("acc1", "g1", NOW_SEC + 119) is not None
@@ -1693,19 +1972,60 @@ def test_adapter_send_short_circuits_on_a_repeat_placeholder():
         "占位要返回**成功**（报失败会让 runner 重试同一条插话直到天亮）"
 
 
+def test_adapter_partial_shard_failure_is_booked_as_sent():
+    """**B5**：多片消息只发出前几片时，要按"说了"记账，不许当"没发"。
+
+    旧写法把失败结果原样交回交付缝 ⇒ ``classify_hf_send`` 判 pending ⇒ 账本不动
+    （等框架重试）。可群里**已经有半句了**（红线 3：微信撤不回）：不占预算、不进
+    复读历史、不开观察窗，而台账那行停在 ``judged`` 等 sweep 收敛成"没人接话" ——
+    一条真说过话的样本被记成负样本。重试还会把第 1 片**再发一遍**。
+
+    一片都没出去时才维持原样（真的没发 ⇒ 上报失败、等重试）。
+    """
+    fn = _fn_node(_adapter_tree(), "send")
+    fails = [n for n in ast.walk(fn)
+             if isinstance(n, ast.If) and ast.unparse(n.test) == "not result.success"]
+    assert len(fails) == 1, "send() 里应只有分片循环那一处发送失败判定"
+    branch = fails[0]
+    nested = [n for n in ast.walk(branch)
+              if isinstance(n, ast.If) and ast.unparse(n.test) == "last_id is None"]
+    assert len(nested) == 1, "失败分支必须区分「一片都没出去」与「已经发出了几片」"
+
+    calls = [n for n in ast.walk(branch)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "_hf_note_sent"]
+    assert len(calls) == 2, f"失败分支该有两处交付记账（全失败/部分发出），实际 {len(calls)}"
+    inner = [c for c in calls if any(c is x for x in ast.walk(nested[0]))]
+    outer = [c for c in calls if c not in inner]
+    assert len(inner) == 1 and len(outer) == 1
+    assert ast.unparse(inner[0].args[-1]) == "result", \
+        "一片都没发 ⇒ 照原样上报失败结果（判 pending，等框架重试）"
+    assert "SendResult(success=True" in ast.unparse(outer[0]), \
+        "已发出几片 ⇒ 必须按「发出去了」上报，否则账本、预算、复读历史三处全丢"
+    assert "last_id" in ast.unparse(outer[0]), \
+        "部分发出要带上已发出那片的 msgId（否则那条 sent 行永远拿不到 bot_msg_id）"
+
+
 def test_adapter_records_group_messages_only_after_the_drop_gate():
-    """``_handle_one``：旁路观测必须排在 ``_DROP_REASONS`` 之后。
+    """``_handle_one``：旁路观测必须排在丢弃门之后。
 
     排在前面 = 黑名单群 / 非白名单群的消息也进缓冲（"隐私"那条设计注释直接变成空话）；
     排在触发判断之后更糟 —— 缓冲里只剩 bot 自己的发言，judge 看的是伪造的现场。
+
+    判据本体在 ``inbound.triggers.should_drop``（纯函数，那边有真用例与变异门）；
+    这里只钉**位置**与**有没有接线** —— 顺带钉住它带上了 ``ok``：
+    只看 reason 不看 ``ok`` 的话，``(True, …)`` 里任何未登记的 reason 会被误丢。
     """
     fn = _fn_node(_adapter_tree(), "_handle_one")
     drop_if = None
     for node in ast.walk(fn):
-        if isinstance(node, ast.If) and "_DROP_REASONS" in ast.unparse(node.test):
+        if isinstance(node, ast.If) and "should_drop(" in ast.unparse(node.test):
             drop_if = node
             break
-    assert drop_if is not None, "找不到 `reason in _DROP_REASONS` 那道门"
+    assert drop_if is not None, "找不到 `should_drop(ok, reason)` 那道门（A8 的接线）"
+    assert ast.unparse(drop_if.test) == "should_drop(ok, reason)", \
+        "判据必须原样吃 (ok, reason) —— 光看 reason、或传空串，" \
+        "都会让「明令拒绝的消息」溜到下游（放行类里未登记的 reason 也会被误丢）"
     assert any(isinstance(n, ast.Return) for n in drop_if.body), "那道门必须是「丢完就 return」"
 
     notes = _call_lines(fn, "_hf_note_group")

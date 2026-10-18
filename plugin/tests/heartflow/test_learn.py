@@ -87,9 +87,22 @@ def ev(stats: dict, learned=None, base=0.6, **kw) -> L.HfThresholdEval:
     return L.eval_hf_threshold(stats, learned, base, params(**kw))
 
 
-def _s(signal, engaged):
-    """一条已收敛样本（列名与 ``get_closed_recent`` 的真查询一致）。"""
-    return {"engaged": 1 if engaged else 0, "closed_at": NOW - 10, "engage_signal": signal}
+def _s(signal, engaged, *, judge_overall=None, effective_threshold=None):
+    """一条已收敛样本（列名与 ``get_closed_recent`` 的真查询一致）。
+
+    ``sent_at`` 是 B9 起必需的一列：调阈侧按**样本自己那一小时**查本底。缺了它那条
+    守卫会静默跳过全部样本（表现 = 阈值再也不动），所以这里默认给上。
+
+    v1.16.2 起真查询还带 ``judge_overall / effective_threshold``（silence-exempt 用）；
+    不传时**不出现**这两个键 —— 模拟「旧行/无分」，豁免必须退回旧行为（宁严勿宽）。
+    """
+    row = {"engaged": 1 if engaged else 0, "closed_at": NOW - 10,
+           "engage_signal": signal, "sent_at": NOW - 10}
+    if judge_overall is not None:
+        row["judge_overall"] = judge_overall
+    if effective_threshold is not None:
+        row["effective_threshold"] = effective_threshold
+    return row
 
 
 def _seed_learned(account_id: str, group_id: str, v: float) -> None:
@@ -800,6 +813,107 @@ def test_send_outcome_failure_is_non_fatal(repo, caplog):
     assert any("non-fatal" in r.message for r in caplog.records)
 
 
+# ======================================================== B4 记账原子性（2026-10-02）
+
+
+def test_send_outcome_books_budget_and_history_even_when_the_ledger_explodes(
+        repo, monkeypatch, caplog):
+    """**B4 的核心**：账本（DB）炸了，预算与复读历史**照记**。
+
+    旧写法把五条语句塞进同一个 ``try`` ⇒ ``set_sent`` 一抛，后面三条全跳过：消息已经
+    发到群里（撤不回），却不占额度、不进复读历史 —— 而这两样是**内存里的护栏**，和库
+    在不在没有半点关系。表现是"台账看着像没发，实际发了"。
+    """
+    repo.raise_on = {"set_sent"}
+    budget_calls, dedupe_calls = [], []
+    monkeypatch.setattr(B, "note_reply_sent", lambda *a: budget_calls.append(a))
+    monkeypatch.setattr(D, "note_recent_reply", lambda *a: dedupe_calls.append(a))
+    with caplog.at_level(logging.WARNING, logger=L.__name__):
+        _outcome({"ok": True, "msg_id": "a1"}, text="一段足够长的文本内容")
+
+    assert len(budget_calls) == 1, "账本失败不该吞掉预算记账（否则等于给刷额度开后门）"
+    assert len(dedupe_calls) == 1, "账本失败不该吞掉复读历史（否则下一句照抄没人拦）"
+    assert any("non-fatal" in r.message for r in caplog.records)
+
+
+def test_send_outcome_ledger_guard_miss_is_not_silent(repo, monkeypatch, caplog):
+    """``set_sent`` 的 guard 不匹配时**返回 0 而不是抛** —— 那一行必须自己喊出来。
+
+    guard 只认 ``judged``（或从未发过的 ``suppressed``），所以行数为 0 只能说明
+    "这行根本不在可推进状态"（多半是 ``persist_hf_judged`` 那次 INSERT 没落上）。
+    旧写法不看返回值：消息发出去了、账本里**零痕迹**、日志里**零行**。
+    """
+    monkeypatch.setattr(repo_hf, "set_sent", lambda *a, **k: 0)
+    with caplog.at_level(logging.WARNING, logger=L.__name__):
+        _outcome({"ok": True, "msg_id": "a1"})
+    assert any("受影响行数 0" in r.message for r in caplog.records), \
+        "行数为 0 必须留痕（否则整条消息在账本与日志里同时消失）"
+    assert any("non-fatal" in r.message for r in caplog.records)
+
+
+def test_send_outcome_only_opens_a_window_when_the_ledger_row_is_sent(
+        repo, monkeypatch):
+    """账本没进 ``sent`` ⇒ **不开观察窗**。
+
+    窗的唯一消费者 ``repo_hf.mark_engaged`` 带 ``status='sent'`` 条件，账本没写成时
+    开窗只是个永远不会被收敛的内存条目（占内存 + 让 ``/heartflow status`` 的窗数虚高）。
+    """
+    monkeypatch.setattr(repo_hf, "set_sent", lambda *a, **k: 0)
+    _outcome({"ok": True, "msg_id": "a1"})
+    assert L.get_open_hf_window("acct", "gA") is None, "账本没写成就不许开窗"
+    assert repo.sent == [] or repo.sent is not None
+
+
+def test_send_outcome_opens_no_window_when_the_ledger_write_throws(repo):
+    """账本那次写**抛了** ⇒ 同样不许开窗（行数 0 的另一种坏法）。
+
+    两者在旧写法里都是"什么都没发生"：只看 ``set_sent`` 有没有抛，就分不清
+    "行推进了"与"DB 抖了一下"。窗的唯一消费者 ``mark_engaged`` 带 ``status='sent'``，
+    行没写成时这条窗永远收敛不了，只在内存里占个位、让 status 页的窗数虚高。
+    """
+    repo.raise_on = {"set_sent"}
+    _outcome({"ok": True, "msg_id": "a1"})
+    assert L.get_open_hf_window("acct", "gA") is None, "账本抛错就不许开窗"
+
+
+def test_send_outcome_still_counts_when_a_memory_step_explodes(repo, monkeypatch, caplog):
+    """内存里某一步炸 ⇒ 账本那次写**照样算数**，且不许把异常抛给调用方。
+
+    反向的坏法：账本已提交、内存某步抛 ⇒ 整个分支退出，调用方（适配器）只看到一条
+    warn 之外的静默 —— 库里说发了、内存里像没发过。
+    """
+    dedupe_calls = []
+    monkeypatch.setattr(B, "note_reply_sent",
+                        lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(D, "note_recent_reply", lambda *a: dedupe_calls.append(a))
+    with caplog.at_level(logging.WARNING, logger=L.__name__):
+        _outcome({"ok": True, "msg_id": "a1"}, text="一段足够长的文本内容")
+
+    assert repo.sent, "预算那步炸了不许抹掉已经落下的 set_sent"
+    assert len(dedupe_calls) == 1, "预算那步炸了不许连累复读历史（各自独立 try）"
+    assert any("预算记账失败" in r.message for r in caplog.records)
+
+
+def test_send_outcome_memory_steps_are_not_in_the_same_try_as_the_ledger():
+    """源码形状：``set_sent`` 与内存三件套**不许共用一个 try**（B4 的机制本身）。
+
+    行为用例只能证明"这次没被吞"，证明不了"以后也不会被吞" —— 把五条语句重新塞回
+    一个 ``try`` 里，上面那条行为用例仍然会绿（因为它只喂了 ``set_sent`` 这一种坏法）。
+    """
+    fn = next(n for n in ast.walk(ast.parse(inspect.getsource(L.persist_hf_send_outcome)))
+              if isinstance(n, ast.FunctionDef))
+    tries = [t for t in ast.walk(fn) if isinstance(t, ast.Try)]
+    sent_try = [t for t in tries if "set_sent" in ast.unparse(t)]
+    assert len(sent_try) == 1, \
+        "set_sent 必须独占一个 try（套一层外层 try 也算共用 —— 那正是 B4 的老毛病）"
+    src = ast.unparse(sent_try[0])
+    assert "note_reply_sent" not in src and "note_recent_reply" not in src, \
+        "内存记账不许写在 set_sent 的 try 里（DB 一炸就会连它们一起跳过）"
+    for call in ("note_reply_sent", "note_recent_reply"):
+        holders = [t for t in tries if call in ast.unparse(t)]
+        assert len(holders) == 1, f"{call} 必须独占一个 try，实际 {len(holders)} 个"
+
+
 def test_mark_engaged_no_window_writes_nothing(repo):
     """绝大多数消息属于"我没开窗"⇒ 必须**零 DB 写**（群聊热路径）。"""
     L.mark_hf_group_engaged("acct", "gA", NOW,
@@ -950,7 +1064,7 @@ def sweep(monkeypatch, repo):
     monkeypatch.setattr(L, "maybe_recompute_hf_share_guard", s.share)
     monkeypatch.setattr(L, "refresh_hf_reachability_caps", s.reach)
     monkeypatch.setattr(L, "prune_open_windows", s.prune)
-    monkeypatch.setattr(L, "load_ambient_by_group", s.ambient)
+    monkeypatch.setattr(L, "load_ambient_by_group_hour", s.ambient)
     monkeypatch.setattr(D, "prune_recent_replies",
                         lambda now, cfg: s.trace.append("prune_replies"))
     monkeypatch.setattr(L, "_allowed_filter", lambda cfg: _allow_all)   # 白名单单独测
@@ -1034,7 +1148,8 @@ def test_sweep_passes_the_same_whitelist_filter_to_all_three_passes(sweep, repo)
 
 def test_sweep_adapts_and_logs(sweep, repo, caplog):
     """一轮完整的调阈：20 条里 2 条被接话 ⇒ rate 0.10 ⇒ 0.6 → 0.65 + 审计一行。"""
-    detail = "rate=0.100 total=20 engaged=2 skipped=0 ambientP=0.000 sig=silence:18,quote:2"
+    detail = ("rate=0.100 total=20 engaged=2 skipped=0 exempt=0 "
+              "ambientP=0.000 sig=silence:18,quote:2")
     repo.closed_groups = ["gA"]
     repo.samples_by_group = {"gA": [_s("silence", False)] * 18 + [_s("quote", True)] * 2}
     repo.group_states = [{"group_id": "gA", "learned_threshold": 0.6, "last_change_at": None}]
@@ -1049,9 +1164,76 @@ def test_sweep_adapts_and_logs(sweep, repo, caplog):
     assert any("threshold adapted" in r.message for r in caplog.records)
 
 
+def test_sweep_silence_exempt_stops_self_lock_replay(sweep, repo, monkeypatch):
+    """v1.16.2 生产实排复现回归门（全员群 10-16/17 两次自锁）。
+
+    17 条 informative silence 的 margin 分布 ``{0.005×2, 0.055×2, ≥0.14×13}``：
+    豁免 13 条高置信被无视，只剩 4 条擦边负 < ``minSample``(10) ⇒ **抬阈路径必须死**。
+    旧口径（v1.16.1）下这 17 条全负 ⇒ rate 0 ⇒ 每 4h +0.05 单调抬到 0.90 钉死。
+    """
+    margins = [0.005, 0.005, 0.055, 0.055] + [0.14] * 13
+    repo.closed_groups = ["gA"]
+    repo.samples_by_group = {"gA": [
+        _s("silence", False, judge_overall=0.6 + m, effective_threshold=0.6)
+        for m in margins]}
+    repo.group_states = [{"group_id": "gA", "learned_threshold": 0.6, "last_change_at": None}]
+
+    seen: dict = {}
+    orig = L.eval_hf_threshold
+
+    def spy(stats, *a, **kw):
+        seen.update(stats)
+        return orig(stats, *a, **kw)
+
+    monkeypatch.setattr(L, "eval_hf_threshold", spy)
+    sweep_run(FakeAdapter(cfg_on(learning={"enabled": True})), "acct", NOW)
+
+    assert seen == {"total": 4, "engaged": 0}, \
+        "17 条里 13 条高置信被无视已豁免，只剩 4 条擦边负进统计"
+    assert repo.upserts == [], "可用样本 4 < minSample 10 ⇒ 不调阈（自锁路径已断）"
+    assert repo.audits == []
+
+
+def test_sweep_exempt_counts_in_audit_and_never_double_counts_as_skipped(sweep, repo, caplog):
+    """审计口径：``skipped`` 只数**不可采信**，``exempt`` 单独数 —— 两者不许重叠。"""
+    repo.closed_groups = ["gA"]
+    repo.samples_by_group = {"gA": (
+        [_s("silence", False, judge_overall=0.80, effective_threshold=0.60)] * 5
+        + [_s("silence", False, judge_overall=0.62, effective_threshold=0.60)] * 20)}
+    repo.group_states = [{"group_id": "gA", "learned_threshold": 0.6, "last_change_at": None}]
+    with caplog.at_level(logging.INFO, logger=L.__name__):
+        sweep_run(FakeAdapter(cfg_on(learning={"enabled": True})), "acct", NOW)
+
+    assert len(repo.upserts) == 1, "20 条擦边负仍够 minSample ⇒ 照常抬阈（收敛力不动）"
+    detail = repo.upserts[0]["last_change_reason"]
+    assert "skipped=0" in detail and "exempt=5" in detail
+    assert "total=15" in detail, "豁免的 5 条不进统计（样本窗 20 = 5 豁免 + 15 可用）"
+    assert L.get_learned_threshold("acct", "gA") == 0.65
+
+
+def test_sweep_exempt_disabled_restores_old_self_lock(monkeypatch, sweep, repo, caplog):
+    """``silenceExemptMarginMin=0`` = 退回 v1.16.1 旧行为（17 条全负照常抬阈）。
+
+    这条是「开关真的关得掉」的证明 —— 否则默认值一改，想回退只能改代码。
+    """
+    margins = [0.005, 0.005, 0.055, 0.055] + [0.14] * 13
+    repo.closed_groups = ["gA"]
+    repo.samples_by_group = {"gA": [
+        _s("silence", False, judge_overall=0.6 + m, effective_threshold=0.6)
+        for m in margins]}
+    repo.group_states = [{"group_id": "gA", "learned_threshold": 0.6, "last_change_at": None}]
+    with caplog.at_level(logging.INFO, logger=L.__name__):
+        sweep_run(FakeAdapter(cfg_on(learning={
+            "enabled": True, "silenceExemptMarginMin": 0})), "acct", NOW)
+
+    assert len(repo.upserts) == 1, "旧口径：17 条全负 ⇒ 抬阈（对照实验）"
+    assert "exempt=0" in repo.upserts[0]["last_change_reason"]
+
+
 def test_sweep_skips_when_no_informative_sample(sweep, repo, monkeypatch, caplog):
     """本底太热闹（ambientP ≥ ambientMax）⇒ 弱信号/沉默全部不采信 ⇒ 不调阈。"""
-    monkeypatch.setattr(L, "load_ambient_by_group", lambda *a: {"gA": 0.9})
+    monkeypatch.setattr(L, "load_ambient_by_group_hour",
+                        lambda *a: {f"gA|{h}": 0.9 for h in range(24)})
     repo.closed_groups = ["gA"]
     repo.samples_by_group = {"gA": [_s("short-window", True)] * 20}
     repo.group_states = [{"group_id": "gA", "learned_threshold": 0.6}]
@@ -1059,6 +1241,58 @@ def test_sweep_skips_when_no_informative_sample(sweep, repo, monkeypatch, caplog
         sweep_run(FakeAdapter(cfg_on(learning={"enabled": True})), "acct", NOW)
     assert repo.upserts == []
     assert any("no informative sample" in r.message for r in caplog.records)
+
+
+def test_ambient_is_read_per_sample_not_once_per_run(sweep, repo, monkeypatch):
+    """★ B9 正题：本底按**每条样本自己那一小时**查，不是"当前小时"一份套全群。
+
+    造两批样本落在**不同的本地小时**：冷清时段（本底 0.05 < ambientMax ⇒ 弱信号可采信）
+    18 条，热闹时段（本底 0.9 ≥ ambientMax ⇒ 弱信号不可采信）2 条。
+    正确口径 = 18 条可采信、``skipped=2``；旧口径两种情形都不对 —— 当前小时恰好是热闹
+    那个 ⇒ 20 条全废（本轮不调阈，阈值僵住）；是冷清那个 ⇒ 20 条全收（夜里那批噪声
+    当成有效信息混进来，正是 B9 要治的病）。
+    """
+    cold_at, busy_at = NOW - 3_600, NOW          # 差 3600s = 必然差一个本地小时
+    assert B.hf_local_hour(cold_at) != B.hf_local_hour(busy_at), "用例前提：两个不同时段"
+    monkeypatch.setattr(L, "load_ambient_by_group_hour", lambda *a: {
+        f"gA|{B.hf_local_hour(cold_at)}": 0.05,
+        f"gA|{B.hf_local_hour(busy_at)}": 0.9,
+    })
+    repo.closed_groups = ["gA"]
+
+    def _row(at):
+        return {"engaged": 0, "closed_at": at + 600, "engage_signal": "silence", "sent_at": at}
+
+    repo.samples_by_group = {"gA": [_row(cold_at) for _ in range(18)]
+                                    + [_row(busy_at) for _ in range(2)]}
+    repo.group_states = [{"group_id": "gA", "learned_threshold": 0.6, "last_change_at": None}]
+    sweep_run(FakeAdapter(cfg_on(learning={"enabled": True})), "acct", NOW)
+
+    assert len(repo.audits) == 1, "18 条够 minSample ⇒ 该调阈"
+    assert repo.audits[0][3] == 18, "只有冷清时段那 18 条可采信"
+    assert "skipped=2" in repo.audits[0][6], "热闹时段那 2 条要出现在归因里"
+
+
+def test_a_sample_without_a_usable_sent_at_is_never_usable(sweep, repo, monkeypatch):
+    """★ B9：``sent_at`` 缺/脏 ⇒ 不采信（强信号也救不了）。
+
+    查不到它属于哪个时段，就没法判断这条弱信号算不算信息；拿它当"本底 0"采信更危险 ——
+    夜里那批会**全部冒充有效信息**，正是 B9 要治的病。
+    """
+    monkeypatch.setattr(L, "load_ambient_by_group_hour", lambda *a: {})
+    repo.closed_groups = ["gA"]
+    good = [{"engaged": 0, "closed_at": NOW - 10, "engage_signal": "silence",
+             "sent_at": NOW - 10} for _ in range(10)]
+    dirty = [{"engaged": 1, "closed_at": NOW - 10, "engage_signal": "quote", "sent_at": v}
+             for v in (None, 0, -5, "1789070400", True)]
+    dirty.append({"engaged": 1, "closed_at": NOW - 10, "engage_signal": "quote"})  # 列缺席
+    repo.samples_by_group = {"gA": good + dirty}
+    repo.group_states = [{"group_id": "gA", "learned_threshold": 0.6, "last_change_at": None}]
+    sweep_run(FakeAdapter(cfg_on(learning={"enabled": True})), "acct", NOW)
+
+    assert len(repo.audits) == 1
+    assert repo.audits[0][3] == 10, "只有时刻可用的那 10 条算数"
+    assert "skipped=6" in repo.audits[0][6], "脏时刻的 6 条一条都不许混进可采信"
 
 
 def test_sweep_respects_cooldown(sweep, repo):
@@ -1311,6 +1545,7 @@ def test_defaults_are_pinned():
     assert (D_["sweepIntervalSec"], D_["staleJudgedMaxSec"]) == (300, 1800)
     assert D_["recoverUnreachable"] is True
     assert (D_["reachabilityWindowSec"], D_["reachabilityMinSample"]) == (7 * 86400, 20)
+    assert D_["silenceExemptMarginMin"] == 0.1, "v1.16.2 生产实排空档 0.10"
     assert L.HF_REACH_DB_ROW_CAP == 5000
     assert L.HF_REPLY_THRESHOLD_FALLBACK == 0.6
 
@@ -1323,6 +1558,7 @@ def test_resolve_reads_config_and_leaves_untouched_fields_at_default():
     assert (r["bandMin"], r["bandMax"]) == (0.55, 0.85)
     assert (r["step"], r["recoverUnreachable"], r["sweepIntervalSec"]) == (0.03, False, 120)
     assert r["ambientMax"] == 0.5, "未提到的字段回落缺省"
+    assert r["silenceExemptMarginMin"] == 0.1, "v1.16.2：未配置 ⇒ 缺省边距"
     assert L.resolve_reply_threshold({"replyThreshold": 0.7}) == 0.7
     assert L.resolve_reply_threshold(None) == 0.6
     assert L.resolve_reply_threshold({"replyThreshold": 1.5}) == 0.6, "越界回落（阈值 >1 恒假）"
@@ -1341,7 +1577,7 @@ def test_dirty_config_falls_back_not_nan(dirty):
         "sweepIntervalSec": dirty, "observeWindowSec": dirty, "labelWindowSec": dirty,
         "minChangeCooldownSec": dirty, "staleJudgedMaxSec": dirty,
         "reachabilityWindowSec": dirty, "reachabilityMinSample": dirty,
-        "sampleWindow": dirty}})
+        "sampleWindow": dirty, "silenceExemptMarginMin": dirty}})
     for k, v in r.items():
         if isinstance(v, bool):
             continue
@@ -1534,7 +1770,7 @@ def test_fake_row_shape_matches_real_queries():
     """假数据层的行形状必须与真 ``SELECT`` 逐列一致（否则**所有**用例一起失真却全绿）。"""
     checks = [
         ("list_recent_judged_scores", {"group_id", "judge_overall"}),
-        ("get_closed_recent", {"engaged", "closed_at", "engage_signal"}),
+        ("get_closed_recent", {"engaged", "closed_at", "engage_signal", "sent_at"}),
         ("list_group_states", {"account_id", "group_id", "learned_threshold", "last_change_at"}),
         ("list_sent_counts_recent", {"group_id", "hour_count", "day_count", "last_sent_at"}),
     ]
@@ -1614,12 +1850,19 @@ def test_signal_histogram_order_and_unknown_bucket():
     assert L.signal_histogram(rows) == "quote:2,unknown:1,veto:1"
 
 
-def test_load_ambient_by_group_keeps_only_current_hour(monkeypatch):
-    """只保留**当前小时段**的本底（其余时段与本轮判定无关）。"""
-    counts = {f"gA|{B.hf_local_hour(NOW)}": 0, "gA|0": 5, "gB": 3, "gC|abc": 9}
+def test_load_ambient_by_group_hour_keeps_every_hour(monkeypatch):
+    """★ B9：**全时段**都留着，键是 ``群|小时``（不筛当前小时）。
+
+    旧写法在这里只留当前小时、把键缩成群名 —— 于是调用方只能拿一份"现在"的本底去过滤
+    横跨 7 天的全部样本，夜里那批（那时段群本来就冷清）被整片判成"不可采信"。
+    """
+    counts = {f"gA|{B.hf_local_hour(NOW)}": 0, "gA|3": 5, "gB": 3, "gC|abc": 9}
     monkeypatch.setattr(LAY, "load_hf_group_hour_counts", lambda *a: counts)
-    assert L.load_ambient_by_group("acct", NOW, 60) == {"gA": 0.0}, \
-        "只留当前小时；脏键（无 | 或非数）跳过"
+    out = L.load_ambient_by_group_hour("acct", NOW, 60)
+    assert set(out) == {f"gA|{B.hf_local_hour(NOW)}", "gA|3"}, \
+        "每个「群|小时」各留一份；脏键（无 | 或小时非数）跳过"
+    assert out[f"gA|{B.hf_local_hour(NOW)}"] == 0.0
+    assert out["gA|3"] > 0.0, "别的时段的本底必须还在（调用方要按样本自己的小时去查）"
 
 
 def test_load_ambient_failure_degrades_to_empty(monkeypatch, caplog):
@@ -1628,5 +1871,5 @@ def test_load_ambient_failure_degrades_to_empty(monkeypatch, caplog):
         raise RuntimeError("boom")
     monkeypatch.setattr(LAY, "load_hf_group_hour_counts", boom)
     with caplog.at_level(logging.WARNING, logger=L.__name__):
-        assert L.load_ambient_by_group("acct", NOW, 60) == {}
+        assert L.load_ambient_by_group_hour("acct", NOW, 60) == {}
     assert any("ambient baseline" in r.message for r in caplog.records)

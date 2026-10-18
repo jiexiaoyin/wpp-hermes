@@ -65,8 +65,10 @@ def is_connected(config: Any) -> bool:
     # ② WECHATPRO_ACCOUNTS_JSON 显式注入
     if credentials.any_configured(credentials.env_accounts()):
         return True
-    # ③ 单条 env 凭据
-    if str(os.environ.get(_AUTHCODE_ENV) or "").strip():
+    # ③ 单条 env 凭据（scoped 口径，见 core.env_compat）
+    from ..core.env_compat import secret_env
+
+    if secret_env(_AUTHCODE_ENV).strip():
         return True
     # ④ 插件自管 accounts/*.json —— ★ 旧实现漏掉的就是这一路
     return credentials.any_local_account_configured()
@@ -87,17 +89,31 @@ def env_enablement_fn() -> Optional[dict]:
     也 seed 进去，``is_connected`` 会因「accounts 非空」判真，平台被启用后
     又连不上厂商，陷入无凭据的重试。
     """
-    accounts = credentials.env_accounts() or credentials.load_local_accounts()
-    if not credentials.any_configured(accounts):
-        return None
+    from ..core.env_compat import gate_env, secret_env
+
+    accounts = credentials.configured_accounts(
+        credentials.env_accounts() or credentials.load_local_accounts())
+
+    # ⑤ 只有一条 ``WECHATPRO_AUTHCODE``（没有账号文件）⇒ **合成 default 账号**。
+    #    以前这里直接 return None：``is_connected`` 却因单条 env 判真 ⇒ 探针不 seed、
+    #    平台不启用，而配置检查说"已配置" —— 两处口径相反。
+    if not accounts:
+        authcode = secret_env(_AUTHCODE_ENV).strip()
+        if not authcode:
+            return None
+        accounts = {"default": {
+            "agent": gate_env("WECHATPRO_AGENT") or "wpp-wechat",
+            "authcodeEnv": _AUTHCODE_ENV,
+            "enabled": True,
+        }}
 
     seed: dict[str, Any] = {"accounts": accounts}
 
-    home = str(os.environ.get(_HOME_ENV) or "").strip()
+    home = gate_env(_HOME_ENV)
     if home:
         # 特殊 key：核心会把它 lift 成 HomeChannel（不做 setdefault）
         seed["home_channel"] = {
             "chat_id": home,
-            "name": str(os.environ.get(f"{_HOME_ENV}_NAME") or "Home"),
+            "name": gate_env(f"{_HOME_ENV}_NAME") or "Home",
         }
     return seed

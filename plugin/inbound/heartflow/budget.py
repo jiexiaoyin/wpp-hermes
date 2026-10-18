@@ -213,15 +213,56 @@ def _pairs(raw: Any) -> tuple[tuple[int, int], ...]:
     return tuple(out)
 
 
+#: 脏值告警去重（键 = ``(字段, 值的 repr)``）。
+#: ``resolve_budget`` 在**每条触发消息**上被调用，不节流就是日志洪水 —— 而洪水里的
+#: 真信号等于没有信号（09-11 那次留痕缺失的教训）。
+_dirty_warned: set[tuple[str, str]] = set()
+
+
+def _cfg_num(field: str, raw: Any, fallback: int) -> int:
+    """配置里的数值参数：**有限数原样取整**，其余回落 ``fallback`` 并告警一次（B1）。
+
+    ⚠️ **为什么不直接用 :func:`_pos`**：``_pos`` 把 ``0``/负数也当脏值回落默认档，
+    而这三个参数的 ``0`` 在 TS 里是**有意义的** —— ``check_budget`` 的守卫是
+    ``cfg.min_gap_sec > 0`` / ``max_per_hour > 0`` / ``max_per_day > 0`` ⇒
+    ``0`` = **该闸不生效**。老板在配置里写 ``0``（"不限"），顺手用 ``_pos`` 兜底会把它
+    悄悄改成默认 8 ⇒ **背着配置收紧**。这里只兜"说不清是什么"的那一类。
+
+    ⚠️ **修前**这里是裸 ``int(b.get("minGapSec"))``：字符串/``None``/``NaN``/``inf``
+    会抛 ``ValueError``/``OverflowError`` —— 而调用点在热路径（每条触发消息一次）
+    ⇒ 现象是心流**整条静默**，日志里只有一行 ValueError（比"值算错了"贵得多）。
+    TS 那边不会炸纯粹是因为 JS 的比较不抛异常（``"abc" > 0`` 是 ``false``）。
+    """
+    if raw is None:
+        return fallback                      # 没配这个键 = 用默认，**不是**脏值（不告警）
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        got = None
+    elif not math.isfinite(raw):
+        got = None
+    else:
+        got = int(math.floor(raw))
+    if got is None:
+        key = (field, repr(raw))
+        if key not in _dirty_warned:
+            _dirty_warned.add(key)
+            log.warning("[WPP] 心流预算参数 %s 是脏值 %r ⇒ 回落默认 %s"
+                        "（配置写错了，别以为它在生效）", field, raw, fallback)
+        return fallback
+    return got
+
+
 def resolve_budget(cfg: Mapping[str, Any] | None) -> BudgetConfig:
-    """合并参数（缺省走 :data:`HF_BUDGET_DEFAULTS`；不依赖 accounts 的合并语义）。"""
+    """合并参数（缺省走 :data:`HF_BUDGET_DEFAULTS`；不依赖 accounts 的合并语义）。
+
+    数值三项走 :func:`_cfg_num`（脏值兜底 + 告警），不用裸 ``int()`` —— 见那里的说明。
+    """
     b = (cfg or {}).get("budget") or {}
     D = HF_BUDGET_DEFAULTS
     return BudgetConfig(
         enabled=bool(b.get("enabled", D["enabled"])),
-        min_gap_sec=int(b.get("minGapSec", D["minGapSec"])),
-        max_per_hour=int(b.get("maxPerHour", D["maxPerHour"])),
-        max_per_day=int(b.get("maxPerDay", D["maxPerDay"])),
+        min_gap_sec=_cfg_num("minGapSec", b.get("minGapSec"), D["minGapSec"]),
+        max_per_hour=_cfg_num("maxPerHour", b.get("maxPerHour"), D["maxPerHour"]),
+        max_per_day=_cfg_num("maxPerDay", b.get("maxPerDay"), D["maxPerDay"]),
         no_consecutive_without_human=bool(
             b.get("noConsecutiveWithoutHuman", D["noConsecutiveWithoutHuman"])),
         quiet_hours=_pairs(b.get("quietHours", D["quietHours"])),
@@ -449,10 +490,11 @@ def hf_budget_blocked_snapshot() -> dict[str, int]:
 
 
 def reset_budget_cache() -> None:
-    """测试 / 热重载：清空预算状态与拦截计数。"""
+    """测试 / 热重载：清空预算状态、拦截计数与脏值告警去重表。"""
     with _lock:
         _budget.clear()
         _blocked.clear()
+        _dirty_warned.clear()
 
 
 def hf_budget_tracked_groups() -> int:

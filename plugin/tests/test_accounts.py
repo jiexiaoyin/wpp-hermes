@@ -78,7 +78,9 @@ def test_defaults_are_the_documented_ones(_isolated_accounts_dir, monkeypatch):
 
     acct = A.resolve("default")
     assert acct.group_policy == "open"
-    assert acct.debounce_ms == 1500
+    # W7-6：500 不是随手改的 —— 它是 TS ``core/constants.ts:62`` 的现值
+    # （2026-08-22 由 1500 降下来的那个），而这个键从 W7-6 起**真的进了收信链路**。
+    assert acct.debounce_ms == 500
     assert acct.api_base_url == "https://wx.juhe.chat"
     assert acct.ws_url == "wss://wx.juhe.chat/ws/sync"
     assert acct.webhook_host == "127.0.0.1"
@@ -89,10 +91,12 @@ def test_defaults_are_the_documented_ones(_isolated_accounts_dir, monkeypatch):
     assert acct.enabled is True and acct.auto_set_webhook is True
     assert acct.set_webhook_retries == 3
     assert acct.allow_from == () and acct.group_allow_from == ()
-    # 特色功能默认**关**（不在默认路径上替用户做决定）
+    # 特色功能默认**关**（不在默认路径上替用户做决定）。
+    # ⚠️ mcp_enabled 是唯一例外：TS ``mcpEnabledForCurrentAccount`` 是 ``!== false``
+    #    （缺省开），2026-10-18 接上 vendor MCP 后按 TS 对齐。
     assert (acct.llm_intent_enabled, acct.mcp_enabled, acct.group_context_enabled,
             acct.dm_pairing_enabled, acct.friend_circle_publish_enabled) == \
-        (False, False, False, False, False)
+        (False, True, False, False, False)
     assert acct.heartflow == {} and acct.jargon == {}
 
 
@@ -283,6 +287,184 @@ def test_the_production_wxid_is_a_literal_in_the_source():
     assert A.PRODUCTION_WXID != "" and not A.PRODUCTION_WXID.startswith("wxid_test")
 
 
+# --------------------------------------------------------- C4：凭据那道判据
+
+def _prod_by_credential(monkeypatch, code: str = "fake-prod-code") -> str:
+    """把"生产凭据指纹"指到一个**编造的**码上。
+
+    真 authcode 不进仓、不进测试（钦定铁律：三条在用生产密钥永不可动），
+    所以这里验的是**机制**：指纹命中 ⇒ 拒。真实那把指纹是不是写对了，
+    由 ``test_the_production_credential_fingerprint_is_a_literal_in_the_source``
+    与 .183 上的真机自查各自守一半。
+    """
+    monkeypatch.setattr(A, "PRODUCTION_CREDENTIAL_FINGERPRINTS",
+                        frozenset({A.fingerprint(code)}))
+    return code
+
+
+def test_a_production_authcode_is_refused_even_when_selfwxid_looks_innocent(
+        _isolated_accounts_dir, monkeypatch):
+    """★ C4：``selfWxid`` 只是配置里的一句话 —— 会不会把生产踢下线由 **authcode** 决定。
+
+    审阅原话：守卫只看 ``selfWxid`` ⇒ 配置里不写 / 写成别的 wxid / 被
+    ``WECHATPRO_ACCOUNTS_JSON`` 注入覆盖，都能拿**生产那把客户端密钥**去连调试实例。
+    厂商按客户端密钥上实例锁（``sha256(key)[:12]``），锁一撞，下线的是生产。
+    """
+    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+    monkeypatch.delenv("WECHATPRO_AUTHCODE", raising=False)
+    code = _prod_by_credential(monkeypatch)
+
+    acct = A.resolve("default", {"agent": "wpp-a", "authcode": code,
+                                 "selfWxid": "wxid_innocent"})
+
+    assert acct.is_production_identity is True, "凭据命中就是生产身份"
+    reason = A.refusal_reason(acct)
+    assert reason, "凭据是生产那把锁 ⇒ 不能连"
+    assert "红线 2" in reason
+    assert acct.credential_fingerprint in reason, "拒因要写**指纹**（不是 authcode 本身）"
+    assert code not in reason, "拒因里永不出现明文凭据"
+    assert A.PRODUCTION_WXID not in reason, "selfWxid 不是这条路的原因，别写串"
+
+    with pytest.raises(A.AccountError):
+        A.assert_no_red_line([acct])
+
+
+def test_an_empty_authcode_never_matches_a_production_fingerprint(_isolated_accounts_dir, monkeypatch):
+    """空 authcode 的指纹是 ``-`` —— 空壳账号不许被误判成生产身份。
+
+    （判据里那句 ``ft != "-"`` 就是为它写的：空串的 sha256 是个**具体值**，
+    万一哪天有人把指纹集合写成算出来的空串指纹，全树空壳账号会集体变红线。）
+    """
+    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+    monkeypatch.delenv("WECHATPRO_AUTHCODE", raising=False)
+    acct = A.resolve("default", {"agent": "wpp-a"})
+    assert acct.credential_fingerprint == "-"
+    assert acct.is_production_identity is False
+    assert A.fingerprint("") == "-" and "-" not in A.PRODUCTION_CREDENTIAL_FINGERPRINTS
+
+
+def test_the_escape_hatch_lifts_the_credential_guard_too(_isolated_accounts_dir, monkeypatch):
+    """逃生阀对**两道**判据都有效 —— 否则凭据那条会变成无法解除的死锁。"""
+    code = _prod_by_credential(monkeypatch)
+    cfg = {"agent": "wpp-a", "authcode": code, "selfWxid": "wxid_innocent"}
+
+    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+    assert A.refusal_reason(A.resolve("default", cfg)) is not None
+
+    monkeypatch.setenv(A.ALLOW_PRODUCTION_ENV, "1")
+    acct = A.resolve("default", cfg)
+    assert A.refusal_reason(acct) is None
+    assert A.red_line_reason(acct) is None
+    A.assert_no_red_line([acct])                    # 不抛
+
+
+def test_a_red_line_account_is_a_raise_not_a_skip(_isolated_accounts_dir, monkeypatch):
+    """★ ``refusal_reason`` 把"没配好"和"红线"混成同一个出口 ⇒ 后者只被 warn 掉了。
+
+    ``red_line_reason`` 是那条分开的判据：它**只**认红线，
+    ``connect()`` 靠它决定"当场炸"而不是"跳过"（C4 的核心）。
+    """
+    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+    monkeypatch.delenv("WECHATPRO_AUTHCODE", raising=False)
+
+    off = A.resolve("default", {"agent": "wpp-a", "authcode": "c", "enabled": False})
+    nocred = A.resolve("default", {"agent": "wpp-a"})
+    prod = A.resolve("default", {"agent": "wpp-a", "authcode": "c",
+                                 "selfWxid": A.PRODUCTION_WXID})
+
+    for a in (off, nocred):
+        assert A.refusal_reason(a) is not None, "它们确实不能连"
+        assert A.red_line_reason(a) is None, "但它们是「没配好」，不是红线"
+
+    assert A.refusal_reason(prod) is not None
+    assert A.red_line_reason(prod) is not None, "红线两个判据都认"
+
+
+def test_an_account_that_cannot_connect_is_not_a_red_line(_isolated_accounts_dir, monkeypatch):
+    """★ ``enabled=false`` / 无凭据的生产身份**不算**红线（否则 dev 机起不来）。
+
+    ``/root/.hermes`` 上那份 ``default.json`` 就把 ``selfWxid`` 写成生产号、
+    同时 ``enabled=false`` + 另一把 authcode —— **摆着不连**是合法形态。
+    判据写成"看身份就 raise"的话，那台机器上插件直接起不来（红线的正确后果
+    只有一个：**别连**，而不是**别启动**）。
+    """
+    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+    monkeypatch.delenv("WECHATPRO_AUTHCODE", raising=False)
+
+    off = A.resolve("default", {"agent": "wpp-a", "authcode": "c", "enabled": False,
+                                "selfWxid": A.PRODUCTION_WXID})
+    A.assert_no_red_line([off])                      # 不抛
+    assert A.red_line_reason(off) is None, "它没在连，谈不上触红线"
+    assert "enabled=false" in A.refusal_reason(off), "但仍然不可连 —— 理由是「没启用」"
+
+    nocred = A.resolve("default", {"agent": "wpp-a", "selfWxid": A.PRODUCTION_WXID})
+    A.assert_no_red_line([nocred])                   # 不抛
+    assert A.red_line_reason(nocred) is None
+
+    on = A.resolve("default", {"agent": "wpp-a", "authcode": "c",
+                               "selfWxid": A.PRODUCTION_WXID})
+    with pytest.raises(A.AccountError) as ei:
+        A.assert_no_red_line([off, nocred, on])
+    assert A.PRODUCTION_WXID in str(ei.value)
+
+
+def test_the_production_credential_fingerprint_is_a_literal_in_the_source():
+    """与 wxid 那道同款：指纹必须是**源码字面量**，且是 ``sha256[:12]`` 的口径。
+
+    这张表是**单向**的（只有指纹，没有 authcode），所以它进仓是安全的；
+    但也正因为它进仓，**轮换 authcode 后必须同步改这里** ——
+    改漏的症状是这道门退化成"只认 wxid"（fail-open，且一句日志都没有）。
+    """
+    import ast
+    import re
+    from pathlib import Path
+
+    assert A.PRODUCTION_CREDENTIAL_FINGERPRINTS, "空集合 = 这道门不存在（fail-open 的另一种写法）"
+    src = Path(A.__file__).read_text(encoding="utf-8")
+    lits = {n.value for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    for fp in A.PRODUCTION_CREDENTIAL_FINGERPRINTS:
+        assert re.fullmatch(r"[0-9a-f]{12}", fp), f"指纹口径必须是 sha256[:12]：{fp!r}"
+        assert fp in lits, "判据必须硬编码在 core/accounts.py，不能从 env 读"
+
+
+def test_the_adapter_refuses_to_start_on_a_red_line_account():
+    """★ 接线（``adapter.connect``）—— 判据再对，不挂上去也是空的。
+
+    ``plugin/platform/adapter.py`` 模块级 ``from gateway.config import Platform``
+    （Hermes 独有）⇒ 本机 import 不了，只能按 **AST 源码形状**验；
+    变异套件 ``adapter-account-guard`` 保证"拆掉就红"。
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    tree = ast.parse((root / "plugin" / "platform" / "adapter.py").read_text(encoding="utf-8"))
+    fn = None
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "WppAdapter":
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                        and sub.name == "connect":
+                    fn = sub
+    assert fn is not None, "找不到 WppAdapter.connect —— 改名/搬家了？"
+
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr == "assert_no_red_line"]
+    assert len(calls) == 1, "connect() 必须（且只需）调一次 assert_no_red_line"
+    assert ast.unparse(calls[0]).startswith("accounts_mod.assert_no_red_line("), \
+        "必须是 accounts 模块上那个函数，不是同名的别的东西"
+    assert ast.unparse(calls[0].args[0]) == "self._accounts.values()", \
+        "要判的是**这次加载出来的全部账号** —— 传空集/传别的集合都等于这道门不存在"
+
+    # 排在"可连接账号"那步**之前** —— 反了就等于先把它当"没配好"跳过去，
+    # 红线又退回 warn 一句（这正是被修掉的那个 bug）。
+    filt = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "connectable" for t in n.targets)]
+    assert filt, "找不到 connectable 那步 —— 过滤被挪走了？"
+    assert calls[0].lineno < min(n.lineno for n in filt), "红线必须先炸，再谈过滤"
+
+
 def test_connectable_filters_and_reports(_isolated_accounts_dir, caplog):
     _write(_isolated_accounts_dir, "good", _cfg(id="good", agent="wpp-a", authcode="c"))
     _write(_isolated_accounts_dir, "nocred", _cfg(id="nocred", agent="wpp-a"))
@@ -402,3 +584,24 @@ def test_the_example_shell_alone_does_not_count_as_configured(_isolated_accounts
     """只有随仓库分发的空壳时，「已配置」必须是假 —— 否则平台空转重试。"""
     _write(_isolated_accounts_dir, "default", {"id": "default", "authcode": ""})
     assert CR.any_local_account_configured() is False
+
+
+def test_an_inert_key_is_flagged_once_per_account(_isolated_accounts_dir, caplog):
+    """A8：配了 ``requireAtMention`` 必须留一行 WARN —— **不生效可以，静默不行**。
+
+    "只在被 @ 时回复"是配置者写下来的意图；本树（与 TS 一致地）不执行它。
+    没有这行日志的话，配置者只能通过"它怎么在群里乱插话"来发现。
+    每人每进程**一条**：去重表是模块级状态，所以本文件自己清（同 ``overrides``）。
+    """
+    A.reset_inert_warnings()
+    _write(_isolated_accounts_dir, "default", _cfg(authcode="c", requireAtMention=True))
+    with caplog.at_level("WARNING"):
+        A.load_all()
+        A.load_all()                      # 再加载一次不该再刷一条
+
+    hits = [r.getMessage() for r in caplog.records if "requireAtMention" in r.getMessage()]
+    assert len(hits) == 1, f"要留痕、且只留一条，实际 {len(hits)} 条"
+    assert "不生效" in hits[0]
+    assert A.resolve("default").require_at_mention is True, \
+        "解析仍照实透传（cfg 形状与 TS 对齐），只是没人读它"
+    A.reset_inert_warnings()

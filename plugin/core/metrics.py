@@ -24,7 +24,9 @@ WS 收 / webhook 收 / 300s sweep **可能在不同线程**（见计划第 6 步
 
 from __future__ import annotations
 
+import json
 import threading
+import time
 
 #: 指标名前缀（对齐 TS 的 ``ns = "wpp"``，导出的名字形如 ``wpp_judge_calls_total``）
 NS = "wpp"
@@ -130,6 +132,22 @@ def render_prometheus() -> str:
         return "".join(ln + "\n" for ln in lines)
 
 
+def render_json() -> str:
+    """JSON 快照（对齐 TS ``renderJson``）—— ``curl /metrics | jq`` 直接消费。
+
+    为什么对外默认给 JSON 而不是 Prometheus 文本：本插件没有 Prometheus 抓取端，
+    排障时人/脚本看的是 JSON；Prometheus 文本保留给将来真接抓取器的场景。
+    两个格式并存（与 TS v1.9.2 同款）。
+    """
+    with _lock:
+        body = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+            "counters": dict(_counters),
+            "gauges": dict(_gauges),
+        }
+    return json.dumps(body, ensure_ascii=False, indent=2)
+
+
 # ------------------------------------------------------- 具名指标（有调用方的）
 
 
@@ -139,12 +157,54 @@ def inc_judge_call() -> None:
 
 
 def inc_judge_failure() -> None:
-    """``call_judge`` 抛错（无 apiKey / HTTP 非 2xx / 空正文 / 超时）。"""
+    """``call_judge`` **最终**失败（兜底救回来的那次不算）。"""
     inc_counter(COUNTER_JUDGE_FAILURES)
 
 
+def inc_judge_fallback() -> None:
+    """主端点失败、兜底被启用。"""
+    inc_counter(COUNTER_JUDGE_FALLBACK)
+
+
+def inc_judge_fallback_ok() -> None:
+    """兜底端点救回来了（直接回答"兜底到底有没有用"）。"""
+    inc_counter(COUNTER_JUDGE_FALLBACK_OK)
+
+
+def inc_intent_call() -> None:
+    inc_counter(COUNTER_INTENT_CALLS)
+
+
+def inc_intent_failure() -> None:
+    inc_counter(COUNTER_INTENT_FAILURES)
+
+
+def inc_intent_fallback() -> None:
+    inc_counter(COUNTER_INTENT_FALLBACK)
+
+
+def inc_intent_fallback_ok() -> None:
+    inc_counter(COUNTER_INTENT_FALLBACK_OK)
+
+
 COUNTER_JUDGE_CALLS = "judge_calls_total"
+#: **最终**失败次数（v1.13.0 起）：主端点挂了但兜底救回来的那次不计失败。
 COUNTER_JUDGE_FAILURES = "judge_failures_total"
+#: 兜底被启用次数 / 兜底救回来次数（v1.13.0）。
+COUNTER_JUDGE_FALLBACK = "judge_fallback_total"
+COUNTER_JUDGE_FALLBACK_OK = "judge_fallback_ok_total"
+
+#: llmIntent 独立一套（v1.14.2）：它不走 ``call_judge``，复用等于"意图链断了但 judge
+#: 计数照涨"。
+COUNTER_INTENT_CALLS = "intent_calls_total"
+COUNTER_INTENT_FAILURES = "intent_failures_total"
+COUNTER_INTENT_FALLBACK = "intent_fallback_total"
+COUNTER_INTENT_FALLBACK_OK = "intent_fallback_ok_total"
+
+#: migration 未完成（连不上 / schema 只建了一半 / 漂移体检自己坏了）—— D7（2026-10-02）。
+#: 为什么值得一个计数器：这类失败**只在启动那一行 warn 里出现过一次**，此后进程照跑、
+#: ``SELECT 1`` 照通，于是运维面上与"一切正常"完全一样。
+COUNTER_DB_MIGRATION_FAILURES = "db_migration_failures_total"
 
 
 # --------------------------------------------------- 心流（learn / heartflow 埋点）
@@ -165,6 +225,10 @@ GAUGE_HF_EFFECTIVE_THRESHOLD_MAX = "hf_effective_threshold_max"
 GAUGE_HF_THRESHOLD_CEILING_GROUPS = "hf_threshold_ceiling_groups"
 #: 本轮有判定样本、且阈值可达（最高分够得着）的群数
 GAUGE_HF_REACHABLE_GROUPS = "hf_reachable_groups"
+
+#: DB 体检结论：1 = ``migrate()`` 跑通（含"只报不改"的漂移），0 = 未就绪 / 未跑 / 失败。
+#: **不是**"连得上吗"（``is_available()`` 只问 ``SELECT 1``）—— 半建成的 schema 也连得上。
+GAUGE_DB_READY = "db_ready"
 
 
 def inc_hf_sent() -> None:
@@ -199,16 +263,208 @@ def set_hf_reachable_groups(n: float) -> None:
     set_gauge(GAUGE_HF_REACHABLE_GROUPS, n)
 
 
+def inc_db_migration_failure() -> None:
+    inc_counter(COUNTER_DB_MIGRATION_FAILURES)
+
+
+# ------------------------------------------------ webhook / vendor 注册（v1.9.2 对齐）
+
+#: webhook 收到的 POST 总数（**在校验之前**计 —— 与 TS ``incReceived`` 同位置）。
+COUNTER_MESSAGES_RECEIVED = "messages_received_total"
+#: 路径不认识（404）。
+COUNTER_MESSAGES_REJECTED_PATH = "messages_rejected_path_total"
+#: 路径/secret 鉴权失败（403）。
+COUNTER_MESSAGES_REJECTED_SECRET = "messages_rejected_secret_total"
+#: 请求体超限 / Content-Length 非法 / chunked 读失败（400/413）。
+COUNTER_MESSAGES_REJECTED_BODY_SIZE = "messages_rejected_body_size_total"
+#: 已成功调度进主事件循环。
+COUNTER_MESSAGES_PROCESSED = "messages_processed_total"
+#: 调度失败（主循环不可用 / run_coroutine_threadsafe 抛错）。
+COUNTER_MESSAGES_DISPATCH_FAILED = "messages_dispatch_failed_total"
+#: 厂商 webhook 注册（启动重试 + 周期刷新）。
+COUNTER_SETWEBHOOK_OK = "setwebhook_ok_total"
+COUNTER_SETWEBHOOK_FAIL = "setwebhook_fail_total"
+COUNTER_SETWEBHOOK_PERIODIC_OK = "setwebhook_periodic_ok_total"
+COUNTER_SETWEBHOOK_PERIODIC_FAIL = "setwebhook_periodic_fail_total"
+#: 出站落库（工具/媒体/统一 send_message 路径）。
+COUNTER_OUTBOUND_PERSIST_OK = "outbound_persist_ok_total"
+COUNTER_OUTBOUND_PERSIST_FAIL = "outbound_persist_fail_total"
+
+# ---------------------------------------------------------- 入站链路（TS 对齐）
+#: 进入 ``_handle_one`` 的入站条数（WS 帧 + webhook 通知，与 TS ``messages_in_total`` 同义）。
+COUNTER_MESSAGES_IN = "messages_in_total"
+#: 去重命中（``_handle_one`` 的 pipeline 去重闸）。
+COUNTER_MESSAGES_REJECTED_DEDUPE = "messages_rejected_dedupe_total"
+#: 触发判定判丢（``should_drop``）。
+COUNTER_MESSAGES_REJECTED_POLICY = "messages_rejected_policy_total"
+#: 入站落库成功（``persist_inbound`` 返回 True）。
+COUNTER_MESSAGES_SAVED_DB = "messages_saved_db_total"
+#: 媒体富化上传失败（``_publish_media`` 拿到空 URL）。
+COUNTER_ENRICH_SAVE_FAILED = "enrich_save_failed_total"
+#: 单条消息处理抛异常（``_dispatch_one`` 的 except）。
+COUNTER_HANDLER_ONERROR = "handler_onerror_total"
+#: 交给 agent runner 的条数（``handle_message`` 之前计）。
+COUNTER_DISPATCH_DISPATCHED = "dispatch_dispatch_total"
+#: webhook 请求超时（读取慢连接）与 JSON 解析失败。
+COUNTER_MESSAGES_REJECTED_TIMEOUT = "messages_rejected_timeout_total"
+COUNTER_MESSAGES_REJECTED_PARSE = "messages_rejected_parse_total"
+#: autoSetWebhook 被跳过的三类原因（TS ``index.ts:791-794``）。
+COUNTER_SETWEBHOOK_SKIPPED_NO_PUBLIC_URL = "setwebhook_skipped_no_public_url_total"
+COUNTER_SETWEBHOOK_SKIPPED_NO_AUTHCODE = "setwebhook_skipped_no_authcode_total"
+COUNTER_SETWEBHOOK_SKIPPED_DISABLED = "setwebhook_skipped_disabled_total"
+
+# ------------------------------------------------------------------------ WS
+#: WS 连接断开次数（含 vendor idle / 网络抖动 / 主动 stop，与 TS 同口径）。
+COUNTER_WS_DISCONNECTS = "ws_disconnects_total"
+#: 安排一次重连（stop 之后的调用不计）。
+COUNTER_WS_RECONNECTS = "ws_reconnects_total"
+#: 当前连接态（1/0）—— counter 只回答"断过几次"，回答不了"此刻是不是断的"。
+GAUGE_WS_CONNECTED = "ws_connected"
+
+
+def inc_webhook_received() -> None:
+    inc_counter(COUNTER_MESSAGES_RECEIVED)
+
+
+def inc_webhook_rejected_path() -> None:
+    inc_counter(COUNTER_MESSAGES_REJECTED_PATH)
+
+
+def inc_webhook_rejected_secret() -> None:
+    inc_counter(COUNTER_MESSAGES_REJECTED_SECRET)
+
+
+def inc_webhook_rejected_body_size() -> None:
+    inc_counter(COUNTER_MESSAGES_REJECTED_BODY_SIZE)
+
+
+def inc_webhook_processed() -> None:
+    inc_counter(COUNTER_MESSAGES_PROCESSED)
+
+
+def inc_webhook_dispatch_failed() -> None:
+    inc_counter(COUNTER_MESSAGES_DISPATCH_FAILED)
+
+
+def inc_setwebhook_ok(periodic: bool = False) -> None:
+    inc_counter(COUNTER_SETWEBHOOK_PERIODIC_OK if periodic else COUNTER_SETWEBHOOK_OK)
+
+
+def inc_setwebhook_fail(periodic: bool = False) -> None:
+    inc_counter(COUNTER_SETWEBHOOK_PERIODIC_FAIL if periodic else COUNTER_SETWEBHOOK_FAIL)
+
+
+def inc_outbound_persist(ok: bool) -> None:
+    inc_counter(COUNTER_OUTBOUND_PERSIST_OK if ok else COUNTER_OUTBOUND_PERSIST_FAIL)
+
+
+def inc_messages_in() -> None:
+    inc_counter(COUNTER_MESSAGES_IN)
+
+
+def inc_messages_rejected_dedupe() -> None:
+    inc_counter(COUNTER_MESSAGES_REJECTED_DEDUPE)
+
+
+def inc_messages_rejected_policy() -> None:
+    inc_counter(COUNTER_MESSAGES_REJECTED_POLICY)
+
+
+def inc_messages_saved_db() -> None:
+    inc_counter(COUNTER_MESSAGES_SAVED_DB)
+
+
+def inc_enrich_save_failed() -> None:
+    inc_counter(COUNTER_ENRICH_SAVE_FAILED)
+
+
+def inc_handler_onerror() -> None:
+    inc_counter(COUNTER_HANDLER_ONERROR)
+
+
+def inc_dispatch_dispatched() -> None:
+    inc_counter(COUNTER_DISPATCH_DISPATCHED)
+
+
+def inc_webhook_timeout() -> None:
+    inc_counter(COUNTER_MESSAGES_REJECTED_TIMEOUT)
+
+
+def inc_webhook_parse_failed() -> None:
+    inc_counter(COUNTER_MESSAGES_REJECTED_PARSE)
+
+
+def inc_setwebhook_skipped(reason: str) -> None:
+    """``reason`` ∈ ``no_public_url`` / ``no_authcode`` / ``disabled``。"""
+    key = {
+        "no_public_url": COUNTER_SETWEBHOOK_SKIPPED_NO_PUBLIC_URL,
+        "no_authcode": COUNTER_SETWEBHOOK_SKIPPED_NO_AUTHCODE,
+        "disabled": COUNTER_SETWEBHOOK_SKIPPED_DISABLED,
+    }.get(reason)
+    if key:
+        inc_counter(key)
+
+
+def inc_ws_disconnect() -> None:
+    inc_counter(COUNTER_WS_DISCONNECTS)
+
+
+def inc_ws_reconnect() -> None:
+    inc_counter(COUNTER_WS_RECONNECTS)
+
+
+def set_ws_connected(connected: bool) -> None:
+    set_gauge(GAUGE_WS_CONNECTED, 1.0 if connected else 0.0)
+
+
+def set_db_gauge(ready: float) -> None:
+    """DB 体检结论（1 / 0）—— 名字与 ``db.health()`` 的 ``ok`` 同源，见 ``GAUGE_DB_READY``。"""
+    set_gauge(GAUGE_DB_READY, ready)
+
+
 #: 进程启动即存在的 0 值指标 —— 见模块 docstring。
 #: 心流那批在第 6 步（``learn`` / ``heartflow``）落位时登记；**登记 ≠ 已有埋点**，
 #: 而是"这批指标从进程启动起就存在"，这样"值为 0"才排除了"埋点没接上"。
 PRE_DECLARED_COUNTERS: tuple[str, ...] = (
     COUNTER_JUDGE_CALLS,
     COUNTER_JUDGE_FAILURES,
+    COUNTER_JUDGE_FALLBACK,
+    COUNTER_JUDGE_FALLBACK_OK,
+    COUNTER_INTENT_CALLS,
+    COUNTER_INTENT_FAILURES,
+    COUNTER_INTENT_FALLBACK,
+    COUNTER_INTENT_FALLBACK_OK,
     COUNTER_HF_SENDS,
     COUNTER_HF_REACH_CAP_APPLIED,
     COUNTER_HF_JUDGE_PASSED,
     COUNTER_HF_JUDGE_BELOW,
+    COUNTER_DB_MIGRATION_FAILURES,
+    COUNTER_MESSAGES_RECEIVED,
+    COUNTER_MESSAGES_REJECTED_PATH,
+    COUNTER_MESSAGES_REJECTED_SECRET,
+    COUNTER_MESSAGES_REJECTED_BODY_SIZE,
+    COUNTER_MESSAGES_PROCESSED,
+    COUNTER_MESSAGES_DISPATCH_FAILED,
+    COUNTER_SETWEBHOOK_OK,
+    COUNTER_SETWEBHOOK_FAIL,
+    COUNTER_SETWEBHOOK_PERIODIC_OK,
+    COUNTER_SETWEBHOOK_PERIODIC_FAIL,
+    COUNTER_OUTBOUND_PERSIST_OK,
+    COUNTER_OUTBOUND_PERSIST_FAIL,
+    COUNTER_MESSAGES_IN,
+    COUNTER_MESSAGES_REJECTED_DEDUPE,
+    COUNTER_MESSAGES_REJECTED_POLICY,
+    COUNTER_MESSAGES_SAVED_DB,
+    COUNTER_ENRICH_SAVE_FAILED,
+    COUNTER_HANDLER_ONERROR,
+    COUNTER_DISPATCH_DISPATCHED,
+    COUNTER_MESSAGES_REJECTED_TIMEOUT,
+    COUNTER_MESSAGES_REJECTED_PARSE,
+    COUNTER_SETWEBHOOK_SKIPPED_NO_PUBLIC_URL,
+    COUNTER_SETWEBHOOK_SKIPPED_NO_AUTHCODE,
+    COUNTER_SETWEBHOOK_SKIPPED_DISABLED,
+    COUNTER_WS_DISCONNECTS,
+    COUNTER_WS_RECONNECTS,
 )
 
 #: 预声明为 0 的仪表盘（理由同上）。
@@ -217,6 +473,8 @@ PRE_DECLARED_GAUGES: tuple[str, ...] = (
     GAUGE_HF_EFFECTIVE_THRESHOLD_MAX,
     GAUGE_HF_THRESHOLD_CEILING_GROUPS,
     GAUGE_HF_REACHABLE_GROUPS,
+    GAUGE_DB_READY,
+    GAUGE_WS_CONNECTED,
 )
 
 

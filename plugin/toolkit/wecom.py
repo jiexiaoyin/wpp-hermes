@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -65,6 +66,11 @@ def _wecom_cli_or_warn() -> str | None:
     return path
 
 
+async def _call_async(domain: str, action: str, args: dict | None = None) -> str:
+    """``_wecom_call`` 的异步壳：把 30s 的同步子进程挪到工作线程。"""
+    return await asyncio.to_thread(_wecom_call, domain, action, args)
+
+
 def _wecom_call(domain: str, action: str, args: dict | None = None) -> str:
     """调用 wecom-cli, 返回 JSON 字符串."""
     args = args or {}
@@ -74,6 +80,9 @@ def _wecom_call(domain: str, action: str, args: dict | None = None) -> str:
             "ok": False,
             "error": "wecom-cli.js 未安装（需要 node + wecom-skill）",
         }, ensure_ascii=False)
+    # ⚠️ 同步子进程（最长 30s）。本文件的所有 handler 都以 ``is_async=True`` 注册，
+    #   直接跑会把**整个事件循环**（WS 心跳、其它工具、定时器）堵住 —— 调用方必须走
+    #   ``asyncio.to_thread``，见各 handler 里的 ``_call_async``。
     try:
         result = subprocess.run(
             ["node", cli, domain, action, "--args", json.dumps(args, ensure_ascii=False), "--json"],
@@ -108,7 +117,7 @@ def register(ctx, adapter_getter) -> int:
         args = {"limit": limit}
         if userid:
             args["userid"] = userid
-        return _wecom_call("customers", "get_customer_list", args)
+        return await _call_async("customers", "get_customer_list", args)
 
     ctx.register_tool(
         name="wecom_list_customers",
@@ -135,7 +144,7 @@ def register(ctx, adapter_getter) -> int:
             userid: 员工 userid (e.g. 'JieXiaoYin')
             external_userid: 客户 external_userid
         """
-        return _wecom_call("customers", "get_customer_detail", {"userid": userid, "external_userid": external_userid})
+        return await _call_async("customers", "get_customer_detail", {"userid": userid, "external_userid": external_userid})
 
     ctx.register_tool(
         name="wecom_customer_detail",
@@ -158,7 +167,7 @@ def register(ctx, adapter_getter) -> int:
     # 工具 3: 周行为
     async def weekly_behavior(userid: str) -> str:
         """查员工周行为统计 (客户数/消息数等)。"""
-        return _wecom_call("customers", "weekly_behavior", {"userid": userid})
+        return await _call_async("customers", "weekly_behavior", {"userid": userid})
 
     ctx.register_tool(
         name="wecom_weekly_behavior",
@@ -183,7 +192,7 @@ def register(ctx, adapter_getter) -> int:
             args["begin_date"] = begin_date
         if end_date:
             args["end_date"] = end_date
-        return _wecom_call("customers", "daily_user_changes", args)
+        return await _call_async("customers", "daily_user_changes", args)
 
     ctx.register_tool(
         name="wecom_daily_user_changes",
@@ -212,7 +221,7 @@ def register(ctx, adapter_getter) -> int:
             args["begin_date"] = begin_date
         if end_date:
             args["end_date"] = end_date
-        return _wecom_call("customers", "daily_report", args)
+        return await _call_async("customers", "daily_report", args)
 
     ctx.register_tool(
         name="wecom_daily_report",
@@ -236,7 +245,7 @@ def register(ctx, adapter_getter) -> int:
     # 工具 6: 全客户列表 (老板视图)
     async def all_customers(limit: int = 1000) -> str:
         """查全部客户 (老板权限)。"""
-        return _wecom_call("customers", "get_all_customers", {"limit": limit})
+        return await _call_async("customers", "get_all_customers", {"limit": limit})
 
     ctx.register_tool(
         name="wecom_all_customers",
@@ -255,7 +264,7 @@ def register(ctx, adapter_getter) -> int:
     # 工具 7: 客户标签
     async def corp_tags() -> str:
         """查公司标签列表 (企微标签管理)。"""
-        return _wecom_call("customers", "get_corp_tags", {})
+        return await _call_async("customers", "get_corp_tags", {})
 
     ctx.register_tool(
         name="wecom_corp_tags",

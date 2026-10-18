@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -84,9 +85,15 @@ class DbConfigError(DbError):
 
 
 def config() -> dict[str, Any]:
-    """从 env 读连接参数。每次现读（便于测试用 monkeypatch 改 env）。"""
-    host = os.environ.get("WECHATPRO_DB_HOST", _DEFAULT_HOST).strip()
-    port_raw = os.environ.get("WECHATPRO_DB_PORT", str(_DEFAULT_PORT)).strip()
+    """从 env 读连接参数。每次现读（便于测试用 monkeypatch 改 env）。
+
+    ⚠️ 凭据走 scoped 口径（多 profile 不串号），host/白名单走 per-profile
+    gate 口径（别的 profile 的放行开关不能作用到这里）。
+    """
+    from ..core.env_compat import gate_env, secret_env
+
+    host = gate_env("WECHATPRO_DB_HOST", _DEFAULT_HOST)
+    port_raw = gate_env("WECHATPRO_DB_PORT", str(_DEFAULT_PORT))
     try:
         port = int(port_raw)
     except ValueError as exc:
@@ -94,13 +101,13 @@ def config() -> dict[str, Any]:
     return {
         "host": host,
         "port": port,
-        "user": os.environ.get("WECHATPRO_DB_USER", _DEFAULT_USER),
-        "password": os.environ.get("WECHATPRO_DB_PASSWORD", ""),
-        "database": os.environ.get("WECHATPRO_DB_NAME", _DEFAULT_NAME),
+        "user": secret_env("WECHATPRO_DB_USER", _DEFAULT_USER),
+        "password": secret_env("WECHATPRO_DB_PASSWORD", ""),
+        "database": gate_env("WECHATPRO_DB_NAME", _DEFAULT_NAME),
         "charset": "utf8mb4",
-        "connect_timeout": int(os.environ.get("WECHATPRO_DB_CONNECT_TIMEOUT", "5")),
-        "read_timeout": int(os.environ.get("WECHATPRO_DB_READ_TIMEOUT", "30")),
-        "write_timeout": int(os.environ.get("WECHATPRO_DB_WRITE_TIMEOUT", "30")),
+        "connect_timeout": int(gate_env("WECHATPRO_DB_CONNECT_TIMEOUT", "5")),
+        "read_timeout": int(gate_env("WECHATPRO_DB_READ_TIMEOUT", "30")),
+        "write_timeout": int(gate_env("WECHATPRO_DB_WRITE_TIMEOUT", "30")),
     }
 
 
@@ -110,7 +117,9 @@ def assert_host_allowed(cfg: Mapping[str, Any] | None = None) -> None:
     host = str(c.get("host", ""))
     if host in _ALLOWED_HOSTS:
         return
-    if os.environ.get("WECHATPRO_DB_ALLOW_REMOTE") == "1":
+    from ..core.env_compat import gate_env
+
+    if gate_env("WECHATPRO_DB_ALLOW_REMOTE") == "1":
         logger.warning("[WPP] DB 连的是非本地 host %s（WECHATPRO_DB_ALLOW_REMOTE=1 已显式放行）", host)
         return
     raise DbConfigError(
@@ -157,12 +166,22 @@ class Connection:
 
     # 只读
     def query(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> list[dict]:
+        """只读查询。**不在显式事务里时查询完立即收尾**（见下方 D5 注释）。"""
         cur = self._conn.cursor()
         try:
             self._run(cur, sql, params)
             return list(cur.fetchall())
         finally:
             cur.close()
+            # ★ D5（2026-10-02 修）：**读也要收尾**。``autocommit=False`` +
+            # REPEATABLE READ 下，一条 SELECT 就开了个**一直挂着**的快照事务；
+            # 而连接是线程内长期复用的（WS 线程 / sweep 线程各一条，进程活多久它活多久）
+            # ⇒ 那条线程此后**永远读同一个快照**：新写进去的台账看不见、
+            # 「最后真发言时间」不动、学习样本永远是老的 —— 而一行日志都没有。
+            # 与 ``execute()`` 同一口径：不在显式事务里（``depth == 0``）就提交；
+            # 事务里提交会把外层 atomicity 拆掉，所以必须看 depth。
+            if getattr(_local, "depth", 0) == 0:
+                self._conn.commit()
 
     def query_one(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> dict | None:
         rows = self.query(sql, params)
@@ -216,6 +235,40 @@ class Connection:
     def rollback(self) -> None:
         self._conn.rollback()
 
+    @contextmanager
+    def transaction(self):
+        """显式事务。**可重入**：内层 commit/rollback 延到最外层。
+
+        ★ D4（2026-10-02 修）：这段以前是**死代码**（只有模块级那份、且无人调用），
+        而真正需要原子性的地方（migration 循环）用的是 ``conn.execute("START
+        TRANSACTION")`` —— 那条路在 ``autocommit=False`` 下**等于没开事务**：
+        ``execute()`` 收尾时（``depth == 0``）会把 START TRANSACTION **自己提交掉**，
+        之后的每条语句再各自自动提交 ⇒ migration 中途炸掉留下的就是**半套 schema**，
+        而调用方以为"要么全成要么全不成"。现在多表写一律走这个口子。
+        """
+        depth = getattr(_local, "depth", 0)
+        _local.depth = depth + 1
+        try:
+            yield self
+            if _local.depth == 1:
+                self.commit()
+        except Exception:
+            if _local.depth == 1:
+                self.rollback()
+            raise
+        finally:
+            _local.depth = depth
+
+    def ping(self, reconnect: bool = True) -> None:
+        """存活探测（``pymysql`` 的 ``ping``）。
+
+        ⚠️ 只查 ``.open`` 不够：MySQL 服务端把空闲连接踢掉后，客户端**照样**认为
+        ``open == True``，下一条 SQL 才报 ``(2006, 'server has gone away')`` ——
+        而那条报错发生在谁的业务语句上，谁就成为"偶发失败"的背锅侠。连接池入口
+        （:func:`get_conn`）先 ping 一次，把这类失败挡在取连接这一步。
+        """
+        self._conn.ping(reconnect=reconnect)
+
     def close(self) -> None:
         try:
             self._conn.close()
@@ -256,10 +309,16 @@ def get_conn() -> Connection:
     """取本线程的连接（不存在则连）。**所有** DB 访问的唯一入口。"""
     _note_call()
     conn = getattr(_local, "conn", None)
-    if conn is not None and conn.open:
-        return conn
     if conn is not None:
-        conn.close()
+        try:
+            # ``open`` 只反映客户端状态；服务端踢掉空闲连接后它仍是 True。
+            # ``reconnect=True`` 让 pymysql 在探测失败时按原参数重连（会话变量/编码
+            # 由 connect kwargs 重建；autocommit 也是连接参数，重连后保持 False）。
+            conn.ping(reconnect=True)
+            return conn
+        except Exception as exc:  # noqa: BLE001 —— 探活失败 ⇒ 换一条新连接
+            logger.warning("[WPP] DB 连接探活失败（重连一条）: %s", exc)
+            conn.close()
     conn = _connect()
     _local.conn = conn
     return conn
@@ -280,44 +339,86 @@ def close() -> None:
 
 @contextmanager
 def transaction():
-    """显式事务。**可重入**：内层 commit/rollback 延到最外层。
+    """显式事务（本线程连接上的）。语义与 ``Connection.transaction`` **同一份实现**。
 
-    事务里调 ``execute()`` 不会提前提交（``_local.depth`` 起作用），
+    事务里调 ``execute()`` / ``query()`` 都不会提前提交（``_local.depth`` 起作用），
     这是「先写 ledger 再写 group_state」这类多表写能保住原子性的前提。
     """
-    conn = get_conn()
-    depth = getattr(_local, "depth", 0)
-    _local.depth = depth + 1
-    try:
+    with get_conn().transaction() as conn:
         yield conn
-        if _local.depth == 1:
-            conn.commit()
-    except Exception:
-        if _local.depth == 1:
-            conn.rollback()
-        raise
-    finally:
-        _local.depth = depth
 
 
 def is_available() -> bool:
-    """连得上吗？—— 不抛，给启动期做降级判断用。"""
+    """连得上吗？—— 不抛，给启动期做降级判断用。
+
+    ⚠️ **只回答"连得上"**：``SELECT 1`` 通 != schema 建好了（见 :func:`health`）。
+    """
     try:
         get_conn().query("SELECT 1 AS ok")
         return True
-    except DbError:
+    except DbError as exc:
+        _note_health("unavailable", str(exc), ok=False)
         return False
-    except Exception:
+    except Exception as exc:
+        _note_health("unavailable", str(exc), ok=False)
         return False
+
+
+# --- 体检状态（D7）----------------------------------------------------------
+
+_health_lock = threading.Lock()
+#: 最近一次 DB 体检的结局（**不是**"能不能连上"）。启动时是 ``unknown``。
+_health: dict[str, Any] = {
+    "state": "unknown",      # unknown | ok | drift | failed | unavailable
+    "ok": False,
+    "detail": "",
+    "at": 0,
+}
+
+
+def _note_health(state: str, detail: str = "", ok: bool | None = None) -> None:
+    with _health_lock:
+        _health["state"] = state
+        _health["detail"] = detail
+        _health["ok"] = (state == "ok") if ok is None else bool(ok)
+        _health["at"] = int(time.time())
+
+
+def health() -> dict[str, Any]:
+    """最近一次体检的**拷贝**（``/heartflow status`` 与诊断用）。
+
+    ★ D7（2026-10-02 修）：为什么需要它 —— 旧写法里 ``migration 未完成`` 只有
+    启动时那一行 warn。此后进程照跑、``SELECT 1`` 照通（``is_available`` 只问这个），
+    于是一个**半建成的 schema** 在运维面上与"一切正常"完全一样：心流每条都写不进台账，
+    指标里 0 条发言看起来就像"群里没人说话"。现在这个结局会一直挂在这里
+    （状态页 + ``wpp_db_ready``），直到下一次体检把它刷新。
+    """
+    with _health_lock:
+        return dict(_health)
 
 
 def migrate() -> dict:
-    """跑 migration（``data/migrations.py``）。失败抛 ``DbError``，由调用方决定是否降级。"""
+    """跑 migration（``data/migrations.py``）。失败抛 ``DbError``，由调用方决定是否降级。
+
+    ★ D7：无论成败都把结局记进 :func:`health`（调用方只 warn 也不至于让这件事消失）。
+    """
     from . import migrations
 
     try:
-        return migrations.migrate(get_conn())
-    except DbError:
+        result = migrations.migrate(get_conn())
+    except DbError as exc:
+        _note_health("failed", str(exc), ok=False)
         raise
     except Exception as exc:
+        _note_health("failed", f"{exc}", ok=False)
         raise DbError(f"migration 失败 ({describe()}): {exc}") from exc
+    drifted = list(result.get("drifted") or [])
+    if drifted:
+        _note_health(
+            "drift",
+            f"{len(drifted)} 处定义漂移（只报不改）: " + "; ".join(drifted[:3]),
+            ok=True,                     # 漂移**不阻断**（R8）：表在、列在，只是定义不一致
+        )
+    else:
+        _note_health("ok", f"checksum={result.get('checksum')}", ok=True)
+    return result

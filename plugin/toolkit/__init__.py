@@ -23,10 +23,10 @@
 ## 两条硬约定
 
 1. **不做包级 eager import。** 本 ``__init__`` 故意只有文档 —— 各子模块由
-   ``registration.py`` 在**调用期**按需导入，且每个子域独立 try/except。
+   ``toolkit/registration.py`` 在**调用期**按需导入，且每个子域独立 try/except。
    历史事故：旧实现把 import 写在模块顶层，``wecom_tools`` 在**导入期**解析外部
    CLI 抛 ``FileNotFoundError`` ⇒ 被外层 except 吞成一行 WARNING ⇒
-   **wecom 7 + wpp_extras 3 共 10 个工具全部静默消失**（见 ``registration.py``）。
+   **wecom 7 + wpp_extras 3 共 10 个工具全部静默消失**（见 ``toolkit/registration.py``）。
 2. **模块级导入只能是标准库。** ``plugin_validate`` 会把 ``register()`` 在**隔离
    probe 子进程**里整体跑一遍，那个解释器**没有 aiohttp / pymysql**。
    凡是需要它们的，一律在**函数体内**导入（``core/api_client.py`` 顶层有

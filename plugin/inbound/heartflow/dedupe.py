@@ -18,7 +18,8 @@
    自相矛盾 —— 观测驱动收口就成了假的。见 ``# INVARIANT: I4``。
 ② 只比对**真发出**的文本（:func:`note_recent_reply` 只在 :func:`learn.persist_send_outcome`
    确认为 sent 后调）：被预算/闸拦下的、被 vendor 去重掉的不能进历史，
-   否则会拿"没说出口的话"去拦下一句。
+   否则会拿"没说出口的话"去拦下一句。**另一个写入口是启动预热**
+   :func:`load_hf_dedupe_history`（B7）—— 它回填的也是"已经真发出去"的文本。
 ③ 短句豁免（``minChars=12``）："收到 / 好的 / 👌"这类回复天然高频且无害，
    归一化后不足 12 字不进相似判定（前缀判定用的是同一个阈值）——
    否则 bot 连"好的"都不敢说，比重复更不像人。
@@ -38,6 +39,7 @@ import logging
 import math
 import re
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -70,6 +72,11 @@ HF_HISTORY_MAX_CAP = 500
 
 #: 历史条目里保存的原文长度上限（只为日志/回执回显，判定用归一化文本）
 HF_HISTORY_TEXT_CAP = 200
+
+#: 启动预热回填的条数上限（B7）。与 ``historyMax``（每群 50 条）是两回事 ——
+#: 这是"一次查询最多取回多少条**跨群**历史"，防窗口内出站极多时把启动拖住。
+#: 取得比"群数 × 50"宽出一截：宁可多取几条，也别让某个群的历史空着。
+HF_DEDUPE_PRELOAD_LIMIT = 500
 
 
 @dataclass(frozen=True)
@@ -332,6 +339,58 @@ def note_recent_reply(account_id: str, group_id: str, text: str, at_sec: int,
         _recent[k] = kept
 
 
+def load_hf_dedupe_history(account_id: str, now_sec: int | None = None) -> int:
+    """启动预热：把库里近期**群聊出站文本**灌回内存历史（B7，2026-10-02 修）。
+
+    为什么必须预热：``_recent`` 只在内存里 ⇒ 每次重启后 ``windowSec``（缺省 6 小时）
+    内复读闸**等于不存在** —— 老板最在意的"不像真人"里最刺眼的那条症状（换个日期的
+    同一段话）会在这段时间里照发不误，而台账 / 日志 / ``/heartflow status`` 一律全绿
+    （它们只看"有没有发出去"，看不到"这句话说过没有"）。
+
+    素材取 ``repo_messages.list_outbound_texts``（该账号窗口内的**全部**群聊出站文本，
+    不只心流那几句）—— 这是刻意的**超集**：闸要拦的是"这句我说过"，与当初为什么说
+    无关（回一句 @ 和主动插话用的是同一张嘴）。唯一副作用是"重启后比稳态多拦几句
+    重复话"，落在安全的那一侧；反过来**少拦**才是要治的症状。
+
+    用**缺省策略**决定窗口与长度：预热发生在账号启动，此时真配置还没进 sweep 的手里。
+    真配置与缺省不一致时，下一轮 sweep 的 :func:`prune_recent_replies` 会按真配置
+    重裁一遍（只可能裁短，不会把丢掉的补回来）。
+
+    返回灌进去的条数；**不抛**（预热失败 = 复读闸从空开始，比不预热松，但不该挡住接入）。
+    """
+    from ...data import repo_messages       # 延迟导入：加载期不许拉第三方依赖（F5）
+
+    ts = int(time.time()) if now_sec is None else int(now_sec)
+    cfg = resolve_dedupe_cfg(None)
+    if not cfg.enabled:
+        return 0
+    try:
+        rows = repo_messages.list_outbound_texts(
+            account_id, ts - cfg.window_sec, limit=HF_DEDUPE_PRELOAD_LIMIT)
+    except Exception as exc:  # noqa: BLE001 —— 见 docstring
+        log.warning("[WPP HF] 复读历史预热失败（复读闸从空开始）: account=%s: %s",
+                    account_id, exc)
+        return 0
+    n = 0
+    for r in rows:
+        text = str(r.get("content") or "")
+        gid = str(r.get("gid") or "")
+        if not text or not gid:
+            continue                        # 脏行（缺群 ⇒ 归不到任何一个历史桶）
+        try:
+            at = int(r.get("at_sec"))       # ``UNIX_TIMESTAMP`` 回来可能是 Decimal
+        except (TypeError, ValueError):
+            continue                        # 缺时刻 ⇒ 归档不了（``prune`` 会即时清掉它）
+        if at <= 0:
+            continue
+        note_recent_reply(account_id, gid, text, at, cfg)
+        n += 1
+    if n > 0:
+        log.info("[WPP HF] 复读历史已预热: account=%s n=%d（窗口 %ds）",
+                 account_id, n, cfg.window_sec)
+    return n
+
+
 def prune_recent_replies(now_sec: int, cfg: HfDedupeConfig) -> None:
     """sweep：按窗口裁掉过期历史（防长跑进程里内存无限增长；与 ``prune_open_windows`` 同级）。"""
     with _lock:
@@ -373,6 +432,7 @@ def tracked_groups() -> int:
 
 __all__ = [
     "HF_DEDUPE_DEFAULTS",
+    "HF_DEDUPE_PRELOAD_LIMIT",
     "HF_HISTORY_MAX_CAP",
     "HfDedupeConfig",
     "HfRecentReply",
@@ -382,6 +442,7 @@ __all__ = [
     "hf_jaccard",
     "hf_recent_count",
     "hf_repeat_verdict",
+    "load_hf_dedupe_history",
     "log_hf_repeat_skip",
     "norm_hf_text",
     "note_recent_reply",

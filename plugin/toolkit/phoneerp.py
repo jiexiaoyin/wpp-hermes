@@ -7,12 +7,18 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import subprocess
 
 log = logging.getLogger(__name__)
+
+
+async def _phoneerp_natural_async(query: str) -> str:
+    """``_phoneerp_natural`` 的异步壳（30s 同步子进程 ⇒ 工作线程）。"""
+    return await asyncio.to_thread(_phoneerp_natural, query)
 
 
 def _phoneerp_natural(query: str) -> str:
@@ -53,7 +59,7 @@ def register(ctx, adapter_getter) -> int:
             phoneerp CLI 返回的 JSON 字符串
         """
         full_q = query + (f" userid={userid}" if userid else "")
-        return _phoneerp_natural(full_q)
+        return await _phoneerp_natural_async(full_q)
 
     ctx.register_tool(
         name="phoneerp_query",
@@ -83,7 +89,7 @@ def register(ctx, adapter_getter) -> int:
         Returns:
             含 latitude/longitude/label/poi_name 的 JSON
         """
-        return _phoneerp_natural(f"发定位 {store}")
+        return await _phoneerp_natural_async(f"发定位 {store}")
 
     ctx.register_tool(
         name="phoneerp_location",
@@ -110,7 +116,7 @@ def register(ctx, adapter_getter) -> int:
         Returns:
             phoneerp CLI JSON, 含商品/门店/价格
         """
-        return _phoneerp_natural(f"串码查询 {imei}")
+        return await _phoneerp_natural_async(f"串码查询 {imei}")
 
     ctx.register_tool(
         name="phoneerp_imei",
@@ -131,7 +137,7 @@ def register(ctx, adapter_getter) -> int:
     # 工具 4: 任意自然语言查询 (兜底)
     async def nl_query(query: str) -> str:
         """phoneerp 任意自然语言查询 (兜底入口, 当 query 不知道用哪个具体工具时)。"""
-        return _phoneerp_natural(query)
+        return await _phoneerp_natural_async(query)
 
     ctx.register_tool(
         name="phoneerp_natural",

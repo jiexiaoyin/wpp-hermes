@@ -43,12 +43,89 @@ import re
 from typing import Any
 
 from .hongbao import is_red_packet_message
-from .parser import MT_REVOKE, WppMessage, is_bot_mentioned_by_text
+from .parser import MT_APP, MT_CHAT_HISTORY, MT_REVOKE, WppMessage, is_bot_mentioned_by_text
+from .relay import is_relay_message
 
 log = logging.getLogger(__name__)
 
 #: 文件传输助手的会话标识（vendor 用这个字面量当 wxid）。
 FILEHELPER = "filehelper"
+
+
+# ---------------------------------------------------------- reason 的三分类
+
+#: **放行**（``should_process`` 返回 ``(True, …)``）：直接触发 agent，不进心流。
+ALLOW_REASONS = frozenset({
+    "filehelper",         # ④ 管理命令（判定归这里，处置在 adapter._maybe_command）
+    "group_mention",      # ⑦ @机器人 → 100% 必回
+    "group_solitaire",    # ⑧ 接龙 → 100% 必回
+    "group_msg_type",     # ⑨ msgTypeTrigger
+    "group_quote_bot",    # ⑨ 引用 bot
+    "group_keyword",      # ⑨ keywordTrigger
+    "dm",                 # ⑪ 私聊白名单内
+})
+
+#: **交心流**（``(False, …)`` 但**不是**拒绝）：判定说"不硬触发"，由 judge 决定。
+#:
+#: ⚠️ 这是 ``(False, …)`` 里**唯一**允许漏到下游的那一类 —— 见 :func:`reason_class`。
+HEARTFLOW_REASONS = frozenset({
+    "heartflow_candidate",
+})
+
+#: **拒绝**（``(False, …)`` 且连心流都不该进）：静默丢弃。
+DENY_REASONS = frozenset({
+    "red_packet",             # ① 红包/转账（09-27 事故：必须最先）
+    "revoke",                 # ② 撤回
+    "official_account",       # ③ 公众号
+    "self",                   # ⑤ 自己发的（防 vendor 回推自问自答）
+    "group_blacklist",        # ⑥ 群黑名单
+    "group_disabled",         # ⑥ 群策略 disabled
+    "group_closed",           # ⑥ 群策略 closed
+    "group_not_allowlisted",  # ⑥ 空名单也算（fail-closed）
+    "dm_not_allowlisted",     # ⑫ 私聊白名单外
+    "dm_fail_closed",         # ⑫ 空白名单（fail-closed）
+})
+
+#: 全部已知 reason（校验用：``should_process`` 能返回的必须都在里面）。
+ALL_REASONS = ALLOW_REASONS | HEARTFLOW_REASONS | DENY_REASONS
+
+#: :func:`reason_class` 的三个返回值。
+CLASS_ALLOW = "allow"
+CLASS_HEARTFLOW = "heartflow"
+CLASS_DENY = "deny"
+
+
+def reason_class(reason: str) -> str:
+    """给 reason 归类 —— **认不出来的一律按 ``deny``**（fail-closed）。
+
+    为什么要这张表：``platform.adapter._handle_one`` 曾经拿一个**枚举白名单**
+    （旧 ``_DROP_REASONS``）判"要不要丢"，于是失效方向是反的 —— 新增一个 deny
+    reason 而忘了加进白名单，那条**明令拒绝的消息会被喂给 LLM**（审阅 A8）。
+    判据换成"``ok=False`` 且不在 :data:`HEARTFLOW_REASONS` 里 ⇒ 丢"之后，
+    忘了登记的默认后果变成"**丢**"：多丢一条有日志可查，多喂一条撤不回。
+
+    ``should_process`` 返回的 ``ok`` 才是**主判据**，这个函数是旁路自证
+    （测试与日志用）：两者对不上就是有人加了 reason 没登记。
+    """
+    if reason in ALLOW_REASONS:
+        return CLASS_ALLOW
+    if reason in HEARTFLOW_REASONS:
+        return CLASS_HEARTFLOW
+    return CLASS_DENY
+
+
+def should_drop(ok: bool, reason: str) -> bool:
+    """``adapter._handle_one`` 那道门的**判据本体**（纯函数，本机可测）。
+
+    只有 ``(False, …)`` 才可能丢，且**只放行** :data:`HEARTFLOW_REASONS` 那一类：
+
+    * ``(True, …)``  → 不丢（放行触发，``ok`` 是主判据，不查表）；
+    * ``(False, "heartflow_candidate")`` → 不丢（交给 judge）；
+    * 其余一切 ``(False, …)`` → **丢**（含没登记过的新 reason）。
+    """
+    if ok:
+        return False
+    return reason_class(reason) != CLASS_HEARTFLOW
 
 
 def is_filehelper_session(msg: WppMessage) -> bool:
@@ -159,13 +236,42 @@ def _decide_group(msg: WppMessage, cfg: dict, content: str,
 
 
 def _is_solitaire(msg: WppMessage) -> bool:
-    """接龙检测：正文含"接龙"（``[接龙]`` / ``#接龙`` 均命中）。
+    """接龙检测：**结构优先**，裸子串那条路已收窄（A4，2026-10-02）。
 
-    ⚠️ **2026-09-01 fix 必须保留：不用 ``msg_type == 49`` 判接龙。**
-    华为群实测 49 里含 转账 86 / 应用消息 44 / 接龙 135+ ——
-    按类型判会把转账和应用消息**一起**当成接龙触发。只认"接龙"字样，精确命中。
+    三段历史都要保住：
+
+    * **2026-09-01**：**不许**用 ``msg_type == 49``（``MT_APP``）**单独**判接龙 ——
+      华为群实测 49 里含 转账 86 / 应用消息 44 / 接龙 135+，按类型判会把转账和应用消息
+      一起当成接龙触发；
+    * **2026-09-27**：接龙文案**自带"红包"** ⇒ 不许被红包闸吃掉（那一段在
+      :mod:`inbound.hongbao`，判据与本函数共用 :func:`relay.is_relay_message`）；
+    * **2026-10-02（本函数）**：**不许**用裸子串 ``"接龙" in content`` —— 群里顺口聊
+      一句接龙（「这个接龙我不参加」「刚谁发的接龙」）就命中，而这一路是 **100% 必回**
+      （不复用心流 judge）⇒ 每条闲聊都被迫作答，还把发言预算的额度吃掉。
+
+    现在认三种**结构性**信号，任一条成立即为接龙：
+
+    1. :func:`relay.is_relay_message` —— 接龙卡片本体（``#接龙`` / ``接龙`` + 编号条目 /
+       旧 53）。**与红包闸同一个函数**，不许再分裂出第二份判据；
+    2. 正文里出现微信接龙模板的硬标记 ``#接龙``（**谁在闲聊都不会凭空打出这四个字**，
+       所以纯文本形态的真接龙照旧 100% 必回 —— 这条是"收窄不许把真接龙收没了"的召回护栏）；
+    3. **卡片（49/53）上的"接龙"字样 / ``[接龙]`` 标记** —— 覆盖"刚发起、还没人报名"
+       那种正文里只有"接龙"二字、结构判据认不出的卡片。
+
+    纯文本里**只有**"接龙"二字而**没有** ``#接龙`` ⇒ 落回心流 judge（该不该接由语义决定）。
+    ⚠️ 第 3 条仍是"含文字 **且** 是卡片"的合取，不是单判类型 —— 09-01 的教训在此。
     """
-    return "接龙" in (msg.content or "")
+    if is_relay_message(msg):
+        return True
+    content = msg.content or ""
+    if "#接龙" in content:
+        return True
+    if "接龙" not in content and "[接龙]" not in content:
+        return False
+    try:
+        return int(msg.msg_type) in (MT_APP, MT_CHAT_HISTORY)
+    except (TypeError, ValueError):
+        return False
 
 
 # ------------------------------------------------------------------ 私聊

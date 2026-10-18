@@ -106,12 +106,12 @@ def _uninstall_fake_aiohttp() -> None:
 # ------------------------------------------------------------------ 用例
 
 def case_creds_chain() -> None:
-    print("\n① 凭证链：DEEPSEEK_API_KEY → MINIMAX_CN_API_KEY → MINIMAX_API_KEY")
+    print("\n① 凭证链：JUDGE_API_KEY → MINIMAX_CN_API_KEY → MINIMAX_API_KEY")
     from plugin.llm.judge import resolve_judge_creds
 
     import os
     saved = {k: os.environ.get(k) for k in
-             ("DEEPSEEK_API_KEY", "MINIMAX_CN_API_KEY", "MINIMAX_API_KEY")}
+             ("JUDGE_API_KEY", "DEEPSEEK_API_KEY", "MINIMAX_CN_API_KEY", "MINIMAX_API_KEY")}
     try:
         for k in saved:
             os.environ.pop(k, None)
@@ -129,13 +129,19 @@ def case_creds_chain() -> None:
         c = resolve_judge_creds()
         eq(c.api_key, "cn", "MINIMAX_CN_API_KEY 优先于 MINIMAX_API_KEY（旧 Py 侧行为）")
 
+        # ⚠️ v1.14.0 破坏性改名：旧名 DEEPSEEK_API_KEY **不再读**。这里钉死它，
+        #    否则「改了名但旧变量仍悄悄生效」会让灰度期的凭证链无法解释。
         os.environ["DEEPSEEK_API_KEY"] = "ds"
         c = resolve_judge_creds()
-        eq((c.api_key, c.format), ("ds", "openai"), "DEEPSEEK_API_KEY 压倒一切")
+        eq((c.api_key, c.format), ("cn", "anthropic"), "DEEPSEEK_API_KEY 不再读取（v1.14.0 改名）")
+
+        os.environ["JUDGE_API_KEY"] = "jk"
+        c = resolve_judge_creds()
+        eq((c.api_key, c.format), ("jk", "openai"), "JUDGE_API_KEY 压倒一切")
         eq(c.base_url, "https://api.deepseek.com", "DeepSeek 默认端点（openai 兼容）")
 
         # 尾部斜杠必须剥掉，否则拼出 ``//chat/completions``
-        c = resolve_judge_creds(deepseek_base_url="https://x.example.com///")
+        c = resolve_judge_creds(judge_base_url="https://x.example.com///")
         eq(c.base_url, "https://x.example.com", "base_url 尾部斜杠已剥")
     finally:
         for k, v in saved.items():

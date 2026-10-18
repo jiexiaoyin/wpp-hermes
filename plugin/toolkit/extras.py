@@ -20,14 +20,40 @@ wpp-identity → wpp_identity_lookup: 昵称↔wxid 匹配 (wpp_contacts / wpp_c
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import subprocess
 
+from .toolout import dump_capped, dump_error
+
 log = logging.getLogger(__name__)
 
 _PHONEERP_LOOKUP = "/root/.hermes/skills/phoneerp/scripts/lookup_employee.js"
+
+
+def _phoneerp_record(args: list[str]) -> dict | None:
+    """跑 phoneerp 查询脚本并取出 ``match.record``。
+
+    ⚠️ **同步函数**：调用方必须用 ``asyncio.to_thread`` 包（子进程最长 10s）。
+    旧实现在 async handler 里直接 ``subprocess.run`` —— 一次查询就把整个事件循环
+    （WS 心跳、其它并发工具、定时器）卡住最多 10 秒。任何失败都返回 ``None``：
+    这一路只是"锦上添花"的信息源，不该让主查询失败。
+    """
+    try:
+        r = subprocess.run(
+            ["node", _PHONEERP_LOOKUP, *args, "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return None
+        data = json.loads(r.stdout)
+        m = data.get("match") if isinstance(data, dict) else None
+        return m.get("record") if isinstance(m, dict) else None
+    except Exception:  # noqa: BLE001 —— 脚本缺失/超时/坏 JSON 都只当"查不到"
+        log.debug("[WPP] phoneerp 查询失败: %s", args, exc_info=True)
+        return None
 
 
 # ------------------------------------------------------------------ 历史消息
@@ -70,6 +96,23 @@ def register(ctx, adapter_getter) -> int:
     """注册 wpp-history + wpp-identity direct tool."""
     count = 0
 
+    def _acct_id(account_id: str) -> str:
+        """``default`` 哨兵 → 单账号部署里的那个真账号（历史表按真 id 分行）。
+
+        不解析的话：单账号 ``boss2`` 下这两条工具永远查 ``default`` 那个**不存在的库分区**
+        ⇒ 返回空数组（不报错），现场看起来只是"查不到历史"。
+        """
+        aid = (account_id or "default").strip() or "default"
+        try:
+            adapter = adapter_getter() if callable(adapter_getter) else None
+            if adapter is not None:
+                from .registry import resolve_account_id
+
+                return resolve_account_id(adapter, aid)
+        except Exception:  # noqa: BLE001 —— 解析失败退回原值（查询本身会给出空结果）
+            log.debug("[WPP] 历史工具解析账号失败: %s", aid, exc_info=True)
+        return aid
+
     # ========== 1. wpp_history_search ==========
     async def history_search(
         target: str = "",
@@ -91,9 +134,13 @@ def register(ctx, adapter_getter) -> int:
             JSON 数组: [{direction, peer_id, msg_type, content, from_wxid, ts}, ...]
         """
         try:
-            account_id = (account_id or "default").strip() or "default"
-            peer_id = _resolve_peer_id(account_id, target) if target else ""
-            rows = _query_history(account_id, peer_id, keyword, min(int(limit), 100))
+            account_id = _acct_id(account_id)
+            # 同步 pymysql 查库：走 to_thread（与 core/api_client 的审计写法一致），
+            # 否则本地库慢/重连（connect_timeout=5s）时会卡住整个事件循环。
+            peer_id = (await asyncio.to_thread(_resolve_peer_id, account_id, target)
+                       if target else "")
+            rows = await asyncio.to_thread(
+                _query_history, account_id, peer_id, keyword, min(int(limit), 100))
             if direction:
                 rows = [r for r in rows if r.get("direction") == direction]
             # 截断超长 content
@@ -108,10 +155,13 @@ def register(ctx, adapter_getter) -> int:
                     "from_wxid": r.get("from_wxid"),
                     "ts": r.get("ts"),
                 })
-            return json.dumps({"ok": True, "count": len(out), "messages": out}, ensure_ascii=False)
+            # ⚠️ 必须 ``default=str``：pymysql 的 TIMESTAMP 列取出来是 ``datetime``，
+            #   ``json.dumps`` 没有 default 会抛 "Object of type datetime is not JSON
+            #   serializable" —— 库一有数据这条工具就整条失败（空库时看不出来）。
+            return dump_capped({"ok": True, "count": len(out), "messages": out})
         except Exception as e:  # noqa: BLE001
             log.warning("[WPP] wpp_history_search 失败: %s", e)
-            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+            return dump_error(f"{type(e).__name__}: {e}")
 
     ctx.register_tool(
         name="wpp_history_search",
@@ -151,49 +201,31 @@ def register(ctx, adapter_getter) -> int:
         try:
             from ..data import repo_messages as _db
             results = []
-            account_id = (account_id or "default").strip() or "default"
+            account_id = _acct_id(account_id)
             if name:
                 # 1) 本地通讯录表
-                contacts = _db.search_contacts(account_id, name, limit=10)
+                contacts = await asyncio.to_thread(
+                    _db.search_contacts, account_id, name, limit=10)
                 for c in contacts:
                     results.append({"source": "wpp_contacts", "wxid": c.get("wxid"), "nickname": c.get("nickname"), "remark": c.get("remark")})
-                # 2) phoneerp 员工表
-                try:
-                    r = subprocess.run(
-                        ["node", _PHONEERP_LOOKUP, "--name", name, "--json"],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    if r.returncode == 0:
-                        data = json.loads(r.stdout)
-                        m = data.get("match") if isinstance(data, dict) else None
-                        if m and m.get("record"):
-                            rec = m["record"]
-                            results.append({"source": "phoneerp", "wxid": rec.get("wppId"), "nickname": rec.get("wechatNickName"), "name": rec.get("name"), "title": rec.get("title"), "store": rec.get("store")})
-                except Exception:  # noqa: BLE001
-                    pass
+                # 2) phoneerp 员工表（子进程 → to_thread，别卡事件循环）
+                rec = await asyncio.to_thread(_phoneerp_record, ["--name", name])
+                if rec:
+                    results.append({"source": "phoneerp", "wxid": rec.get("wppId"), "nickname": rec.get("wechatNickName"), "name": rec.get("name"), "title": rec.get("title"), "store": rec.get("store")})
             if wxid:
                 # 通讯录 + 群成员
-                contacts = _db.search_contacts(account_id, wxid, limit=5)
+                contacts = await asyncio.to_thread(
+                    _db.search_contacts, account_id, wxid, limit=5)
                 for c in contacts:
                     if c.get("wxid") == wxid or wxid in (c.get("wxid") or ""):
                         results.append({"source": "wpp_contacts", "wxid": c.get("wxid"), "nickname": c.get("nickname"), "remark": c.get("remark")})
-                try:
-                    r = subprocess.run(
-                        ["node", _PHONEERP_LOOKUP, "--wppId", wxid, "--json"],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    if r.returncode == 0:
-                        data = json.loads(r.stdout)
-                        m = data.get("match") if isinstance(data, dict) else None
-                        if m and m.get("record"):
-                            rec = m["record"]
-                            results.append({"source": "phoneerp", "wxid": rec.get("wppId"), "nickname": rec.get("wechatNickName"), "name": rec.get("name"), "title": rec.get("title"), "store": rec.get("store")})
-                except Exception:  # noqa: BLE001
-                    pass
-            return json.dumps({"ok": True, "matches": results}, ensure_ascii=False)
+                rec = await asyncio.to_thread(_phoneerp_record, ["--wppId", wxid])
+                if rec:
+                    results.append({"source": "phoneerp", "wxid": rec.get("wppId"), "nickname": rec.get("wechatNickName"), "name": rec.get("name"), "title": rec.get("title"), "store": rec.get("store")})
+            return dump_capped({"ok": True, "matches": results})
         except Exception as e:  # noqa: BLE001
             log.warning("[WPP] wpp_identity_lookup 失败: %s", e)
-            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+            return dump_error(f"{type(e).__name__}: {e}")
 
     ctx.register_tool(
         name="wpp_identity_lookup",
@@ -240,6 +272,21 @@ def register(ctx, adapter_getter) -> int:
                 for d in defs:
                     by_name.setdefault(str(d.get("name", "")), (str(gname), d))
 
+        # ★ 端点表之外还有 ~30 个具名工具（msg 域、jargon、mcp、parity、extras
+        #   自己 …）。只列 GROUPS 会让模型以为它们不存在 —— 用注册层记下的
+        #   **真实名单**补齐（没有 endpoint 元数据的就只给名字）。
+        try:
+            from . import registration as _reg
+
+            for n in getattr(_reg, "REGISTERED_TOOL_NAMES", ()) or ():
+                by_name.setdefault(str(n), ("special", {
+                    "name": str(n),
+                    "description": "（具名/路由/组合能力，无单一厂商端点）",
+                    "endpoint": "", "method": "", "params": {},
+                }))
+        except Exception as e:  # noqa: BLE001 —— 列不全也比整条工具挂掉好
+            log.warning("[WPP] wpp_tools_list 读不到注册名单: %s", e)
+
         tools = [
             {
                 "name": name,
@@ -268,14 +315,14 @@ def register(ctx, adapter_getter) -> int:
             "ok": True,
             "count": len(tools),
             "tools": tools[:50],  # 上限 50 防过大
-            "source": "plugin/tools/vendor_defs{,_extra}.py:GROUPS（唯一真源，非副本）",
+            "source": "plugin/toolkit/vendor_defs{,_extra}.py:GROUPS（唯一真源，非副本）",
             "hint": "返回可能截断 (50 条), 用 domain/keyword 缩小范围",
         }, ensure_ascii=False, default=str)
 
     ctx.register_tool(
         name="wpp_tools_list",
         toolset="wechatpadpro",
-        description="列出所有 wpp vendor 工具 (本地查定义表, 不调 vendor)。调用: wpp_tools_list(domain='group') 查 group 域工具; wpp_tools_list(keyword='chatroom') 搜名称含 chatroom 的工具。返回工具清单 JSON 含 endpoint/method/params。老板 2026-09-01 拍板 — 解决 '找接口痛苦' 问题 (真源: plugin/tools/vendor_defs.py 的 GROUPS, 不是手抄副本)。",
+        description="列出所有 wpp vendor 工具 (本地查定义表, 不调 vendor)。调用: wpp_tools_list(domain='group') 查 group 域工具; wpp_tools_list(keyword='chatroom') 搜名称含 chatroom 的工具。返回工具清单 JSON 含 endpoint/method/params。老板 2026-09-01 拍板 — 解决 '找接口痛苦' 问题 (真源: plugin/toolkit/vendor_defs.py 的 GROUPS, 不是手抄副本)。",
         schema={
             "type": "object",
             "description": "列出所有 wpp vendor 工具 (本地查 SSOT JSON, 不调 vendor)。调用: wpp_tools_list(domain='group') 查 group 域工具; wpp_tools_list(keyword='chatroom') 搜名称含 chatroom 的工具。",

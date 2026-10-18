@@ -394,7 +394,15 @@ def test_i5_a_placeholder_consumes_no_budget_and_opens_no_window(monkeypatch, ca
     """
     sent_calls: list[tuple] = []
     suppressed_calls: list[tuple] = []
-    monkeypatch.setattr(repo_hf, "set_sent", lambda *a, **k: sent_calls.append((a, k)))
+
+    def _set_sent(*a, **k):
+        # ⚠️ 真 ``repo_hf.set_sent`` 的返回值是**受影响行数**；B4（2026-10-02）起它被当成
+        #    成败信号（0 ⇒ 账本没写成 ⇒ 不开观察窗）。桩写成 ``list.append``（返回 None）
+        #    就等于"每次都没写成"—— 那是**桩失真**，不是被测行为。
+        sent_calls.append((a, k))
+        return 1
+
+    monkeypatch.setattr(repo_hf, "set_sent", _set_sent)
     monkeypatch.setattr(repo_hf, "set_suppressed",
                         lambda *a, **k: suppressed_calls.append((a, k)))
 
@@ -621,7 +629,7 @@ def test_i9_images_only_from_the_marked_body_and_only_http_urls(monkeypatch):
     txt = ("看这个\n[图片] https://oss.juhe.chat/a.jpg\n"
            "[图片] https://oss.juhe.chat/a.jpg\n"        # 重复
            "[图片] ftp://oss.juhe.ch/x.jpg\n"            # scheme 不对
-           "[图片] /root/.openclaw/.env\n"               # 本机路径
+           "[图片] /root/.hermes/.env\n"                 # 本机路径
            "[图片] data:image/png;base64,AAAA\n"         # 内联数据不算直链
            "[图片] HTTP://OSS.JUHE.CHAT/b.JPG\n")        # scheme 大小写
     assert HF.extract_hf_image_urls(txt, 5) == ["https://oss.juhe.chat/a.jpg",

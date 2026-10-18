@@ -28,6 +28,7 @@ VOICE-DOWNLOAD-BINARY / v1.3.8 VIDEO-DOWNLOAD / v1.3.22 VENDOR-TRANSCRIPT）。
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -44,6 +45,7 @@ def extract_media_meta(src: dict) -> dict:
     """提取图片/文件/语音/视频元数据（供 :class:`core.api_client.WppClient` 下载）。"""
     media: dict = {}
     _extract_image(src, media)
+    _extract_image_v0_xml(src, media)
     _extract_flat_fields(src, media)
     _extract_voice(src, media)
     _extract_file(src, media)
@@ -70,6 +72,34 @@ def _extract_image(src: dict, media: dict) -> None:
     }
     if cdn.get("data_len"):
         media["data_len"] = cdn["data_len"]
+
+
+def _extract_image_v0_xml(src: dict, media: dict) -> None:
+    """v0 ``<img ...>`` XML 兜底（对齐 TS ``parseImageXml``）。
+
+    新 vendor 的图片优先走结构化字段；这里只在结构化字段**完全没有**时补，
+    老账号/老推送仍可能只给 XML（``cdndownload`` 链路对 v0 图片仍可用，
+    与 file/video/voice 不同 —— 那三类 OpenClaw 也明确标注"新 vendor 不支持"）。
+    """
+    if (media.get("cdn") or {}).get("file_aes_key"):
+        return
+    content = src.get("content")
+    if not isinstance(content, str) or "cdnbigimgurl" not in content and "cdnthumburl" not in content:
+        return
+    aes = re.search(r'aeskey="([^"]+)"', content)
+    file_no = (re.search(r'cdnbigimgurl="([^"]+)"', content)
+               or re.search(r'cdnmidimgurl="([^"]+)"', content)
+               or re.search(r'cdnthumburl="([^"]+)"', content))
+    if not aes or not file_no:
+        return
+    md5 = re.search(r'md5="([^"]+)"', content)
+    media["cdn"] = {
+        "file_aes_key": aes.group(1),
+        "file_no": file_no.group(1),
+        "variant": "standard",
+    }
+    if md5:
+        media["md5"] = md5.group(1)
 
 
 # ---------------------------------------------------------------- 裸字段兜底
@@ -198,6 +228,39 @@ def _extract_video(src: dict, media: dict) -> None:
 # ----------------------------------------------------------------- 读回（转写）
 
 
+def is_file_message(src: dict) -> bool:
+    """是不是**文件**消息（v1 ``kind=app`` + ``app.category=file``，或 v0 appmsg type 6/8）。
+
+    对齐 TS ``isV1SchemaFile`` + ``handler.ts:382`` 的 v0 判据。单独成函数是因为
+    "没有 download_context 的文件也要走兜底话术"，而 :func:`extract_media_meta`
+    在那种消息上产出的是空 dict —— 不能拿 ``not media`` 当"不是文件"。
+    """
+    if not isinstance(src, dict):
+        return False
+    if isinstance(src.get("file"), dict):
+        return True
+    app = src.get("app")
+    if isinstance(app, dict) and str(app.get("category") or "") == "file":
+        return True
+    content = str(src.get("content") or "")
+    return ("<appmsg" in content
+            and ("<type>6</type>" in content or "<type>8</type>" in content))
+
+
+def file_name_of(src: dict, media: dict | None = None) -> str:
+    """从 v1 ``app.title`` / ``file_ctx.file_name`` / v0 XML ``<filename>`` 取文件名。"""
+    media = media or {}
+    ctx = media.get("file_ctx") or {}
+    for cand in (ctx.get("file_name"), media.get("filename"),
+                 (src.get("app") or {}).get("title") if isinstance(src.get("app"), dict) else "",
+                 src.get("filename"), src.get("FileName")):
+        if cand:
+            return str(cand)
+    m = re.search(r'<filename(?:\s+name="[^"]*")?>([^<]+)</filename>',
+                  str(src.get("content") or ""))
+    return m.group(1).strip() if m else ""
+
+
 def voice_transcript(media: dict) -> str:
     """语音的转写文字；没有就 ``""``。
 
@@ -213,4 +276,4 @@ def voice_transcript(media: dict) -> str:
     return str(media.get("vendor_transcript") or media.get("stt_text") or "").strip()
 
 
-__all__ = ["extract_media_meta", "voice_transcript"]
+__all__ = ["extract_media_meta", "voice_transcript", "is_file_message", "file_name_of"]

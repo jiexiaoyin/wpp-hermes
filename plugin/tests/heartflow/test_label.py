@@ -255,6 +255,26 @@ def test_is_sample_informative():
         "恰等于 ambientMax 不算小于 → 不可采信（严格小于）")
 
 
+def test_is_silence_exempted_matrix():
+    """v1.16.2 silence-exempt 的判据矩阵（只豁免 silence × engaged=0 × margin 过线）。"""
+    ok = L.is_hf_silence_exempted
+    assert ok("silence", 0, 0.80, 0.65, 0.1) is True, "margin 0.15 ≥ 0.10"
+    assert ok("silence", 0, 0.75, 0.65, 0.1) is True, \
+        "1e-9 容差：0.75−0.65 在浮点里是 0.09999…98，恰在边距上不许错杀"
+    assert ok("silence", 0, 0.70, 0.65, 0.1) is False, "擦边 0.05 仍计负（收敛力不动）"
+    assert ok("silence", 0, 0.655, 0.65, 0.1) is False, "擦边 0.005 仍计负"
+    assert ok("silence", 1, 0.90, 0.65, 0.1) is False, "有人接话 ⇒ 不是沉默样本"
+    for sig in ("negative", "veto", "quote", "mention", "short-window", None, ""):
+        assert ok(sig, 0, 0.90, 0.50, 0.1) is False, \
+            f"{sig!r} 永不豁免（negative/veto 是主动嫌弃，不是误伤）"
+    assert ok("silence", 0, None, 0.65, 0.1) is False, "缺 judge_overall ⇒ 宁严勿宽"
+    assert ok("silence", 0, 0.80, None, 0.1) is False, "缺 effective_threshold ⇒ 宁严勿宽"
+    assert ok("silence", 0, "0.80", 0.65, 0.1) is False, "字符串不是 Number"
+    assert ok("silence", 0, float("nan"), 0.65, 0.1) is False, "NaN 不算数"
+    assert ok("silence", 0, 0.80, 0.65, 0) is False, "marginMin=0 ⇒ 总开关关"
+    assert ok("silence", 0, 0.80, 0.65, -0.1) is False, "负边距同样关闭"
+
+
 # ===== 5. 回归门 / 源级守卫 =====
 #
 # TS 的 §5 有三条，主语都还没落地：

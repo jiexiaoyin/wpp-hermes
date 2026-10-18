@@ -76,7 +76,17 @@
     "minJudgeIntervalSec": 60,
     "maxRetries": 1,
     "timeoutMs": 5000,
-    "independentTrigger": false
+    "independentTrigger": false,
+    "_businessContext_note": "judge 的业务背景。groupBusinessContexts 按群覆盖；群值缺失/空白时回落到这里。",
+    "businessContext": "",
+    "groupBusinessContexts": {
+      "12345678901@chatroom": "本群是门店销售全员群，常发成交截图/销售晒单；晒单=报喜，应积极回应。"
+    },
+    "_profile_note": "画像生成与注入。applyQuietHours=true 才会把画像建议的静默段并入预算（单段≤6h、合计≤8h，超限整段丢弃；只影响心流主动搭话，不影响 @/私聊）。",
+    "profile": {
+      "enabled": true,
+      "applyQuietHours": false
+    }
   },
 
   "affection": {
@@ -91,14 +101,23 @@
 
   "jargon": {
     "enabled": false,
-    "_jargon_note": "按 7-01 老板偏好保留 enabled=false 默认",
+    "_jargon_note": "群黑话挖掘 (W7-4, 移植 wpp-openclaw v1.11.0 jargon.ts 729 行). 三层: ①统计预筛(零 LLM) ②一次批量验证 ③三步推断含义 → 落库 wpp_jargon_terms. enabled 默认 false (对齐 TS defaultJargonConfig). ⚠️ model 缺失 ⇒ 该轮挖掘**报错中止**并每轮记一行 warn —— 这是 TS v1.4.0 12:28 老板拍板'消除 plugin hardcode'后的有意行为, 不是兜底失败: 宁可吵, 不许凭空挑模型. 没配 key (DEEPSEEK_API_KEY/MINIMAX_*_API_KEY) 则静默不挖 (零外呼). 已删的两个键 maxRetries/minJudgeIntervalSec 是旧死键, TS 与 py2 都没有对应实现.",
     "model": "deepseek-v4-flash",
     "timeoutMs": 5000,
-    "maxRetries": 1,
-    "minJudgeIntervalSec": 0
+    "mineIntervalSec": 60,
+    "minMessages": 10,
+    "maxCandidatesPerGroup": 50
   },
 
   "llmIntentEnabled": true,
   "llmIntentModel": "deepseek-v4-flash",
-  "llmIntentTimeoutMs": 5000
+  "llmIntentTimeoutMs": 5000,
+  "groupContextWindow": 10,
+
+  "_w3_note": "群聊上下文/意图 (W3, 移植 wpp-openclaw v1.11.0 dispatcher.ts+intent-*.ts). 总闸 = groupContextEnabled (上面第 65 行, 默认 false, 必须显式 true 才注入群聊上下文). 候选池 = 触发消息之前 groupContextWindow 条 (1..100, 默认 10), 图片最多 3 张. llmIntentEnabled 关着时 LLM 那一半不跑, 且 embedding 那半也不会跑 (embedding 是 LLM 的'省一次调用'快路径, 不是独立开关). 降级: LLM 失败/无 key 时 media 意图只注入媒体消息, topic 意图不注入.",
+  "embeddingApiKeyEnv": "",
+  "_embedding_note": "embedding 凭据链: embeddingApiKeyEnv -> 该环境变量 -> embeddingApiKey -> 空. 没有隐式兜底 (不配就是关). 阿里 dashscope OpenAI 兼容端点, 模型 text-embedding-v4 (1024 维). 例: 在 profile 的 .env 里放 BAILIAN_EMBEDDING_API_KEY=..., 这里填 embeddingApiKeyEnv=BAILIAN_EMBEDDING_API_KEY",
+  "embeddingModel": "",
+  "embedIntentTopN": 5,
+  "embedIntentThreshold": 0.3
 }

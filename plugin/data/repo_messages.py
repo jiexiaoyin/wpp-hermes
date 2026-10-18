@@ -5,9 +5,10 @@
 
 ## 四条从 TS 搬过来的硬约束
 
-1. **时间聚合/排序一律走 ``ts``**。``create_time`` 是遗留死列：2026-08-11 前的值是
-   ``YYYYMMDDHHMMSS``（不是 epoch），之后全 NULL。用它排序会把旧行排到公元 643000 年、
-   让 6h 窗口把那些行全算成"窗内"，**且不报错**。
+1. **时间聚合/排序一律走 ``ts``**。``create_time`` **不是 epoch**：它是本地墙钟
+   ``YYYYMMDDHHMMSS``（2026-08-11 前写入的行），2026-10-18 起新行也按同一格式写入
+   （由 ``ts`` 换算，见 :func:`legacy_create_time`），历史 NULL 行已回填。即便如此，
+   仍**只许**用 ``ts`` 做窗口/排序 —— 墙钟串没有时区，也不能拿来做整数时间运算。
 2. **单表查询是刻意的**。TS 曾因跨表 JOIN 撞 ``Illegal mix of collations``
    （MariaDB 11 默认 ``utf8mb4_uca1400_ai_ci`` vs 本插件表的 ``utf8mb4_unicode_ci``）。
    Python 侧所有表都硬编码 ``COLLATE utf8mb4_unicode_ci``，但**仍保持单表习惯**。
@@ -37,6 +38,23 @@ GROUP_SUFFIX = "@chatroom"
 # --------------------------------------------------------------------------- 消息
 
 
+def legacy_create_time(ts: int | float | None) -> int:
+    """``ts``（epoch 秒）→ ``create_time`` 的本地墙钟格式 ``YYYYMMDDHHMMSS``。
+
+    ``create_time`` **不是 epoch**：2026-08-11 前的历史行是 ``YYYYMMDDHHMMSS``
+    （2026-10-18 实测 ``20260811094227`` ↔ ``ts=2026-08-11 09:42:27 +08:00``），
+    2026-10-18 起新行也写同一形状 —— 老板要求补上"之后全 NULL"这个数据质量问题。
+    时区跟随进程本地时区（生产 = CST +08:00，与 DB session 一致）。
+
+    取不到/越界 ⇒ 用当前时刻：一个坏时间戳绝不许挡住落库（本模块的"失败只 warn"契约）。
+    """
+    try:
+        when = int(ts) if ts else int(time.time())
+        return int(time.strftime("%Y%m%d%H%M%S", time.localtime(when)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return int(time.strftime("%Y%m%d%H%M%S"))
+
+
 def save_message(
     account_id: str,
     *,
@@ -56,7 +74,9 @@ def save_message(
 ) -> int:
     """落一条消息。幂等键 = ``uk_account_msg(account_id, msg_id, new_msg_id)``。
 
-    重复入库时**更新内容但不动 ts**（对齐 TS：ts 是"首次入库时刻"）。
+    重复入库时**更新内容但不动 ts / create_time**（对齐 TS：两者都是"首次入库时刻"）。
+    ``create_time`` 由 ``ts`` 派生（:func:`legacy_create_time`），与历史行的
+    ``YYYYMMDDHHMMSS`` 形状一致；时间聚合仍只走 ``ts``。
     """
     c = conn or db.get_conn()
     payload = None
@@ -64,13 +84,17 @@ def save_message(
         payload = raw_payload if isinstance(raw_payload, str) else json.dumps(
             raw_payload, ensure_ascii=False,
         )
+    # ★ NULL 会**绕过**唯一键：MySQL 的 UNIQUE 允许多行含 NULL，于是同一个
+    #   (account, msg_id, NULL) 可以无限重复入库（三通道重放时去重整个失效）。
+    #   取不到服务端 id 就写空串 —— 空串是"这个键上没有值"，但键本身仍参与比较。
+    nid = str(new_msg_id).strip() if new_msg_id is not None else ""
     return c.execute(
         """
         INSERT INTO wpp_messages
           (account_id, msg_id, new_msg_id, direction, peer_kind, peer_id, peer_name,
-           chat_id, msg_type, content, raw_payload, from_wxid, ts)
+           chat_id, msg_type, content, raw_payload, from_wxid, ts, create_time)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                COALESCE(FROM_UNIXTIME(%s), CURRENT_TIMESTAMP))
+                COALESCE(FROM_UNIXTIME(%s), CURRENT_TIMESTAMP), %s)
         ON DUPLICATE KEY UPDATE
           direction = VALUES(direction),
           peer_kind = VALUES(peer_kind),
@@ -80,8 +104,59 @@ def save_message(
           raw_payload = VALUES(raw_payload),
           from_wxid = VALUES(from_wxid)
         """,
-        (account_id, msg_id, new_msg_id, direction, peer_kind, peer_id, peer_name,
-         chat_id, msg_type, content, payload, from_wxid, ts),
+        (account_id, msg_id, nid, direction, peer_kind, peer_id, peer_name,
+         chat_id, msg_type, content, payload, from_wxid, ts, legacy_create_time(ts)),
+    )
+
+
+def get_message_by_id_or_new_id(
+    account_id: str,
+    msg_id: str | None = None,
+    new_msg_id: str | None = None,
+    conn: db.Connection | None = None,
+) -> dict | None:
+    """按 ``msg_id`` / ``new_msg_id`` 查**一条**消息（**不限方向**）。
+
+    逐字对齐 TS ``mysql.ts::getMessageByMsgIdOrNewId(…, {direction:'any'})``：引用回复
+    那条路（``send/quote-reply.ts``）用它回查被引用消息的 ``from_wxid`` / ``peer_name``，
+    而 **v1.3.18 P1-核心2** 那次修的就是"被引用的可能是 bot 自己发的"
+    （``direction='outbound'``）⇒ **不许**按 ``direction='inbound'`` 筛，筛了就是
+    "群友引用 bot 的消息"这一类**永远查不到**（且不报错，只是 @ 不出来 / refermsg 空）。
+
+    TS 的运算符陷阱照抄在案（``mysql.ts:620``）：必须写
+    ``account_id = ? AND (msg_id = ? OR new_msg_id = ?)`` —— 少了那对括号，``AND``
+    优先级更高会让 ``account_id`` 恒真的那半边把整条条件变成"几乎全部行"。
+
+    两个 id 都空 ⇒ 直接 ``None``（TS：``if (!msgId && !newMsgId) return null``），
+    别去发一条 ``msg_id = NULL`` 的查询 —— 那个恒不匹配，是白跑一次库。
+
+    ⚠️ **一处有意比 TS 严**：TS 是 ``LIMIT 1`` 且**不带 ORDER BY**，同 id 多行时由存储
+    引擎决定（本文件其余读也一样，见 :func:`list_messages` 的注释）；这里补
+    ``ORDER BY ts DESC, id DESC`` 的确定性决胜键。id 本应唯一，这一条只是让
+    "选中的是哪一行"在重放场景下可复现。
+
+    回 12 列（含 ``raw_payload`` 与 ``content``，供
+    :func:`plugin.inbound.quote_ref.resolve_quote_identity` 做发送者兜底解析）。
+    """
+    mid = str(msg_id or "").strip()
+    nid = str(new_msg_id or "").strip()
+    if not mid and not nid:
+        return None
+    clauses: list[str] = []
+    params: list[Any] = [account_id]
+    if mid:
+        clauses.append("msg_id = %s")
+        params.append(mid)
+    if nid:
+        clauses.append("new_msg_id = %s")
+        params.append(nid)
+    c = conn or db.get_conn()
+    return c.query_one(
+        "SELECT msg_id, new_msg_id, direction, peer_kind, peer_id, chat_id, peer_name, "
+        "from_wxid, msg_type, content, raw_payload, UNIX_TIMESTAMP(ts) AS at_sec "
+        "FROM wpp_messages WHERE account_id = %s AND ("
+        + " OR ".join(clauses) + ") ORDER BY ts DESC, id DESC LIMIT 1",
+        tuple(params),
     )
 
 
@@ -130,20 +205,38 @@ def list_messages(
 
 def list_group_messages(
     account_id: str, group_id: str, limit: int = 30, conn: db.Connection | None = None,
+    before_sec: int | None = None,
 ) -> list[dict]:
-    """群聊最近 N 条（时间升序）。``chat_id`` 与 ``peer_id`` 都试，兼容两种落库形态。"""
+    """群聊最近 N 条（时间升序）。``chat_id`` 与 ``peer_id`` 都试，兼容两种落库形态。
+
+    ``before_sec``（可选）= **只看这个时刻之前**的消息，逐字对齐 TS
+    （``mysql.ts:581-583``：``ts < FROM_UNIXTIME(?)``，**严格小于**）。
+    群聊上下文注入靠它**把触发消息自己排除在候选池之外** —— 不排除的话，候选人里
+    永远有"用户刚 @ 你的那一句"，而意图判断要的恰恰是**它之前的背景**
+    （``dispatcher.ts:343`` v1.2.8 注释：``beforeTs 排除触发消息自身``）。
+
+    ⚠️ **严格小于 ⇒ 同一秒的其它消息也一并排除**。这不是瑕疵：``ts`` 是**秒**精度，
+    同秒无法区分先后，宁可少给一条，也不能把触发消息本身喂回给意图判断。
+    ⚠️ ``0``/``None`` 都表示"不过滤"（TS 那边是 ``if (opts.beforeTs)`` 的真值判断，
+    同样的语义）—— 别写成 ``is not None``，那会让传 0 的调用方拿到一个空窗口。
+    """
     c = conn or db.get_conn()
-    rows = c.query(
+    sql = (
         """
         SELECT direction, peer_id, chat_id, msg_id, msg_type, content, from_wxid,
                peer_name, UNIX_TIMESTAMP(ts) AS at_sec
         FROM wpp_messages
         WHERE account_id = %s AND peer_kind = 'group'
           AND (chat_id = %s OR (chat_id IS NULL AND peer_id = %s))
-        ORDER BY ts DESC, id DESC LIMIT %s
-        """,
-        (account_id, group_id, group_id, _cap(limit, 1, 500)),
+        """
     )
+    params: list = [account_id, group_id, group_id]
+    if before_sec:
+        sql += "  AND ts < FROM_UNIXTIME(%s)\n"
+        params.append(int(before_sec))
+    sql += "ORDER BY ts DESC, id DESC LIMIT %s"
+    params.append(_cap(limit, 1, 500))
+    rows = c.query(sql, tuple(params))
     rows.reverse()
     return rows
 
@@ -683,10 +776,29 @@ def touch_session_state(
 
 
 def _json_or_none(value: Any) -> str | None:
+    """把一个值变成**合法 JSON 文本**（列类型是 JSON，不是 TEXT）。
+
+    ⚠️ 旧实现直接 ``text[:60000]``：截断点落在 JSON 中间 ⇒ MariaDB 的 JSON 列拒收，
+    整条审计写不进去；更隐蔽的是调用方传**非 JSON 的普通字符串**（很多 vendor 错误体
+    就是一行文本）时，原文塞进 JSON 列同样非法。两种都只表现为"审计少了一条"。
+    """
     if value is None:
         return None
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    return text[:60000]          # JSON 列上限远大于此；截断防超大 payload 撑爆
+    if isinstance(value, str):
+        text = value
+        try:
+            json.loads(text)
+        except (ValueError, TypeError):
+            text = json.dumps(text, ensure_ascii=False)
+    else:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    if len(text) > 60000:
+        # 截断**外壳**、保留合法 JSON：给 head + 原始长度，够定位问题又不撑爆列
+        text = json.dumps(
+            {"truncated": True, "length": len(text), "head": text[:59000]},
+            ensure_ascii=False,
+        )
+    return text
 
 
 def _cap(value: int, low: int, high: int) -> int:

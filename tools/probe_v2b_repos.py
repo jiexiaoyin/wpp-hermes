@@ -84,6 +84,17 @@ def main(argv: list[str]) -> int:
 
     sys.path.insert(0, str(Path(args.plugin).resolve()))
     from data import db, repo_hf, repo_messages   # noqa: E402
+    # ⚠️ ``repo_affection``（W2）**只能按包导入**：它读情绪那半要跨层取
+    # ``inbound.affection`` 的值对象（``MoodState`` / ``default_mood``），而上面那种
+    # **扁平**导入（``from data import …``）让 ``data.repo_affection`` 里的 ``..inbound``
+    # 落在"顶层包之上" ⇒ 实测 ``ImportError: attempted relative import beyond top-level
+    # package``。按包导入正是 .183 上 Hermes 装载本插件的真实形态（插件整个是一个包）。
+    # ⚠️ 代价：``plugin.data.db`` 与上面扁平导入的 ``data.db`` 是**两个模块实例**
+    #    （同一个库、两条连接）。所以下面每一处 ``repo_affection`` 调用都**显式传**
+    #    ``conn=``，用本文件这条连接，别让它自己去开会话。
+    sys.path.insert(0, str(Path(args.plugin).resolve().parent))
+    from plugin.data import repo_affection                    # noqa: E402
+    from plugin.inbound.affection import MoodState, default_mood   # noqa: E402
 
     print(f"● 目标 {db.describe()}（**必须**是 _test 库）")
     if not base.endswith("_test"):
@@ -97,7 +108,8 @@ def main(argv: list[str]) -> int:
                 "wpp_hf_group_profile", "wpp_hf_layer_stat", "wpp_messages",
                 "wpp_contacts", "wpp_chatrooms", "wpp_chatroom_members",
                 "wpp_jargon_terms", "wpp_redpackets", "wpp_api_calls",
-                "wpp_svrid_mapping", "wpp_sync_state", "wpp_session_state"):
+                "wpp_svrid_mapping", "wpp_sync_state", "wpp_session_state",
+                "wpp_affection"):
         conn.execute(f"DELETE FROM {tbl} WHERE account_id = %s", (ACCT,))
 
     now = int(time.time())
@@ -343,6 +355,61 @@ def main(argv: list[str]) -> int:
     pend = conn.query_one("SELECT pending_count FROM wpp_session_state "
                           "WHERE account_id = %s AND peer_id = %s", (ACCT, GROUP))
     _check(int(pend["pending_count"]) == 2, "会话状态 pending 累加", str(pend))
+
+    # ---------------------------------------------------------------- 好感度（W2）
+    # 一张表两种粒度：``user_id = ''`` 是**情绪行**，其余是**分值行**。这一层只有真库
+    # 能验的三件事：① ``PRIMARY KEY (account_id, group_id, user_id)`` 上的 upsert 真的
+    # 幂等（320 字符键宽在 InnoDB 上不会超限）；② ``DECIMAL(4,3)`` 的强度不被截成 0；
+    # ③ **过期情绪的写回落盘了** —— 只返回默认值不写，下次读又从头判一次过期。
+    print("⑩ 好感度 wpp_affection（W2）")
+    repo_affection.set_user_level(ACCT, GROUP, "wxid_a", 7, now - 10, conn=conn)
+    repo_affection.set_user_level(ACCT, GROUP, "wxid_a", 9, now - 5, conn=conn)
+    _check(repo_affection.get_user_level(ACCT, GROUP, "wxid_a", conn=conn) == 9,
+           "分值 upsert 幂等（同键写两次 → 1 行、取最新）")
+    repo_affection.set_user_level(ACCT, GROUP, "wxid_b", 3, now - 5, conn=conn)
+    _check(int(conn.query_one(
+        "SELECT COUNT(*) AS n FROM wpp_affection WHERE account_id = %s", (ACCT,))["n"]) == 2,
+        "两行分值（哨兵行还没写）")
+    # ★ 负分直接落到库里（``set_user_level`` 的调用方负责 clamp ⇒ 这里绕过它造样本）
+    conn.execute("UPDATE wpp_affection SET level = -5 "
+                 "WHERE account_id = %s AND group_id = %s AND user_id = 'wxid_b'",
+                 (ACCT, GROUP))
+    _check(repo_affection.get_group_total(ACCT, GROUP, conn=conn) == 9,
+           "★ 群总量把负分按 0 计（否则一个被骂惨的人能把总量拉下来 ⇔ 重分配永不触发）")
+
+    mood = MoodState("sad", 0.8, "有点难过", now + 100)
+    repo_affection.set_mood(ACCT, GROUP, mood, conn=conn)
+    got = repo_affection.get_mood(ACCT, GROUP, now, conn=conn)
+    _check(got.mood_type == "sad" and abs(got.intensity - 0.8) < 1e-6
+           and got.expires_at == now + 100,
+           "情绪读回（DECIMAL(4,3) 没把 0.8 截成 0.799/0）", str(got))
+
+    levels = repo_affection.list_user_levels(ACCT, GROUP, conn=conn)
+    _check([u for u, _ in levels] == ["wxid_a", "wxid_b"],
+           "★ 情绪行被哨兵挡在「按用户」查询之外（它 level=0，不挡就变成一个空 wxid 成员）",
+           str(levels))
+    _check(repo_affection.count_users(ACCT, GROUP, conn=conn) == 2, "按群人数 = 2（不含情绪行）")
+    _check(repo_affection.count_level_rows(ACCT, conn=conn) == 2,
+           "全账号分值行 = 2（状态页报的那个数）")
+    _check(repo_affection.count_groups_with_state(ACCT, conn=conn) == 1,
+           "有状态的群 = 1（情绪行也算「这个群有状态」）")
+    _check(all(isinstance(v, int) for _, v in levels), "分值读回来是 int 不是 Decimal")
+
+    # ★ 过期 → 重置为平静，且**必须写回库**
+    repo_affection.set_mood(ACCT, GROUP, MoodState("angry", 0.9, "很生气", now - 1), conn=conn)
+    fresh = repo_affection.get_mood(ACCT, GROUP, now, conn=conn)
+    row = conn.query_one("SELECT mood_type, intensity, expires_at FROM wpp_affection "
+                         "WHERE account_id = %s AND group_id = %s AND user_id = ''",
+                         (ACCT, GROUP))
+    _check(fresh.mood_type == "calm" and fresh.intensity == 0.5, "过期情绪读出来是平静", str(fresh))
+    _check(row["mood_type"] == "calm",
+           "★ 过期重置**落了盘**（只返回默认值不写 ⇒ 下次读又从头判一次过期）", str(row))
+
+    conn.execute("UPDATE wpp_affection SET mood_type = 'anger' "
+                 "WHERE account_id = %s AND group_id = %s AND user_id = ''", (ACCT, GROUP))
+    _check(repo_affection.get_mood(ACCT, GROUP, now, conn=conn).mood_type == "calm",
+           "★ 脏情绪值（手工改库/未来版本改枚举）按「没有」处理，不喂给 prompt")
+    _check(default_mood(now).expires_at == now, "默认情绪当场就算过期（蓝本 :413）")
 
     db.close()
     print()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从旧树的两张「厂商端点表」生成 ``plugin/tools/vendor_defs{,_extra}.py``。
+"""从旧树的两张「厂商端点表」生成 ``plugin/toolkit/vendor_defs{,_extra}.py``。
 
 ## 为什么要有这个生成器（消灭一类「静默丢工具」）
 
@@ -22,8 +22,8 @@
     /root/dev/wpp-hermes/plugin/tools_data_extra.py  （15 组 / 107 条）
 
 输出（本树，生成物，**禁止手改**）：
-    plugin/tools/vendor_defs.py
-    plugin/tools/vendor_defs_extra.py
+    plugin/toolkit/vendor_defs.py
+    plugin/toolkit/vendor_defs_extra.py
 
 ## 两种模式
 
@@ -73,7 +73,7 @@ from typing import Any, Iterable
 #: 本生成器所在仓库根（``<repo>/tools/gen_vendor_defs.py`` → ``<repo>``）
 REPO = Path(__file__).resolve().parent.parent
 #: 产物目录
-OUT_DIR = REPO / "plugin" / "tools"
+OUT_DIR = REPO / "plugin" / "toolkit"
 #: 旧树（冻结蓝本）。只读，绝不修改。
 LEGACY = Path("/root/dev/wpp-hermes/plugin")
 
@@ -285,7 +285,7 @@ def exec_product(text: str, tag: str) -> list[tuple[str, tuple[dict, ...]]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="生成 plugin/tools/vendor_defs{,_extra}.py")
+    ap = argparse.ArgumentParser(description="生成 plugin/toolkit/vendor_defs{,_extra}.py")
     ap.add_argument("--check", action="store_true", help="只比对不写盘；不一致退出码 1")
     args = ap.parse_args(argv)
 

@@ -7,5 +7,5 @@
 ⚠️ 本 ``__init__`` **故意不做 re-export**（零 import）：这里的模块一旦在包级被
 拉起，任何加载期问题都会顺着 ``platform/adapter.py`` → ``registration`` 变成
 "注册静默少一批东西"。调用方按需 ``from .llm.judge import call_judge``。
-（同 ``plugin/tools/__init__.py`` 的理由，见 :mod:`plugin.tools`。）
+（同 ``plugin/toolkit/__init__.py`` 的理由，见 :mod:`plugin.toolkit`。）
 """

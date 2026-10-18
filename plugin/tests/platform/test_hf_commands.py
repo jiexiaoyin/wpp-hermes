@@ -14,8 +14,10 @@
 3. **计数口径错**：``回复`` 必须含 ``closed``（收敛行也是发出去过的），
    ``拦下`` 必须读 ``by_suppressed_reason["repeat"]``。两者写错都**不报错**，
    只是数字骗人。⇒ §5 / §7。
-4. **写配置不说明"重启回退"** —— 本侧覆盖是内存态（``core/overrides``），
-   TS 是落盘；照抄 TS 文案就等于承诺一件做不到的事。⇒ §9 / §10 直接断言文案里有这句。
+4. **写配置的回复必须说真话** —— 2026-10-02（W6）之前本侧只改内存，
+   文案里必须写「重启后回退」；现在改成落盘 + 当次生效，文案跟着变成
+   「已写入账号配置，当次生效、重启不回退」，而 **判据从"文案里有这句话"换成
+   "账号文件真的变了"**（§9 / §10）—— 只断言文案等于把谎话钉进测试。
 5. **veto 后不删内存开窗** —— 随后有人引用那条 bot 消息会把 veto 覆盖成
    ``engaged=1``，**比不点这一下更糟**（人工负样本变正样本）。⇒ §11 断言
    ``forget_hf_open_window`` 被调到。
@@ -204,6 +206,49 @@ def test_status_caps_the_group_list_and_folds_the_rest(account, db):
     assert "…其余 2 群" in out
 
 
+# ---------------------------------------------- §2b DB 体检（D7，2026-10-02）
+#
+# 这一行的理由：``migration 未完成`` 的旧形态是**启动时一行 warn**，此后进程照跑、
+# ``SELECT 1`` 照通 ⇒ "schema 只建了一半"在运维面上与"一切正常"完全一样
+# （心流每条都写不进台账，而 0 条发言看起来就像群里没人说话）。
+
+
+@pytest.mark.parametrize("state,mark", [
+    ("ok", "✅"), ("drift", "⚠️"), ("failed", "❌"), ("unavailable", "❌"),
+])
+def test_status_prints_the_db_health_line(account, db, monkeypatch, state, mark):
+    from plugin.data import db as data_db
+
+    monkeypatch.setattr(data_db, "health",
+                        lambda: {"state": state, "ok": state == "ok", "detail": "细节X"})
+    out = H.handle(ACC, ["status"])
+    assert f"DB: {mark} {state}" in out, out
+    assert "细节X" in out
+
+
+def test_status_marks_drift_as_report_only(account, db, monkeypatch):
+    """漂移不阻断（R8 只报不改）—— 页面上必须写清，否则会被读成"该修没修"。"""
+    from plugin.data import db as data_db
+
+    monkeypatch.setattr(data_db, "health", lambda: {
+        "state": "drift", "ok": True, "detail": "2 处定义漂移（只报不改）: a.b"})
+    out = H.handle(ACC, ["status"])
+    assert "DB: ⚠️ drift（**只报不改**，R8）" in out
+
+
+def test_status_db_line_survives_a_broken_health_call(account, db, monkeypatch):
+    """读体检状态自己炸了 ⇒ 只降级这一行（诊断入口不许整页哑）。"""
+    from plugin.data import db as data_db
+
+    def _boom():
+        raise RuntimeError("health 炸了")
+
+    monkeypatch.setattr(data_db, "health", _boom)
+    out = H.handle(ACC, ["status"])
+    assert "DB: (读体检状态失败)" in out
+    assert "心流群白名单" in out, "别的段照常显示"
+
+
 # ===================================================== §3 已学阈值 / §4 上次真发言
 
 
@@ -372,44 +417,61 @@ def test_commands_module_dispatches_heartflow_to_hf_commands(account, db):
 
 def test_switch_still_works_through_the_new_dispatch(account, db):
     assert "已开启 ✅" in commands.handle_command(ACC, "/heartflow on")
-    assert OV.get_override(ACC)["heartflow"]["enabled"] is True
+    assert _account_file(account)["heartflow"]["enabled"] is True
     # 别名照旧（旧实现认 1/true/yes；删掉就是悄悄改行为）
     assert "已关闭 ✅" in commands.handle_command(ACC, "/heartflow true") or True
     assert "已开启 ✅" in commands.handle_command(ACC, "/heartflow 1")
-    # /affection 与 /jargon 的通用分支没被误伤
+    assert _account_file(account)["heartflow"]["enabled"] is True
+    # /affection 与 /jargon 的通用分支没被误伤（也跟着落盘）
     assert "已开启 ✅" in commands.handle_command(ACC, "/affection on")
+    assert _account_file(account)["affection"]["enabled"] is True
 
 
 # ===================================================== §9 threshold（写配置）
 
 
-def test_threshold_writes_an_override_and_warns_about_restart(account, db):
+def _account_file(account, account_id: str = ACC) -> dict:
+    """读回**账号文件**（W6 起命令写的是它）。"""
+    return json.loads((account / f"{account_id}.json").read_text(encoding="utf-8"))
+
+
+def test_threshold_writes_the_account_file(account, db):
+    """★ W6：写的是**账号文件**（不是内存覆盖）—— 判据在盘上，不在进程里。"""
     out = H.handle(ACC, ["threshold", "0.75"])
-    assert OV.get_override(ACC)["heartflow"]["replyThreshold"] == 0.75
+    assert _account_file(account)["heartflow"]["replyThreshold"] == 0.75
     assert "心流阈值已设为 0.75" in out
-    assert "内存覆盖" in out and "重启后回退" in out
+    # 承诺也必须跟着改：现在是落盘 + 当次生效
+    assert "当次生效" in out and "重启不回退" in out
+    assert "内存覆盖" not in out
 
 
 def test_threshold_keeps_sibling_keys(account, db):
-    """写覆盖的底稿必须是**现有 cfg**，否则一次改阈值会把白名单一起抹掉。"""
+    """写回只改**一个键**，同级键（白名单/开关）必须还在 —— 从 Account 反序列化回写就会丢。"""
     H.handle(ACC, ["threshold", "0.7"])
-    cfg = OV.get_override(ACC)["heartflow"]
+    cfg = _account_file(account)["heartflow"]
     assert cfg["whitelistGroups"] == ["g1@chatroom", "g2@chatroom"]
     assert cfg["enabled"] is True
 
 
+def test_threshold_does_not_invent_keys(account, db):
+    """账号文件里**没有**的键不许被写出来（"读原始 dict → 改一个键"的逆判据）。"""
+    before = set(_account_file(account))
+    H.handle(ACC, ["threshold", "0.7"])
+    assert set(_account_file(account)) == before
+
+
 @pytest.mark.parametrize("bad", ["", "abc", "-0.1", "1.5", "nan"])
 def test_threshold_rejects_out_of_range_and_missing(account, db, bad):
+    """非法参数**一个字节都不许写**（判据：文件里还是原值 0.6，不是"键不存在"）。"""
     out = H.handle(ACC, ["threshold", bad] if bad else ["threshold"])
     assert "用法: /heartflow threshold <0-1>" in out
-    assert "replyThreshold" not in OV.get_override(ACC).get("heartflow", {})
+    assert _account_file(account)["heartflow"]["replyThreshold"] == 0.6
 
 
 def test_threshold_missing_argument_is_not_zero(account, db):
     """``Number("")`` 在 JS 里是 0 —— 空参数被当成「阈值设为 0」就是灾难（闸全开）。"""
     H.handle(ACC, ["threshold"])
-    assert "heartflow" not in OV.get_override(ACC) or \
-        "replyThreshold" not in OV.get_override(ACC)["heartflow"]
+    assert _account_file(account)["heartflow"]["replyThreshold"] == 0.6
 
 
 def test_num_of_rejects_blank_bool_and_non_finite():
@@ -438,20 +500,47 @@ def test_group_list_shows_current_whitelist(account, db):
 def test_group_add_also_fills_the_group_allowlist(account, db):
     """只加心流白名单没加群白名单 ⇒ 那条链路收不到消息（心流永远不触发）。"""
     out = H.handle(ACC, ["group", "add", "g3@chatroom"])
-    assert OV.get_override(ACC)["heartflow"]["whitelistGroups"] == [
+    cfg = _account_file(account)
+    assert cfg["heartflow"]["whitelistGroups"] == [
         "g1@chatroom", "g2@chatroom", "g3@chatroom"]
-    assert "g3@chatroom" in OV.get_override(ACC)["groupAllowFrom"]
+    assert "g3@chatroom" in cfg["groupAllowFrom"]
     assert "add 自动补群聊白名单" in out
-    assert "重启后回退" in out
+    assert "当次生效" in out
 
 
 def test_group_del_does_not_touch_the_group_allowlist(account, db):
-    H.handle(ACC, ["group", "add", "g3@chatroom"])
-    OV.set_override(ACC, "groupAllowFrom", [])
-    H.handle(ACC, ["group", "del", "g1@chatroom"])
-    assert OV.get_override(ACC)["heartflow"]["whitelistGroups"] == [
-        "g2@chatroom", "g3@chatroom"]
-    assert OV.get_override(ACC)["groupAllowFrom"] == []
+    """``del`` 只删心流白名单，**不动**群聊白名单（TS ``updateHeartflowGroups``：只增不减）。
+
+    ⚠️ 判据要让被删的那个群**不在**群聊白名单里（夹具的 ``groupAllowFrom`` 只有 g1，
+    而心流白名单是 g2 ⇒ 删 g2 正合适）。删一个**已经在**群聊白名单里的群是看不见问题的：
+    那种情况下"该补哪些"是空集，补不补一个样 —— 而真正的坏形态恰恰是
+    「删一个心流群，反倒把它塞进群聊白名单」，老板的群白名单越删越多。
+    """
+    write_account(account, ACC, {**_account_file(account),
+                                 "groupAllowFrom": ["g1@chatroom"]})
+    H.handle(ACC, ["group", "del", "g2@chatroom"])
+    cfg = _account_file(account)
+    assert cfg["heartflow"]["whitelistGroups"] == ["g1@chatroom"]
+    assert cfg["groupAllowFrom"] == ["g1@chatroom"], \
+        "del 不该动群聊白名单（哪怕被删的群本来不在里面）"
+
+
+def test_a_failed_write_back_does_not_pretend_success(account, db, monkeypatch):
+    """★ 反向判据：**写不进去就必须说没生效**（真机上文件权限/磁盘满都会走到这）。
+
+    旧实现"写内存"永远不会失败，于是回复永远是 ✅；落盘之后失败成了常态可能之一，
+    照旧回 ✅ 就是新造一个谎话开关。
+    """
+    from plugin.core import account_store
+
+    def _boom(*a, **kw):
+        raise account_store.AccountWriteError("磁盘满")
+
+    monkeypatch.setattr(account_store, "write_account_key", _boom)
+    out = H.handle(ACC, ["threshold", "0.75"])
+    assert "❌" in out and "没有生效" in out and "磁盘满" in out
+    # 文件没被改动（写失败就是什么都没发生）
+    assert _account_file(account)["heartflow"]["replyThreshold"] == 0.6
 
 
 def test_group_without_action_returns_usage(account, db):

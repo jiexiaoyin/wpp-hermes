@@ -93,7 +93,8 @@ def set_sent(
     return c.execute(
         """
         UPDATE wpp_hf_ledger
-        SET status = 'sent', sent_at = %s, window_expires_at = %s, bot_msg_id = %s
+        SET status = 'sent', sent_at = %s, window_expires_at = %s, bot_msg_id = %s,
+            suppressed_reason = NULL
         WHERE account_id = %s AND inbound_msg_id = %s
           AND (status = 'judged' OR (status = 'suppressed' AND sent_at IS NULL))
         """,
@@ -337,11 +338,24 @@ def list_closed_since(
 def get_closed_recent(
     account_id: str, group_id: str, limit: int = 200, conn: db.Connection | None = None,
 ) -> list[dict]:
-    """该群最近已收敛样本（学习素材，按 ``closed_at`` 倒序）。"""
+    """该群最近已收敛样本（学习素材，按 ``closed_at`` 倒序）。
+
+    ``sent_at`` 是调阈侧的**必需列**（B9，2026-10-02）：样本横跨 7 天，而"该不该采信
+    这条弱信号"取决于**它自己那一小时**群本来有多热闹 —— 少了它就只剩"当前小时"一份
+    本底可用（v1.6.8 踩过的坑，见 ``observe.hf_engagement_summary``）。
+
+    v1.16.2 silence-exempt：补 ``judge_overall, effective_threshold`` —— 判定**当时**的快照
+    （不是事后重读阈值：那条样本被判定时生效的是哪个阈值，直接决定「它算不算高置信被无视」）。
+    ``DECIMAL`` 经 pymysql 回来是 ``Decimal``，这里统一收成 ``float``/``None``，
+    与 ``label.is_hf_silence_exempted`` 的「非数字 ⇒ 不豁免」口径对齐（``Decimal`` 不是
+    ``Number`` 语义，直接比较会绕开 `_finite` 守卫）。
+    """
     c = conn or db.get_conn()
     rows = c.query(
         """
-        SELECT engaged, closed_at, engage_signal FROM wpp_hf_ledger
+        SELECT engaged, closed_at, engage_signal, sent_at,
+               judge_overall, effective_threshold
+        FROM wpp_hf_ledger
         WHERE account_id = %s AND group_id = %s AND status = 'closed' AND engaged IS NOT NULL
         ORDER BY closed_at DESC LIMIT %s
         """,
@@ -350,6 +364,10 @@ def get_closed_recent(
     for r in rows:
         r["engaged"] = int(r.get("engaged") or 0)
         r["closed_at"] = None if r.get("closed_at") is None else int(r["closed_at"])
+        r["sent_at"] = None if r.get("sent_at") is None else int(r["sent_at"])
+        for col in ("judge_overall", "effective_threshold"):
+            v = r.get(col)
+            r[col] = None if v is None else float(v)
     return rows
 
 
@@ -378,8 +396,10 @@ def find_ledger_by_bot_msg(
     """按 bot 发出那条的 msg_id 反查台账（v1.6.8 起才有值）。"""
     c = conn or db.get_conn()
     return c.query_one(
+        # 同一 bot_msg_id 理论上唯一，但重放/多入口下可能有多行 —— 不带 ORDER BY 的
+        # LIMIT 1 由存储引擎决定返回哪行（"引用 bot 回复"会随机对不上号）。
         "SELECT id, group_id, inbound_msg_id FROM wpp_hf_ledger "
-        "WHERE account_id = %s AND bot_msg_id = %s LIMIT 1",
+        "WHERE account_id = %s AND bot_msg_id = %s ORDER BY id DESC LIMIT 1",
         (account_id, bot_msg_id),
     )
 
@@ -610,6 +630,109 @@ def upsert_profile(
         (account_id, group_id, _dumps(profile), _dumps(stats),
          int(sample_msgs), model, generated_at),
     )
+
+
+# --------------------------------------------------------------------- 图片配文
+
+
+def upsert_hf_image_caption(
+    account_id: str, url_hash: str, *, group_id: str | None = None,
+    url_sample: str | None = None, caption: str | None = None,
+    model: str | None = None, fail_delta: int = 0, created_at: int | None = None,
+    conn: db.Connection | None = None,
+) -> int:
+    """写一行图片配文（v1.16.0，对齐 TS ``upsertHfImageCaption``）。
+
+    语义与 TS **逐条一致**：
+    - ``caption`` / ``model`` / ``url_sample`` 只在**非 NULL** 时覆盖（``COALESCE(VALUES(...), 原值)``）
+      —— 失败那次传 ``caption=None`` 不许把之前配好的文字抹掉；
+    - ``fail_count = fail_count + VALUES(fail_count)`` —— 失败增量在 SQL 侧累加（成功=0，失败=1），
+      并发写不会丢计数。
+
+    ``url_hash`` 是主键（sha1 全局唯一）：同一张图跨群只配一次，第二次命中只是 NO-OP 覆盖。
+    """
+    c = conn or db.get_conn()
+    return c.execute(
+        """
+        INSERT INTO wpp_hf_image_caption
+          (url_hash, account_id, group_id, url_sample, caption, model, fail_count, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+          caption = COALESCE(VALUES(caption), caption),
+          model = COALESCE(VALUES(model), model),
+          url_sample = COALESCE(VALUES(url_sample), url_sample),
+          fail_count = fail_count + VALUES(fail_count)
+        """,
+        (url_hash, account_id, _trunc(group_id, 128), _trunc(url_sample, 255),
+         caption, _trunc(model, 64), max(0, int(fail_delta)), created_at),
+    )
+
+
+def get_hf_captions_by_hashes(
+    account_id: str, url_hashes: Sequence[str], conn: db.Connection | None = None,
+) -> list[dict]:
+    """批量查已试配文行（``url_hash / caption / fail_count``），供"跳过已配/止损"判定。
+
+    上限 1000 条占位符 —— 与 TS 同（单次画像最多 150 条消息、每条 ≤4 图，1000 够用且不炸
+    MariaDB 的 ``max_allowed_packet``）。空列表直接返回，不发 SQL。
+    """
+    hashes = [h for h in (url_hashes or []) if h][:1000]
+    if not hashes:
+        return []
+    c = conn or db.get_conn()
+    placeholders = ",".join(["%s"] * len(hashes))
+    rows = c.query(
+        f"SELECT url_hash, caption, fail_count FROM wpp_hf_image_caption "
+        f"WHERE account_id = %s AND url_hash IN ({placeholders})",
+        (account_id, *hashes),
+    )
+    out: list[dict] = []
+    for r in rows:
+        cap = r.get("caption")
+        out.append({
+            "url_hash": str(r.get("url_hash") or ""),
+            "caption": None if cap is None else str(cap),
+            "fail_count": int(r.get("fail_count") or 0),
+        })
+    return out
+
+
+def list_hf_image_msgs(
+    account_id: str, group_ids: Sequence[str], since_sec: int, limit: int = 150,
+    conn: db.Connection | None = None,
+) -> list[dict]:
+    """取近 ``since_sec`` 以来的图片入站消息（``id / group_id / content``，按 id 倒序）。
+
+    对齐 TS ``listHfImageMsgs``：
+    - ``msg_type IN ('3','image')`` —— 库里两种形态都有（'3'=微信原始类型，'image'=解析后标记）；
+    - 群归属用 ``COALESCE(NULLIF(chat_id,''), peer_id)``（照 v1.9.0 ``listHfBotMsgShare`` 先例）；
+    - ``LIMIT`` 夹在 1..500（TS 同）。
+    """
+    c = conn or db.get_conn()
+    safe_limit = _cap(limit if limit is not None else 100, 1, 500)
+    where = ["account_id = %s", "direction = 'inbound'",
+             "msg_type IN ('3','image')", "ts >= FROM_UNIXTIME(%s)"]
+    params: list[Any] = [account_id, since_sec]
+    gids = [g for g in (group_ids or []) if g]
+    if gids:
+        where.append(
+            f"COALESCE(NULLIF(chat_id, ''), peer_id) IN ({','.join(['%s'] * len(gids))})")
+        params.extend(gids)
+    rows = c.query(
+        f"SELECT id, COALESCE(NULLIF(chat_id, ''), peer_id) AS group_id, content "
+        f"FROM wpp_messages WHERE {' AND '.join(where)} "
+        f"ORDER BY id DESC LIMIT {safe_limit}",
+        tuple(params),
+    )
+    out: list[dict] = []
+    for r in rows:
+        content = r.get("content")
+        out.append({
+            "id": int(r.get("id") or 0),
+            "group_id": str(r.get("group_id") or ""),
+            "content": None if content is None else str(content),
+        })
+    return out
 
 
 # --------------------------------------------------------------------------- 分层统计

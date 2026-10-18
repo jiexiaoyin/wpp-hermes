@@ -122,6 +122,11 @@ HF_LEARNING_DEFAULTS: dict[str, Any] = {
     "recoverUnreachable": True,
     "reachabilityWindowSec": 7 * 86400,
     "reachabilityMinSample": 20,
+    # v1.16.2 silence-exempt 边距（见 :func:`label.is_hf_silence_exempted`）：
+    #   0.10 不是拍的 —— 生产实排（10-16/17 全员群 18 条 closed）：margin 分布
+    #   {0.005×2, 0.055×2, 0.14+×14}，0.10 正落在「擦边负样本」与「高置信被无视」
+    #   之间的空档 —— 豁免 14/18 条真误伤，4 条擦边仍计负。**≤0 = 关闭豁免退回旧行为**。
+    "silenceExemptMarginMin": 0.1,
 }
 
 #: 账号级阈值回落基线（``cfg.replyThreshold`` 的缺省）。
@@ -224,6 +229,10 @@ def resolve_hf_learning(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
                                          D["reachabilityWindowSec"], lo=1),
         "reachabilityMinSample": _int_or(l.get("reachabilityMinSample"),
                                          D["reachabilityMinSample"], lo=1),
+        # 边距是 0–1 之差，但**不做夹紧**：TS 保留任意有限值（≤0 = 关，>1 = 永不豁免），
+        # 夹紧会让「配成 2 想彻底关掉」变成「配成 1 偶尔豁免」—— 又是一次静默改语义。
+        "silenceExemptMarginMin": _num_or(l.get("silenceExemptMarginMin"),
+                                          D["silenceExemptMarginMin"]),
     }
 
 
@@ -864,18 +873,49 @@ def persist_hf_send_outcome(
 
     ⚠️ **INVARIANT I5**：占位/被抑制的消息**不得**走到开窗与预算那两行
     （见 :func:`classify_hf_send` 与本函数的 ``outcome == sent`` 分支）。
+
+    ⚠️ B4（2026-10-02 修）：**账本与内存三件套分成互不连累的几段**。旧写法把这几条
+    语句塞进**同一个** ``try``，两个方向都会坏：
+
+    ① ``set_sent`` 一炸（DB 抖动 / 连接断了），后面三条**全不执行** —— 消息已经发到
+       群里、撤不回来了，却不占额度、不进复读历史、观察窗也不开 ⇒ 学习闭环少一个
+       样本，而台账上那行停在 ``judged`` 等 sweep 收敛成"没人接话"（负样本）。
+    ② 反过来：账本那次写**已经提交**了，内存里某一步炸掉却让整个分支退出 ⇒ 两边
+       **永久不一致**（库里说发了，内存里像没发过）。
+
+    另有一处**静默**：``set_sent`` 的 guard 只在 ``judged``（或从未发过的
+    ``suppressed``）上生效，**受影响行数为 0 时不抛异常**。``persist_hf_judged``
+    那次 INSERT 没落上时就是这种局面 —— 消息发出去、账本里零痕迹、一行日志都没有。
+    故这里把行数 0 也当失败处理（只 warn，不抛）。
     """
     from ...data import repo_hf              # 延迟导入，同上
 
     outcome = classify_hf_send(result)
-    try:
-        if outcome == HF_SEND_OUTCOME_SENT:
-            metrics = _metrics()             # 延迟导入：埋点也要走 F5 的加载期纪律
-            metrics.inc_hf_sent()
-            raw_id = _send_field(result, "msg_id")
-            bot_msg_id = raw_id if raw_id else None
-            repo_hf.set_sent(account_id, inbound_msg_id, at_sec, at_sec + int(observe_sec),
-                             bot_msg_id)
+    if outcome == HF_SEND_OUTCOME_SENT:
+        metrics = _metrics()                 # 延迟导入：埋点也要走 F5 的加载期纪律
+        metrics.inc_hf_sent()
+        raw_id = _send_field(result, "msg_id")
+        bot_msg_id = raw_id if raw_id else None
+
+        # ① 账本（DB）：失败只 warn，**不 return** —— 预算与复读历史活在内存里，
+        #    账本坏了不该把它们的记性也一起抹掉（见 docstring B4 ①）。
+        with_window = True
+        try:
+            if not repo_hf.set_sent(account_id, inbound_msg_id, at_sec,
+                                    at_sec + int(observe_sec), bot_msg_id):
+                with_window = False
+                log.warning("[WPP HF] 账本 set_sent 没匹配到行（受影响行数 0，多半是 "
+                            "judged 行缺失）⇒ 不开观察窗，仅记预算与复读历史 "
+                            "(non-fatal): account=%s msgId=%s", account_id, inbound_msg_id)
+        except Exception as exc:  # noqa: BLE001 —— 见 docstring B4 ①
+            with_window = False
+            log.warning("[WPP HF] 账本 set_sent 失败，本条只记预算与复读历史 "
+                        "(non-fatal): account=%s msgId=%s: %s",
+                        account_id, inbound_msg_id, exc)
+
+        # ② 观察窗（内存）：**只在账本真进了 ``sent`` 时开**。窗的唯一消费者
+        #    ``repo_hf.mark_engaged`` 要求 ``status='sent'``，账本没写成时开窗纯属占内存。
+        if with_window:
             k = _key(account_id, group_id)
             prev = _open_windows.get(k)
             # v1.10.0：若覆盖掉一个还没收敛的旧窗，说明该群在 observeWindowSec 内发了第二条
@@ -888,12 +928,25 @@ def persist_hf_send_outcome(
             _open_windows[k] = HfOpenWindow(
                 inbound_msg_id=inbound_msg_id, bot_msg_id=bot_msg_id, sent_at_sec=int(at_sec),
                 observe_window_sec=int(observe_sec), label_window_sec=int(label_window_sec))
+
+        # ③ 预算：**与 ①② 各自独立** —— 它和观察窗无关，必须无论如何都记上
+        #    （漏记 = 给"重启/抖动刷额度"开后门）。
+        try:
             budget.note_reply_sent(account_id, group_id, at_sec)
-            if text:
+        except Exception as exc:  # noqa: BLE001 —— 同上
+            log.warning("[WPP HF] 预算记账失败 (non-fatal): %s", exc)
+
+        # ④ 复读历史：同上，独立一段
+        if text:
+            try:
                 dedupe.note_recent_reply(account_id, group_id, text, at_sec,
                                          dedupe_cfg or dedupe.resolve_dedupe_cfg(None))
-            return
-        if outcome == HF_SEND_OUTCOME_SUPPRESSED:
+            except Exception as exc:  # noqa: BLE001 —— 同上
+                log.warning("[WPP HF] 复读历史记账失败 (non-fatal): %s", exc)
+        return
+
+    if outcome == HF_SEND_OUTCOME_SUPPRESSED:
+        try:
             msg_id = _send_field(result, "msg_id")
             if msg_id == "ack-template-dropped":
                 reason = "ack-template"
@@ -906,9 +959,9 @@ def persist_hf_send_outcome(
             else:
                 reason = "unknown"
             repo_hf.set_suppressed(account_id, inbound_msg_id, reason, at_sec)
-        # pending: 不动（留给 sweep 的呆账收敛）
-    except Exception as exc:  # noqa: BLE001 —— 记账失败不该影响已经发出去的那条
-        log.warning("[WPP HF] ledger send outcome failed (non-fatal): %s", exc)
+        except Exception as exc:  # noqa: BLE001 —— 记账失败不该影响已经发出去的那条
+            log.warning("[WPP HF] ledger send outcome failed (non-fatal): %s", exc)
+    # pending: 不动（留给 sweep 的呆账收敛）
 
 
 def mark_hf_group_engaged(
@@ -1118,9 +1171,12 @@ async def run_sweep(adapter: Any, account_id: str, now_sec: int | None = None) -
 
     # 8) 自适应调阈
     try:
-        # 反事实基线：该群**当前小时段**本来有多热闹（近 14 天同小时段的入站人类消息数）。
-        #   没数据的群 = 该时段本来没人说话 ⇒ ambientP=0 ⇒ 弱信号/沉默都算有效信息。
-        ambient = load_ambient_by_group(account_id, ts, L["labelWindowSec"])
+        # 反事实基线：**每个「群|小时」**本来有多热闹（近 14 天同小时段的入站人类消息数）。
+        #   没数据的时段 = 那时段本来没人说话 ⇒ ambientP=0 ⇒ 弱信号/沉默都算有效信息。
+        #   ⚠️ B9（2026-10-02 修）：表是**全时段**的，下面按每条样本自己的小时去查 ——
+        #   旧写法只留"当前小时"一份值套给全部样本，7 天窗口里夜里那批会被整片判成
+        #   "不可采信"（那时段群本来就冷清），阈值只被白天那批推着走。
+        ambient = load_ambient_by_group_hour(account_id, ts, L["labelWindowSec"])
 
         # 近 7 天有已收敛样本的群 → 逐群滚窗统计 → 判定 →（过冷却才）应用
         since_sec = ts - 7 * 86400
@@ -1131,18 +1187,43 @@ async def run_sweep(adapter: Any, account_id: str, now_sec: int | None = None) -
             samples = repo_hf.get_closed_recent(account_id, group_id, L["sampleWindow"])
             if not samples:
                 continue
-            ambient_p = ambient.get(group_id, 0.0)
             # v1.6.8：只采信"可鉴别"样本 —— 强信号（引用/@/负词）恒采信；弱信号与沉默
-            #   仅在该时段本来不热闹时采信。v1.6.8 之前的行 engage_signal 为 NULL ⇒
-            #   全部排除（= 旧错误标签作废；上线后要重新攒够 minSample 条才会再调阈）。
-            usable = [s for s in samples
-                      if label.is_hf_sample_informative(
-                          label.as_hf_engage_signal(s.get("engage_signal")),
-                          ambient_p, L["ambientMax"])]
+            #   仅在**该样本属于的那个时段**本来不热闹时采信。v1.6.8 之前的行
+            #   engage_signal 为 NULL ⇒ 全部排除（= 旧错误标签作废；上线后要重新攒够
+            #   minSample 条才会再调阈）。
+            #   ``sent_at`` 缺/脏 ⇒ 不采信（与 ``observe.hf_engagement_summary`` 同一条
+            #   守卫：查不到它属于哪个时段，就没法判断这条弱信号算不算信息）。
+            # v1.16.2 silence-exempt：高置信回复被无视 ≠ 不欢迎 —— 豁免的沉默样本不进统计
+            #   （既不计负也不计正）；negative/veto 永不豁免，擦边回复被无视仍计负 ——
+            #   9-26 治刷屏的收敛力不动。
+            usable: list[Mapping[str, Any]] = []
+            ambient_sum = 0.0
+            exempted = 0
+            for s in samples:
+                at = s.get("sent_at")
+                if isinstance(at, bool) or not isinstance(at, (int, float)) or at <= 0:
+                    continue
+                ambient_p = ambient.get(
+                    f"{group_id}|{budget.hf_local_hour(int(at))}", 0.0)
+                signal = label.as_hf_engage_signal(s.get("engage_signal"))
+                if not label.is_hf_sample_informative(signal, ambient_p, L["ambientMax"]):
+                    continue
+                if L["silenceExemptMarginMin"] > 0 and label.is_hf_silence_exempted(
+                        signal, s.get("engaged"), s.get("judge_overall"),
+                        s.get("effective_threshold"), L["silenceExemptMarginMin"]):
+                    exempted += 1
+                    continue
+                usable.append(s)
+                ambient_sum += ambient_p
             if not usable:
-                log.debug("[WPP HF] no informative sample: group=%s window=%d ambientP=%s",
-                          group_id, len(samples), _fixed(ambient_p, 3))
+                # （Py 侧没有 TS 那份「群级当前小时本底」单值 —— B9 起按样本自己那一小时取，
+                #   所以这里不报 ambientP：报 0 会假装知道一个并不存在的数。）
+                log.debug("[WPP HF] no informative sample: group=%s window=%d exempt=%d",
+                          group_id, len(samples), exempted)
                 continue
+            # 审计里报的是**可采信样本的本底均值**（与 ``/heartflow report`` 的
+            # ``HfEngagementSummary.ambient_p`` 同口径：那份也是逐样本累加后取均值）。
+            ambient_p = ambient_sum / len(usable)
             engaged = sum(1 for s in usable if s.get("engaged"))
             st = repo_hf.get_group_state(account_id, group_id)
             base_threshold = resolve_reply_threshold(cfg)
@@ -1167,8 +1248,9 @@ async def run_sweep(adapter: Any, account_id: str, now_sec: int | None = None) -
                 continue
             learned_prev = None if st is None else st.get("learned_threshold")
             old_effective = base_threshold if learned_prev is None else float(learned_prev)
-            detail = (f"{res.reason} skipped={len(samples) - len(usable)} "
-                      f"ambientP={_fixed(ambient_p, 3)} sig={signal_histogram(usable)}")
+            detail = (f"{res.reason} skipped={len(samples) - len(usable) - exempted} "
+                      f"exempt={exempted} ambientP={_fixed(ambient_p, 3)} "
+                      f"sig={signal_histogram(usable)}")
             apply_hf_threshold_change(account_id, group_id, old_effective, res.new_threshold,
                                       detail, len(usable), engaged, ts)
             log.info("[WPP HF] threshold adapted: group=%s %.2f → %.2f (%s, %s)",
@@ -1200,9 +1282,17 @@ def _cfg_for(adapter: Any, account_id: str) -> Mapping[str, Any]:
     return raw if isinstance(raw, Mapping) else {}
 
 
-def load_ambient_by_group(account_id: str, now_sec: int,
-                          label_window_sec: int) -> dict[str, float]:
-    """该群在**当前小时段**的本底接话概率（近 14 天同小时段入站人类消息数 → 泊松近似）。
+def load_ambient_by_group_hour(account_id: str, now_sec: int,
+                               label_window_sec: int) -> dict[str, float]:
+    """**每个 ``群|小时``** 的本底接话概率（近 14 天同小时段入站人类消息数 → 泊松近似）。
+
+    键 = ``f"{group_id}|{hour}"``，**不筛当前小时**（B9，2026-10-02 修）。调用方用
+    **每条样本自己那一小时**去查表 —— 样本横跨 7 天，白天/夜里都可能有，拿"当前小时"
+    一份值去过滤全部样本，会把夜里那批（那时群本来就冷清 ⇒ ``ambientP`` 高）整片判成
+    "不可采信"，于是样本 n 永远对不上，而阈值只被白天那批推着走。这正是 v1.6.8 踩过的
+    坑（单一 ambient 口径）—— ``observe.hf_engagement_summary`` 早已按"逐样本查表"
+    实现，这里是与它**同源**的取数入口（两处口径必须一致，否则同一批样本在报表里
+    采信、在调阈这里不采信）。
 
     一次聚合查询覆盖所有群，不按群逐个查（sweep 每 5 分钟一次，别把 DB 打热）。
 
@@ -1218,18 +1308,15 @@ def load_ambient_by_group(account_id: str, now_sec: int,
     try:
         all_p = layer.ambient_p_from_hour_counts(
             layer.load_hf_group_hour_counts(account_id, now_sec), label_window_sec)
-        cur_hour = budget.hf_local_hour(now_sec)
         for k, p in all_p.items():
             i = k.rfind("|")
             if i < 0:
                 continue                     # 脏键（不含 "|"）进不了任何小时段
             try:
-                hour = int(k[i + 1:])
+                int(k[i + 1:])
             except ValueError:
                 continue                     # 与 JS ``Number("x") → NaN ≠ hour`` 同义
-            if hour != cur_hour:
-                continue
-            out[k[:i]] = p
+            out[k] = p
     except Exception as exc:  # noqa: BLE001 —— 降级路径见 docstring
         log.warning("[WPP HF] ambient baseline query failed (弱信号将不过滤): %s", exc)
     return out
@@ -1450,7 +1537,7 @@ __all__ = [
     "hf_layer_step",
     "hf_reachability_cap",
     "learned_threshold_count",
-    "load_ambient_by_group",
+    "load_ambient_by_group_hour",
     "load_hf_budget_seed",
     "load_learned_thresholds",
     "mark_hf_group_engaged",

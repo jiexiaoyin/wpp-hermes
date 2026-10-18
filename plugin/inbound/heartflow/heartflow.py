@@ -38,9 +38,13 @@ TS 的 deliver 回调（``dispatch/dispatcher.ts``）天然知道"这条回复�
 **send 不知道自己在替哪条心流判定说话**。
 
 ⇒ 用一张极小的**待交付登记表**把两头接上：判定通过时登记 ``(账号, 群) → 入站 msgId``
-（:func:`begin_pending_send`，TTL 见 :data:`HF_PENDING_SEND_TTL_SEC`），
-``adapter.send`` 发之前问 :func:`pre_send`（重复闸）、发之后报 :func:`note_sent`
-（把 ``platform.SendResult`` **显式翻译**成 :class:`learn.HfSendResult`）。
+（:func:`begin_pending_send`），``adapter.send`` 发之前问 :func:`pre_send`（重复闸）、
+发之后报 :func:`note_sent`（把 ``platform.SendResult`` **显式翻译**成
+:class:`learn.HfSendResult`）。
+
+登记有**两个时钟**（B6，2026-10-02）：**拦人**用 :data:`HF_PENDING_SEND_TTL_SEC`（从紧，
+拦错了是消息发不出去），**归账**用 :data:`HF_PENDING_SEND_ABSORB_SEC`（从宽，归错了
+只是一条样本标签错位）—— 混成一个数的后果见 :func:`take_pending_send`。
 
 ⚠️ 翻译这件事必须显式做：``learn.classify_hf_send`` 只认 ``ok``/``msg_id``，直接塞
 ``platform.SendResult(success=…, message_id=…)`` 会被判 **pending**（= 什么都不改）——
@@ -72,6 +76,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from ..persist import pick_new_msg_id
 from . import budget, dedupe, label
 from . import learn as L
 from . import observe, profile
@@ -147,12 +152,20 @@ HF_JUDGE_SYSTEM_PROMPT = (
 #: 而"重试没生效"的外观是"模型偶尔坏 JSON"，看不出是代码没改到。
 HF_JSON_REMINDER = "**重要！！！请严格按照以下JSON格式回复，不要添加任何其他内容：**"
 
-#: 待交付登记表的存活时长（秒）。
+#: 待交付登记的**拦人**时长（秒）—— 只有它管 :func:`pre_send` 那道重复内容闸。
 #:
 #: judge 通过 → agent 生成回复 → ``adapter.send``，中间隔着主 LLM 的一次完整生成
 #: （长回复 + 工具调用可能十几秒）。120s 足够覆盖，又短到"agent 挂了 ⇒ 登记表过期"
 #: 不会把下一条无关发言误算成心流交付。
 HF_PENDING_SEND_TTL_SEC = 120
+
+#: 待交付登记的**归账**时长（秒）—— 只影响 :func:`note_sent` 认不认这条登记（B6，2026-10-02）。
+#:
+#: 为什么两个时钟（细节见 :func:`take_pending_send`）：拦人拦错了的代价是**消息发不出去**
+#: （静默丢），归账归错了的代价是**一条样本标签错位** —— 前者的止损要快，后者可以宽。
+#: 取 600s 与 ``observeWindowSec`` 同量级：交付尝试比一个观察窗还旧时，把它算进这条
+#: 台账已经没有意义（窗都该关完了）。
+HF_PENDING_SEND_ABSORB_SEC = 600
 
 
 def _num_or(v: Any, fallback: float, *, lo: float | None = None,
@@ -243,11 +256,16 @@ def resolve_hf_effective_budget(
     base = budget.resolve_budget(hf_cfg)
     # 画像建议只能让约束**更紧**；静默段默认**不**并入（老板 2026-09-26：「静默段默认关」，
     # 一次幻觉就能让某个群整天无响应 ⇒ 要开须显式 applyQuietHours=true）。
-    base = budget.tighten_budget(
-        base,
-        profile.get_hf_profile_budget(account_id, group_id),
-        apply_quiet_hours=profile.resolve_hf_profile_cfg(hf_cfg).apply_quiet_hours,
-    )
+    apply_quiet = profile.resolve_hf_profile_cfg(hf_cfg).apply_quiet_hours
+    suggestion = profile.get_hf_profile_budget(account_id, group_id)
+    if apply_quiet:
+        quiet = profile.get_hf_profile_quiet_hours(account_id, group_id)
+        if quiet:
+            # ``get_hf_profile_budget`` 按口径不含静默段（见其 docstring），所以显式
+            # 开关这条路必须自己把缓存里的原始建议并进来。2026-10-18 前漏了这一步：
+            # applyQuietHours=true 却永远拿到空段 —— 开关是个摆设。
+            suggestion = {**(suggestion or {}), "quietHours": [list(r) for r in quiet]}
+    base = budget.tighten_budget(base, suggestion, apply_quiet_hours=apply_quiet)
     share = observe.get_hf_share_tighten(account_id, group_id, base, hf_cfg, ts)
     return budget.tighten_budget(base, share.as_dict()) if share is not None else base
 
@@ -677,6 +695,24 @@ def parse_response(text: str, cfg: Mapping[str, Any] | None) -> HfJudgeResult | 
     )
 
 
+def resolve_business_context(chat_id: str, cfg: Mapping[str, Any] | None) -> str:
+    """该群 judge 用的业务背景：``groupBusinessContexts[群ID]`` 优先，否则账号级。
+
+    账号级 ``businessContext`` 是 2026-10-16 为**全员群**写的那段（晒单/喜报口径），
+    但它拼在**每个群**的 judge system prompt 最前面 —— 移动业务对接群、管理群读到的
+    是错的语境。2026-10-18 起按群覆盖：群级值非空白 ⇒ 用群级；否则回落到账号级
+    （空串/空白**不**当作"本群无背景"，避免一个笔误把背景整段丢掉）。
+    """
+    c = cfg or {}
+    per = c.get("groupBusinessContexts")
+    if isinstance(per, Mapping):
+        value = per.get(chat_id)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    value = c.get("businessContext")
+    return value.strip() if isinstance(value, str) else ""
+
+
 async def judge_heartflow(inp: HfJudgeInput, cfg: Mapping[str, Any] | None,
                           creds: Any = None) -> HfJudgeResult | None:
     """调小模型做 5 维打分。任何失败（无 key / 超时 / HTTP / 坏 JSON）⇒ ``None``（降级不回复）。
@@ -692,7 +728,7 @@ async def judge_heartflow(inp: HfJudgeInput, cfg: Mapping[str, Any] | None,
 
     creds = creds if creds is not None else judge_mod.resolve_judge_creds()
     if not getattr(creds, "api_key", ""):
-        log.warning("[WPP HF] missing judge API key (DEEPSEEK_API_KEY / MINIMAX_API_KEY), "
+        log.warning("[WPP HF] missing judge API key (JUDGE_API_KEY / MINIMAX_API_KEY), "
                     "skip heartflow judge")
         return None
 
@@ -711,9 +747,10 @@ async def judge_heartflow(inp: HfJudgeInput, cfg: Mapping[str, Any] | None,
     # **逐字节一致**（INVARIANT I9，由 llm/judge.py 保证：无图时 content 保持纯字符串）。
     vision = resolve_hf_vision_cfg(cfg)
     images = extract_hf_image_urls(inp.content, vision["maxImages"]) if vision["enabled"] else []
-    business = (cfg or {}).get("businessContext")
-    system_prompt = ((business + "\n\n") if isinstance(business, str) and business else ""
-                     ) + HF_JUDGE_SYSTEM_PROMPT
+    # 业务背景按群取：``groupBusinessContexts[chat_id]`` 优先，缺省才是账号级
+    # （账号级那段写的是全员群的晒单/喜报口径，见 :func:`resolve_business_context`）。
+    business = resolve_business_context(inp.chat_id, cfg)
+    system_prompt = ((business + "\n\n") if business else "") + HF_JUDGE_SYSTEM_PROMPT
 
     last_err = ""
     for attempt in range(max_retries + 1):
@@ -837,6 +874,9 @@ def note_group_message(account_id: str, group_id: str, *, sender_name: str, cont
     if is_bot:
         # ⚠️ bot 自己不算接话、也不记"有人类消息"（否则预算的沉默时长指标被自己刷新）。
         return
+    if mentions_bot or quotes_bot:
+        # 有人在跟机器人说话 —— 若此刻有在心流登记，给它打上"随后的出站不是它"（B3）。
+        note_bot_mention(account_id, group_id)
     ts = int(now_sec if now_sec is not None else time.time())
     if is_hf_group_allowed(group_id, cfg):
         budget.note_human_message(account_id, group_id, ts)
@@ -881,6 +921,9 @@ class HfPendingSend:
     inbound_msg_id: str
     at_sec: int
     expires_at_sec: int
+    #: 登记**之后**该群里有人 @ / 引用机器人（B3）。置上 ⇒ 随后的出站回的是**那一条**，
+    #: 不是这条心流插话（见 :func:`note_bot_mention`）。
+    newer_mention_at_sec: int | None = None
 
 
 @dataclass(frozen=True)
@@ -914,17 +957,59 @@ def begin_pending_send(account_id: str, group_id: str, inbound_msg_id: str,
             at_sec=ts, expires_at_sec=ts + HF_PENDING_SEND_TTL_SEC)
 
 
+def note_bot_mention(account_id: str, group_id: str) -> None:
+    """旁路：该群有人 **@ / 引用机器人** —— 给登记中的那条打上"这批出站不是它"的标记。
+
+    B3（2026-10-02 修）。登记只按 ``(账号, 群)`` 单槽 + 时长近似归属 —— 框架**不给**
+    回执关联 id：WeChat 平台上 ``reply_to`` 与 thread metadata 恒为空（Hermes
+    ``gateway/run_turn.py`` 的 ``_progress_reply_to`` / ``_thread_metadata_for_progress``
+    只对 FEISHU / MATTERMOST / BUZZ / relay 取值），所以"这条出站是不是刚才那条心流
+    插话"只能靠时间近似。少了这道判据，老板 @ 机器人之后的那条正常回复会被当成心流
+    插话去过重复内容闸，命中就**静默丢弃**（还返回 ``success=True``）——
+    表现正是"群里 @ 它，它不回，日志一句错都没有"。
+
+    判据故意是"这之后有人 @/引用过"而**不是**"有人说过话"：闲聊不该让重复闸失效 ——
+    老板 2026-09-26 拍板的去重，治的就是闲聊群里"换个日期的同一段话"。
+
+    时序：适配器 ``_handle_one`` 的 ④a 旁路观测（本函数的调用点）排在 ⑤ 交给 runner
+    **之前**，而 ``begin_pending_send`` 在 ④a 之后 —— 于是"这条 @ 自己触发了心流接管"
+    时，标记落在**旧**登记上，随即被那次 ``begin_pending_send`` 整条替换 ⇒ 不会自我否决。
+    """
+    key = _pending_key(account_id, group_id)
+    with _state_lock:
+        p = _pending.get(key)
+        if p is None or p.newer_mention_at_sec is not None:
+            return
+        _pending[key] = HfPendingSend(
+            account_id=p.account_id, group_id=p.group_id, inbound_msg_id=p.inbound_msg_id,
+            at_sec=p.at_sec, expires_at_sec=p.expires_at_sec,
+            newer_mention_at_sec=int(time.time()))
+
+
 def take_pending_send(account_id: str, group_id: str,
-                      now_sec: int | None = None) -> HfPendingSend | None:
-    """取出并**删除**登记（过期 ⇒ 丢弃并返回 ``None``）。"""
+                      now_sec: int | None = None,
+                      *, ttl_sec: int | None = None) -> HfPendingSend | None:
+    """取出并**删除**登记（过期 ⇒ 丢弃并返回 ``None``）。
+
+    ``ttl_sec`` 是**判过期的那个时钟**，两条调用路各有各的（B6，2026-10-02 修）：
+
+    * ``pre_send`` 用缺省 :data:`HF_PENDING_SEND_TTL_SEC`（120s）—— 这是**拦人**的闸。
+      拦错了的代价是消息发不出去（静默丢），所以从紧。
+    * ``note_sent`` 传 :data:`HF_PENDING_SEND_ABSORB_SEC`（600s）—— 这是**归账**。
+      旧写法两处共用 120s ⇒ 慢模型（agent 一次生成 >120s，工具调用多时会）发出的
+      那条真回复，``pre_send`` 已按"不是心流交付"放行、``note_sent`` 也跟着当没这回事
+      ⇒ 不占预算、不开观察窗、不进复读历史，台账那行停在 ``judged`` 被 sweep 收敛成
+      "没人接话"（负样本）。**消息明明发出去了**。
+    """
     ts = int(now_sec if now_sec is not None else time.time())
     with _state_lock:
         p = _pending.pop(_pending_key(account_id, group_id), None)
     if p is None:
         return None
-    if ts > p.expires_at_sec:
-        log.debug("[WPP HF] pending send 过期（%ds）⇒ 不记账: account=%s group=%s",
-                  ts - p.at_sec, account_id, group_id)
+    ttl = int(HF_PENDING_SEND_TTL_SEC if ttl_sec is None else ttl_sec)
+    if ts > p.at_sec + ttl:
+        log.debug("[WPP HF] pending send 过期（%ds > %ds）⇒ 不记账: account=%s group=%s",
+                  ts - p.at_sec, ttl, account_id, group_id)
         return None
     return p
 
@@ -949,6 +1034,27 @@ def pre_send(account_id: str, group_id: str, text: str,
     with _state_lock:
         p = _pending.get(_pending_key(account_id, group_id))
     if p is None:
+        return None
+    # ★ B2（2026-10-02 修）：**过期登记 ≠ 心流交付**。
+    #   旧写法这里只 ``.get()``、不看 TTL（只有 ``take_pending_send`` 看），于是"判定通过、
+    #   但 agent 最终没产出回复"的那条登记会**一直挂着**：此后该群**每一条**出站（含老板
+    #   @ 之后的正常回复）都得先过重复内容闸，命中就静默丢弃并返回 ``success=True``。
+    #   表现 = "群里 @ 机器人，它不回，日志一句错都没有"。TTL 与 ``take_pending_send`` 同源。
+    #
+    # ★ B6（2026-10-02 修）：这一支**不再把登记删掉**。删了就没人给慢模型那次出站归账了
+    #   —— "闸门过期"的语义是"这条出站不该被拦"，不是"这条出站不是心流交付"。
+    #   登记留给 ``note_sent``（宽时钟 absorb）去认；没人来认的话，它会被该群下一次
+    #   ``take_pending_send`` 或 ``begin_pending_send`` 顶掉（每群至多一条，不会堆积）。
+    if ts > p.expires_at_sec:
+        log.info("[WPP HF] 待交付登记已过期（判过 %ds 前）⇒ 本条按普通发送放行，"
+                 "登记留给归账: account=%s group=%s msgId=%s",
+                 ts - p.at_sec, account_id, group_id, p.inbound_msg_id)
+        return None
+    # ★ B3（2026-10-02 修）：登记之后群里有人 @/引用机器人 ⇒ 这批出站回的是**那一条**，
+    #   不是这条心流插话。判据与理由见 :func:`note_bot_mention`（框架不给关联 id，只能这样收口）。
+    if p.newer_mention_at_sec is not None:
+        log.info("[WPP HF] 登记后有更新的 @/引用（%ds 前）⇒ 本条不是心流插话，放行: "
+                 "account=%s group=%s", ts - p.newer_mention_at_sec, account_id, group_id)
         return None
     cfg = _cfg_for(account_id)
     dcfg = dedupe.resolve_dedupe_cfg(cfg)
@@ -976,10 +1082,21 @@ def note_sent(account_id: str, group_id: str, text: str, *, success: bool,
     ⚠️ **发送没成功时不消费登记**：``pending`` 的语义就是"等框架重试"（见
     :func:`learn.classify_hf_send`）。这里若顺手把登记吃掉，重试那次就再也匹配不上登记
     ⇒ 台账那行永远停在 ``judged``，被 sweep 的呆账收敛当成"没人接话"—— 而消息**根本没发出去**。
+
+    ★ **B8（2026-10-02 修）：回复状态（冷却/精力/计数）只在这里记**。
+    旧写法在 judge 通过时就调 :func:`record_active_reply`（TS ``handler.ts`` 同形），
+    于是"判了但没发出去"的两条路都会把 ``last_reply_time`` 推到当下：
+    ① 复读闸静默不发（交付缝返回占位符，群里一个字都没有）；
+    ② 生成/发送失败（``pending``，这条函数直接 return）。
+    代价是 :func:`check_gate` 的 ``cooling`` 闸接下来 ``minReplyIntervalSec`` 内
+    一律装死 —— 老板看到的正是"明明该接的话它不说话"；顺带白扣一格精力、
+    ``total_replies`` 平白多一条（喂给 judge 的"历史回复率"因此偏高）。
+    放到这里是因为**只有这条路 = 话真进了群**：占位符那条根本不经过本函数。
     """
     ts = int(now_sec if now_sec is not None else time.time())
     result = L.HfSendResult(ok=bool(success), msg_id=(message_id or None))
-    if L.classify_hf_send(result) == L.HF_SEND_OUTCOME_PENDING:
+    outcome = L.classify_hf_send(result)
+    if outcome == L.HF_SEND_OUTCOME_PENDING:
         with _state_lock:
             inflight = _pending.get(_pending_key(account_id, group_id))
         if inflight is not None:
@@ -987,7 +1104,9 @@ def note_sent(account_id: str, group_id: str, text: str, *, success: bool,
                         "account=%s group=%s msgId=%s", account_id, group_id,
                         inflight.inbound_msg_id)
         return
-    p = take_pending_send(account_id, group_id, ts)
+    # ★ B6（2026-10-02 修）：归账用**宽时钟**。这条出站已经真的发出去了（``note_sent``
+    #   只在 ``classify_hf_send != pending`` 之后走到这里），慢一点不该让它变成"没发生"。
+    p = take_pending_send(account_id, group_id, ts, ttl_sec=HF_PENDING_SEND_ABSORB_SEC)
     if p is None:
         return
     cfg = _cfg_for(account_id)
@@ -997,6 +1116,9 @@ def note_sent(account_id: str, group_id: str, text: str, *, success: bool,
         ts, group_id=group_id,
         observe_sec=learning["observeWindowSec"], label_window_sec=learning["labelWindowSec"],
         text=text, dedupe_cfg=dedupe.resolve_dedupe_cfg(cfg))
+    # ★ B8：账本判成 sent（``suppressed`` 是"框架把它丢了"，也算没进群）才记回复状态。
+    if outcome == L.HF_SEND_OUTCOME_SENT:
+        record_active_reply(group_id, cfg, ts * 1000)
 
 
 # ================================================================ 接入口
@@ -1068,7 +1190,10 @@ async def maybe_engage(adapter: Any, acct: Any, msg: Any, pipeline: Any = None) 
             inbound_msg_id=str(getattr(msg, "msg_id", "") or ""),
             group_id=group_id,
             judged_at=now_sec,
-            new_msg_id=(str(getattr(msg, "new_msg_id", "") or "") or None),
+            # ★ ``WppMessage`` **没有** ``new_msg_id`` 字段 ⇒ ``getattr`` 恒空（静默
+            #   空操作）。服务端 id 只能从原始 payload 取，否则台账此列永远是 NULL，
+            #   "按 svrid 回查被引用的消息"这条路永远查不到心流判定过的那条。
+            new_msg_id=pick_new_msg_id(getattr(msg, "raw", None)),
             from_wxid=(str(getattr(msg, "from_wxid", "") or "") or None),
             msg_type=(str(getattr(msg, "msg_type", "")) if getattr(msg, "msg_type", None) is not None else None),
             content_head=(re.sub(r"\s+", " ", content).strip()[:256] or None),
@@ -1085,7 +1210,12 @@ async def maybe_engage(adapter: Any, acct: Any, msg: Any, pipeline: Any = None) 
         if result.should_reply:
             metrics.inc_hf_judge_passed()
             L.persist_hf_judged(record)
-            record_active_reply(group_id, eff_cfg, now_ms)
+            # ★ B8（2026-10-02 修）：这里**不再**记回复状态。judge 通过 ≠ 话进了群 ——
+            #   这条回复还要过生成（主 LLM）与交付缝（复读闸可能静默不发 / 发送可能失败）。
+            #   在这里记 ``last_reply_time`` 会让冷却闸把"没发出去的那次"当成发过了，
+            #   接下来 ``minReplyIntervalSec`` 内群里再喊它也不应。挪到 :func:`note_sent`
+            #   （真发出之后） —— 顺带 ``total_messages`` 也跟着挪：一条没发出去的回复
+            #   不该既算"回复数"又不算"消息数"（那会让回复率凭空偏高）。
             begin_pending_send(account_id, group_id, record.inbound_msg_id, now_sec)
             log.info("[WPP HF] trigger: account=%s group=%s msgId=%s score=%.2f",
                      account_id, group_id, record.inbound_msg_id, result.overall_score)
@@ -1155,6 +1285,7 @@ __all__ = [
     "HF_JUDGE_MAX_TOKENS",
     "HF_JUDGE_SYSTEM_PROMPT",
     "HF_JSON_REMINDER",
+    "HF_PENDING_SEND_ABSORB_SEC",
     "HF_PENDING_SEND_TTL_SEC",
     "HF_RAW_BUFFER_MAX",
     "HF_REPEAT_PLACEHOLDER",

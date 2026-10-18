@@ -76,6 +76,13 @@ from datetime import datetime
 from typing import Any, Callable, Mapping, Sequence
 
 from .budget import BudgetConfig, resolve_budget
+from .caption import (
+    HfCaptionConfig,
+    caption_pending_hf_images,
+    hf_caption_sample_line,
+    load_hf_captions_for_bodies,
+    resolve_hf_caption_cfg,
+)
 from .runtime import CACHE_REGISTRY
 
 log = logging.getLogger(__name__)
@@ -102,6 +109,8 @@ class HfProfileConfig:
     timeout_ms: int
     apply_quiet_hours: bool
     max_raise: float
+    #: 图片配文参数（v1.16.0；子映射 ``profile.caption``，缺省见 ``caption.HF_CAPTION_DEFAULTS``）
+    caption: HfCaptionConfig
 
 
 #: 画像缺省参数（挂 ``heartflow.profile``，不进 UI schema）
@@ -130,6 +139,8 @@ HF_PROFILE_DEFAULTS: dict[str, Any] = {
     #: 画像 band 相对基线阈值的**最大抬升幅度**（v1.10.0；见 :func:`resolve_hf_profile_band_effect`）。
     #: 想让画像说话更保守请调预算/静默段（结构层），不要靠抬阈值 —— 那是"用质量闸干频率闸的活"。
     "maxRaise": 0.1,
+    # 注：``caption`` 子映射（v1.16.0 图片配文）**不在这里** —— 它有自己的缺省真源
+    # ``caption.HF_CAPTION_DEFAULTS``，由 :func:`caption.resolve_hf_caption_cfg` 解析。
 }
 
 #: 画像 band 相对基线的最大抬升幅度（模块级常量，供不用 resolve 的调用方直接取）
@@ -249,6 +260,8 @@ def resolve_hf_profile_cfg(cfg: Mapping[str, Any] | None) -> HfProfileConfig:
         timeout_ms=_pos_int(p.get("timeoutMs"), D["timeoutMs"]),
         apply_quiet_hours=bool(p.get("applyQuietHours", D["applyQuietHours"])),
         max_raise=_nonneg(p.get("maxRaise"), D["maxRaise"]),
+        # 子映射本身由 caption 模块解析（形状脏 ⇒ 全部走缺省）
+        caption=resolve_hf_caption_cfg(p.get("caption")),
     )
 
 
@@ -749,7 +762,7 @@ def parse_hf_group_profile_row(row: Mapping[str, Any]) -> HfGroupProfile | None:
 # ================================================================ 进程内缓存（judge 热路径零 DB 读）
 
 
-#: ``"account:group" -> {"text", "band", "budget", "generatedAt", "version"}``
+#: ``"account:group" -> {"text", "band", "budget", "quietHours", "generatedAt", "version"}``
 _profiles: dict[str, dict[str, Any]] = {}
 _lock = threading.RLock()
 
@@ -759,10 +772,31 @@ def _key(account_id: str, group_id: str) -> str:
 
 
 def get_hf_profile_prompt_text(account_id: str, group_id: str) -> str | None:
-    """judge 路径取画像文本（无则 ``None``，**不查 DB**）。"""
+    """画像文本（无则 ``None``，**不查 DB**）。judge 与回复侧共用同一个缓存。"""
     with _lock:
         c = _profiles.get(_key(account_id, group_id))
     return c["text"] if c and c.get("text") else None
+
+
+#: 回复侧（Hermes agent）注入用的前缀。
+#: 与 judge 侧的区别不是内容而是**消费目的**：judge 只需要"该不该说"，回复侧要
+#: "怎么说"（语气、角色、话题边界）。两处同源同缓存，包装分开写，避免把 judge
+#: 的措辞当成用户消息塞进对话。
+HF_PROFILE_AGENT_PREFIX = (
+    "[系统提示-本群画像] 以下内容由系统按本群历史消息自动归纳，供你把握本群气质、"
+    "话题边界与说话风格；它不是用户说的话，不要向群友复述或提及本提示。"
+)
+
+
+def build_hf_profile_channel_prompt(text: str | None) -> str | None:
+    """画像文本 → 回复侧 ``MessageEvent.channel_prompt``；空画像 ⇒ ``None``。
+
+    ``None`` 是"与没有这个功能时逐字节相同"的判据（Hermes 只有非空才注入）。
+    """
+    body = (text or "").strip()
+    if not body:
+        return None
+    return f"{HF_PROFILE_AGENT_PREFIX}\n{body}"
 
 
 def get_hf_profile_band_floor(account_id: str, group_id: str) -> float | None:
@@ -777,10 +811,24 @@ def get_hf_profile_band_floor(account_id: str, group_id: str) -> float | None:
 
 
 def get_hf_profile_budget(account_id: str, group_id: str) -> Mapping[str, Any] | None:
-    """画像建议的预算（已只收紧钳制；供调用方与配置取交集；无则 ``None``）。"""
+    """画像建议的预算（已只收紧钳制；供调用方与配置取交集；无则 ``None``）。
+
+    ⚠️ 不含 ``quietHours``（那是"彻底不说话"的开关，只走 ``applyQuietHours`` 显式
+    路径）；静默段用 :func:`get_hf_profile_quiet_hours` 单独取。
+    """
     with _lock:
         c = _profiles.get(_key(account_id, group_id))
     return c["budget"] if c else None
+
+
+def get_hf_profile_quiet_hours(account_id: str, group_id: str) -> tuple[tuple[int, int], ...]:
+    """画像建议的静默段（原始建议；安全上限在 ``budget.merge_hf_quiet_hours`` 里过）。
+
+    零 DB IO。只有 ``profile.applyQuietHours=true`` 时调用方才会把它并进预算。
+    """
+    with _lock:
+        c = _profiles.get(_key(account_id, group_id))
+    return tuple(tuple(r) for r in (c.get("quietHours") or ())) if c else ()
 
 
 def resolve_hf_profile_band_effect_for(
@@ -834,11 +882,30 @@ def load_hf_profiles_into_cache(
                 "text": render_hf_profile_for_prompt(p, max_prompt_chars),
                 "band": p.band,
                 "budget": p.budget,
+                # 静默段单独存一份：``clamp_hf_profile_budget`` 的口径是"预算建议"，
+                # **不带** quietHours（见其 docstring），而 ``applyQuietHours`` 那条
+                # 显式路径又必须拿到原始建议 —— 2026-10-18 之前缓存只存 budget，
+                # 于是开关打开后生效值仍是空（开关成了摆设）。
+                "quietHours": [list(r) for r in p.quiet_hours],
                 "generatedAt": r.get("generated_at"),
                 "version": int(r.get("version") or 1),
             }
         n += 1
     return n
+
+
+def load_hf_profiles(account_id: str,
+                     max_prompt_chars: int = HF_PROFILE_DEFAULTS["maxPromptChars"]) -> int:
+    """启动预热：读该账号全部画像行灌缓存（**只读，不生成**）。
+
+    画像缓存原先只在 sweep 第 1 步预热 ⇒ 网关重启后的前 300s 里 judge 无画像。
+    2026-10-18 回复侧也开始消费画像，这个冷窗口第一次变得可见，所以补一条启动预热
+    （:func:`..runtime._preload_steps` 的第五项）。
+    """
+    from ...data import repo_hf          # 延迟导入：保持模块级零第三方依赖
+
+    rows = repo_hf.list_profiles(account_id)
+    return load_hf_profiles_into_cache(account_id, rows, max_prompt_chars)
 
 
 def reset_hf_profile_cache() -> None:
@@ -877,17 +944,26 @@ def _load_sample_lines(account_id: str, group_id: str, limit: int) -> list[str]:
     ⚠️ ``list_messages_by_peer`` 返回**升序**（便于拼 prompt），而 TS 的 ``getMessages``
     是 ``ts DESC`` ⇒ 这里 ``reversed()`` 还原成「从最近往前」。顺序不是无关紧要的：
     样本要的是**最近**的 N 条入站，顺着升序取会把最老的几条喂进去。
+
+    v1.16.0 图片配文：图片行换成 ``[图] <caption>`` / ``收到一张图片``（清掉 URL 噪声）；
+    查配文失败退回旧形态 —— 增强件不是依赖件。
     """
     mx = max(1, min(int(limit) if _is_num(limit) else 1, 100))
     from ...data import repo_messages      # 延迟导入：本模块不在加载期拉第三方依赖（F5）
 
     rows = list(repo_messages.list_messages_by_peer(account_id, group_id, mx * 2))
+    # 批量查配文（自己查，不依赖调用方注入；失败 = 空 Map = 旧形态）
+    caps = load_hf_captions_for_bodies(
+        account_id,
+        [m.get("content") or "" for m in rows if m.get("direction") == "inbound"],
+    )
     seen: set[str] = set()
     out: list[str] = []
     for m in reversed(rows):
         if m.get("direction") != "inbound":
             continue
-        body = re.sub(r"\s+", " ", m.get("content") or "").strip()
+        body = hf_caption_sample_line(
+            re.sub(r"\s+", " ", m.get("content") or "").strip(), caps)
         if not body or len(body) < 2:
             continue
         who = (m.get("from_wxid") or "")[:6] + "**"
@@ -959,6 +1035,43 @@ async def maybe_generate_hf_group_profiles(
     from ...llm import judge as judge_mod      # 延迟导入：LLM 层只在真要调用时拉进来
 
     creds = judge_mod.resolve_judge_creds()
+
+    # v1.16.0 图片配文：生成前给本轮要处理的群补配文（单轮配额内的群才配，不白打 LLM）。
+    #   失败全吞（warn 一次）—— 增强件永不变成依赖件：caption 挂了画像照旧用占位样本生成。
+    cap_cfg = P.caption
+    if cap_cfg.enabled and cap_cfg.per_group_max > 0 and groups:
+        try:
+            cap_since = now_sec - P.lookback_days * 86400
+            # 只为本轮真会重新生成的群配文（镜像下面主循环的 stale 判定 + maxPerRun 配额）——
+            #   给「还新/超配额」的群配文 = 白花 LLM 调用（下轮它仍到期，届时再配）
+            cap_done = 0
+            cap_tasks = cap_ok = cap_fail = 0
+            for group_id in groups:
+                prev_for_cap = by_group.get(group_id)
+                if not is_hf_profile_stale(
+                    (prev_for_cap or {}).get("generated_at"), now_sec, P.refresh_hours,
+                ):
+                    continue
+                if cap_done >= max(1, P.max_per_run):
+                    break
+                cap_done += 1
+                r = await caption_pending_hf_images(
+                    account_id, group_id, cap_since, cap_cfg, str(model), creds,
+                )
+                cap_tasks += r.tasks
+                cap_ok += r.ok
+                cap_fail += r.fail
+            # v1.16.0: 只要本轮真走到了配文（cap_done>0）就出声，**含 tasks=0** ——
+            #   否则「机制在跑、今天没待办」与「机制根本没跑」在日志里都是静默
+            #   （生产首日正是 0 行，无法自证）。全 fresh 的常态轮次 cap_done=0 仍不出声。
+            if cap_done > 0:
+                log.info(
+                    "[WPP HF] caption pass: account=%s groups=%d/%d tasks=%d ok=%d fail=%d",
+                    account_id, cap_done, len(groups), cap_tasks, cap_ok, cap_fail,
+                )
+        except Exception as exc:  # noqa: BLE001 —— 增强件失败不许阻断画像生成
+            log.warning("[WPP HF] caption pass failed (画像用旧样本形态继续): %s", exc)
+
     for group_id in groups:
         prev = by_group.get(group_id)
         if not is_hf_profile_stale(

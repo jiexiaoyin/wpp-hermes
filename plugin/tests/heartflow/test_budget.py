@@ -347,3 +347,85 @@ def test_cache_registry_owns_budget_reset():
 # **本节故意不译**：那些断言的主语（``heartflow.py`` / ``learn.py`` / handler）
 # 在本文件写就时尚未移植。等它们落地后按同一意图补测 —— 在这里放个"永远 skip"
 # 的壳只会制造**假绿**（跳过看起来像通过），比没有更糟。
+
+
+# ===== 8. 配置脏值（B1）=====
+#
+# 这一节是 **py2 独有**：TS 那边靠 JS 的"比较不抛异常"天然兜住（``"abc" > 0`` 是
+# ``false`` ⇒ 该闸不生效，但**不炸**）。py2 修前写的是裸 ``int(b.get("minGapSec"))``，
+# 而 :func:`budget.resolve_budget` 是在**每条触发消息**上被调的（``heartflow.check_gate``）
+# ⇒ 配置里一个字符串/None/NaN 就让每条消息在预算这一步抛一次 ValueError，
+# 现象是心流**整条静默**（比"值算错了"贵得多，且日志只有一行 ValueError）。
+
+
+@pytest.mark.parametrize("raw", [
+    "abc", "", "180s", [], {"v": 180}, True, False,
+    float("nan"), float("inf"), -float("inf"),
+])
+def test_dirty_numeric_config_falls_back_to_the_default(raw):
+    """说不清是什么的值 ⇒ 回落**默认档**，且**不抛**。"""
+    cfg = B.resolve_budget({"budget": {"minGapSec": raw, "maxPerHour": raw, "maxPerDay": raw}})
+    assert cfg.min_gap_sec == D["minGapSec"]
+    assert cfg.max_per_hour == D["maxPerHour"]
+    assert cfg.max_per_day == D["maxPerDay"]
+
+
+def test_a_dirty_value_falls_back_to_the_gate_not_to_unlimited():
+    """回落的方向必须是"按默认档拦"，不是"不设限"——后者是静默放宽（最贵的方向）。"""
+    cfg = B.resolve_budget({"budget": {"minGapSec": "abc"}})
+    state = B.record_budget_reply(B.new_budget_state(T), T)
+    assert B.check_budget(state, cfg, T + 10) == (False, B.REASON_GAP)
+    assert B.check_budget(state, cfg, T + D["minGapSec"]) == (True, None)
+
+
+def test_an_explicit_zero_still_means_that_gate_is_off():
+    """``0`` 是**有意义的值**（TS 的守卫是 ``cfg.minGapSec > 0`` ⇒ 0 = 该闸不生效）。
+
+    这一条挡住"顺手用 :func:`_pos` 统一兜底"的写法：``_pos(0, 180)`` 会把它悄悄改成
+    180 —— 老板在配置里写"不限"，插件按 3 分钟拦，等于**背着配置收紧**。
+    """
+    cfg = B.resolve_budget({"budget": {"minGapSec": 0, "maxPerHour": 0, "maxPerDay": 0}})
+    assert (cfg.min_gap_sec, cfg.max_per_hour, cfg.max_per_day) == (0, 0, 0)
+    state = B.record_budget_reply(B.new_budget_state(T), T)
+    assert B.check_budget(state, cfg, T + 1) == (True, None)
+
+
+def test_a_dirty_value_says_so_in_the_log(caplog):
+    """兜底就是静默降级 ⇒ 必须留一行 warn，否则"配置写错了"永远查不出来。"""
+    B.reset_budget_cache()
+    with caplog.at_level("WARNING"):
+        B.resolve_budget({"budget": {"maxPerHour": "eight"}})
+    assert any("maxPerHour" in r.getMessage() and "eight" in r.getMessage()
+               for r in caplog.records), "脏值必须点名参数与值"
+
+
+def test_repeated_dirty_config_warns_only_once(caplog):
+    """热路径上每条消息调一次 ⇒ 告警必须去重（否则日志被刷爆，真信号被埋）。"""
+    B.reset_budget_cache()
+    with caplog.at_level("WARNING"):
+        B.resolve_budget({"budget": {"maxPerDay": "x"}})
+        B.resolve_budget({"budget": {"maxPerDay": "x"}})
+    assert len([r for r in caplog.records if "maxPerDay" in r.getMessage()]) == 1
+
+
+def test_a_missing_key_is_not_a_dirty_value(caplog):
+    """没配这个键 = 用默认，**不是**脏值 —— 否则每个账号都刷一行假告警。"""
+    B.reset_budget_cache()
+    with caplog.at_level("WARNING"):
+        B.resolve_budget({"budget": {"enabled": True}})
+    assert not [r for r in caplog.records if "脏值" in r.getMessage()]
+
+
+def test_reset_lets_the_warning_fire_again(caplog):
+    """``reset_budget_cache``（测试隔离 / 配置热重载）也要清掉告警去重表。
+
+    否则"改完配置还是老样子"就查不出来了：值换了、告警却因为**旧键**已报过而不再出声。
+    """
+    B.reset_budget_cache()
+    B.resolve_budget({"budget": {"minGapSec": "zzz"}})     # 先烧掉那个去重键
+    caplog.clear()
+    B.reset_budget_cache()
+    with caplog.at_level("WARNING"):
+        B.resolve_budget({"budget": {"minGapSec": "zzz"}})
+    assert [r for r in caplog.records if "zzz" in r.getMessage()], \
+        "重置后同一个脏值要能再报一次"

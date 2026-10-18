@@ -289,6 +289,26 @@ def test_learning_samples_can_never_include_a_suppressed_row():
     assert "engaged IS NOT NULL" not in rec.seen[0][0]
 
 
+def test_get_closed_recent_returns_an_int_sent_at():
+    """★ B9（2026-10-02）：调阈侧按**每条样本自己那一小时**查本底 ⇒ ``sent_at`` 必需且是整型秒。
+
+    两个方向都要钉：查询里真取这一列（缺了整批判成"不可采信"，阈值静默僵住），
+    以及回来的是 ``int`` —— ``UNIX_TIMESTAMP`` 那边可能是 ``Decimal``，
+    不归一的话本底查表的键会变成 ``gA|Decimal('1789070300')`` 而表里只有 ``gA|8``，
+    查不到就按 ``ambientP=0`` 采信 ⇒ **夜里那批弱信号全被当成有效信息**（B9 要治的病照旧犯）。
+    """
+    from decimal import Decimal
+
+    rows = [{"engaged": 1, "closed_at": Decimal("1789071000"),
+             "engage_signal": "quote", "sent_at": Decimal("1789070300")}]
+    rec = _SqlRecorder(rows)
+    out = repo_hf.get_closed_recent("acct", "gA", conn=rec)
+
+    assert "sent_at" in rec.seen[0][0], "查询里必须真取这一列"
+    assert out[0]["sent_at"] == 1789070300 and isinstance(out[0]["sent_at"], int)
+    assert isinstance(out[0]["closed_at"], int), "顺手确认归一没漏（同一条路径）"
+
+
 # ============================================================ §5 台账计数
 
 def test_count_by_status_aggregates_status_and_reason():

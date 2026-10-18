@@ -14,6 +14,8 @@
 
 ============================  ==================================================
 :mod:`.parser`                消息模型 / 提取 / 管线 / @提及
+:mod:`.persist`               入站落库（对齐 TS ``enrich.ts``；入站/出站共用同一对
+                              ``peer_kind``/``chat_id`` 映射，防两处各写一份漂移）
 :mod:`.media`                 vendor 媒体字段考古（下载元数据）
 :mod:`.relay`                 接龙识别（红包事故的第一道闸）
 :mod:`.hongbao`               红包/转账识别（**v1.9.1 + v1.9.2 修复点**）
@@ -39,9 +41,18 @@ from .jargon import (
     update_from_message,
 )
 from .media import extract_media_meta
+from .persist import (
+    db_chat_id,
+    db_direction,
+    db_peer_kind,
+    persist_inbound,
+    pick_new_msg_id,
+    to_db_record,
+)
 from .parser import (
     MT_APP,
     MT_REVOKE,
+    MT_SYSTEM,
     InboundPipeline,
     SeenTracker,
     WppMessage,
@@ -57,15 +68,19 @@ from .parser import (
 )
 from .relay import is_relay_message
 from .triggers import (FILEHELPER, is_filehelper_session, is_quoting_bot,
-                       should_process)
+                       should_drop, should_process)
 
 __all__ = [
     "FILEHELPER",
     "MT_APP",
     "MT_REVOKE",
+    "MT_SYSTEM",
     "InboundPipeline",
     "SeenTracker",
     "WppMessage",
+    "db_chat_id",
+    "db_direction",
+    "db_peer_kind",
     "extract_all_msg_src",
     "extract_at_user_list",
     "extract_media_meta",
@@ -82,12 +97,16 @@ __all__ = [
     "list_hot_jargon",
     "normalize_mention",
     "parse_message",
+    "persist_inbound",
+    "pick_new_msg_id",
     "process_red_packet",
     "query_jargon",
     "reset_stats",
+    "should_drop",
     "should_process",
     "strip_at_mentions",
     "strip_group_prefix",
+    "to_db_record",
     "tokenize",
     "update_from_message",
 ]

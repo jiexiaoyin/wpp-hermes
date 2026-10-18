@@ -37,15 +37,60 @@ log = logging.getLogger(__name__)
 
 #: 单条消息上限。**必须与 ``register_platform(max_message_length=...)`` 同值** ——
 #: 否则 live adapter 与进程外（cron/standalone）分片阈值不一致。
-#: 旧实现是 adapter 6000 / registry 4000 两个数，已统一取**较小值**（更安全：
-#: 微信长消息会被截断）。
-MAX_MESSAGE_LENGTH = 4000
+#: 2026-10-18 修正：4000 → 2000。微信个人号长文本超过约 2000 字符会被**静默截断**
+#: （群里实测把 977 字回复的最后半段吞掉；Hermes 上游 weixin 平台也改用 2000）。
+#: 留余量宁可多发一条，也不要让用户看到半句话。
+MAX_MESSAGE_LENGTH = 2000
 
 #: 纯文本还走 SendTxt；**这条阈值只是分片线**，与 vendor 无关
 _TEXT_CHUNK_LIMIT = MAX_MESSAGE_LENGTH
 
+#: 引用回复 XML 的 ``<title>``/``<des>`` 单字段上限。
+#: 微信客户端对 type=57 引用气泡只渲染前 500 字符（vendor 侧同样按 500 截断，
+#: 见 ``src/send/quote-xml.ts``）。**超过这个长度不能再走引用回复** ——
+#: 否则整条正文会被砍到 500 字，且发送仍返回成功（2026-10-18 群内实测）。
+QUOTE_REPLY_MAX_CHARS = 500
+
+
+def quote_reply_fits(text: str) -> bool:
+    """引用气泡能否装下这段正文（含 ``@被回复人 `` 前缀）。
+
+    返回 ``False`` 时调用方必须改走普通 ``/Msg/SendTxt``；不要依赖
+    :func:`build_quote_reply_xml` 的 ``[:500]`` —— 那是**截断**，不是分片。
+    """
+    return len((text or "").strip()) <= QUOTE_REPLY_MAX_CHARS
+
 #: 2026-09-01 修复：过滤「无 @提及，按群规则不回复」类拒绝话术（老板在益融管理群看到 2 次）
 REJECTION_PHRASE_RE = re.compile(r"无\s*@\s*提及|按群规则不回复|不回复\s*[:：]")
+
+#: 2026-10-18 事故修复：网关**内部机械通知**严禁进生产微信群。
+#: 现场：移动业务对接群里漏出两条——① 网关"静默兜底"英文报错
+#: ``⚠️ The model returned only a silence marker...``（zh locale 为
+#: 「模型只返回了静默标记」），② 后台自审摘要 ``💾 Self-improvement review: ...``
+#: （zh locale「💾 自我改进回顾」）。命中 ⇒ 与拒绝话术同款：**静默丢弃，只落日志**。
+#: 判据刻意只匹配 locale 文案里的固定短语，不可能命中正常业务话术。
+#:
+#: 2026-10-18 补：记忆召回提示 ``🧠 MemOS — recalled 9 memories``（Hindsight 同款）
+#: 也是 Hermes 的**生命周期状态**，网关对 WeiXin 这类"没有状态栏"的平台会把它
+#: 当普通消息 ``adapter.send`` 出去 —— 群里就会出现一行英文内部提示。
+#: 形状固定（glyph + provider + em dash + recalled N memor(y|ies)），按行首锚定。
+MACHINERY_NOTICE_RE = re.compile(
+    r"only a silence marker|只返回了静默标记|只回傳了靜默標記"
+    r"|Self-improvement review|自我改进回顾|自我改進檢閱|💾"
+    r"|^\s*(?:🧠|👁️)\s+\S.*?—\s*recalled\s+\d+\s+memor(?:y|ies)\s*$"
+    # 「忙碌回执」同属过程话术：网关在处理上一轮时又收到消息，会回一行
+    # 「⏳ 已排队至下一回合 / ⚡ 正在中断当前任务 / ⏳ 网关正在重启…」。
+    # 它不走 ``_interim_send`` 标记（``run_busy._send_busy_reply`` 只是普通
+    # ``_send_with_retry``），只能按 locale 固定文案拦。锚行首 + 固定句式，
+    # 不会误伤以这些词开头的正常业务话术。
+    r"|^\s*(?:⏳|⚡|⏩|↪)\s*(?:已排队|子代理正在工作|正在压缩上下文"
+    r"|正在中断当前任务|已引导至当前运行|已重定向当前运行|网关正在)"
+    r"|^\s*(?:⏳|⚡|⏩|↪)\s*(?:Queued for the next turn|Subagent working"
+    r"|Compressing context|Interrupting current task|Steered into current run"
+    r"|Redirected current run|Gateway .*?—\s*queued for the next turn"
+    r"|Gateway is .*?and is not accepting)",
+    re.MULTILINE,
+)
 
 #: 群聊标识后缀
 GROUP_SUFFIX = "@chatroom"
@@ -197,6 +242,91 @@ def extract_msg_id(resp: Any) -> str | None:
     return extract_outbound_msg_ids(resp).msg_id
 
 
+# ---------------------------------------------------- 出站端点 → 落库元数据
+
+
+#: 发送类端点 → 消息类型（**逐字对齐** TS ``send/msg.ts:16 OUTBOUND_MSG_TYPES``）。
+#: 通用工具表（``toolkit/registry.py``）与 ``wpp_send_message`` 都经过这里落库 ——
+#: 否则"agent 调工具发群"在 ``wpp_messages`` 里完全隐形（引用/历史都查不到锚点）。
+OUTBOUND_MSG_TYPES: dict[str, str] = {
+    "/Msg/SendTxt": "text",
+    "/Msg/SendCDNImg": "image",
+    "/Msg/UploadImg": "image",
+    "/Msg/SendCDNVideo": "video",
+    "/Msg/SendVideo": "video",
+    "/Msg/ShareVideo": "video",
+    "/Msg/SendVoice": "voice",
+    "/Msg/SendCDNFile": "file",
+    "/Msg/SendEmoji": "emoji",
+    "/Msg/ShareCard": "card",
+    "/Msg/ShareLink": "link",
+    "/Msg/ShareLocation": "location",
+    "/Msg/SendXCX": "miniprogram",
+}
+
+_XML_TITLE_RE = re.compile(r"<title>([\s\S]*?)</title>")
+_XML_PAGEPATH_RE = re.compile(r"<pagepath>([\s\S]*?)</pagepath>")
+
+
+def _xml_title(xml: Any) -> str:
+    if not isinstance(xml, str):
+        return ""
+    m = _XML_TITLE_RE.search(xml)
+    return m.group(1).strip() if m else ""
+
+
+def outbound_content_for(endpoint: str, body: dict) -> str:
+    """从端点 + 请求体提取**可读**正文（base64 只留标记，绝不入库整段）。
+
+    逐字对齐 TS ``send/msg.ts:40 outboundContentFor``：这是"按群查历史"里
+    媒体消息唯一能读的一行，也是引用回复的锚点摘要。
+    """
+    if not isinstance(body, dict):
+        return ""
+    if endpoint == "/Msg/SendTxt":
+        return str(body.get("Content") or "")
+    if endpoint == "/Msg/SendCDNImg":
+        return f"[图片] {body.get('Content') or ''}"
+    if endpoint == "/Msg/UploadImg":
+        return "[图片]"
+    if endpoint == "/Msg/SendCDNVideo":
+        return f"[视频] {body.get('Content') or ''}"
+    if endpoint in ("/Msg/SendVideo", "/Msg/ShareVideo", "/Msg/SendVoice"):
+        return "[视频]" if "Video" in endpoint else "[语音]"
+    if endpoint == "/Msg/SendCDNFile":
+        return f"[文件] {body.get('Content') or ''}"
+    if endpoint == "/Msg/SendEmoji":
+        return f"[表情] {body.get('Md5') or ''}"
+    if endpoint == "/Msg/ShareCard":
+        return f"[名片] {body.get('CardNickName') or ''}"
+    if endpoint == "/Msg/ShareLink":
+        return f"[链接] {_xml_title(body.get('Xml'))}"
+    if endpoint == "/Msg/ShareLocation":
+        return f"[位置] {body.get('Label') or body.get('Poiname') or ''}"
+    if endpoint == "/Msg/SendXCX":
+        page = ""
+        m = _XML_PAGEPATH_RE.search(str(body.get("Content") or ""))
+        if m:
+            page = m.group(1).strip()
+        return f"[小程序] {_xml_title(body.get('Content'))}" + (f" (页面 {page})" if page else "")
+    return ""
+
+
+def outbound_meta_for(endpoint: str, body: dict) -> dict | None:
+    """发送端点 → ``{toWxid, msgType, content}``；非发送端点 / 缺目标 ⇒ ``None``。
+
+    对齐 TS ``send/msg.ts:139 outboundMetaFor``。
+    """
+    msg_type = OUTBOUND_MSG_TYPES.get(endpoint)
+    if not msg_type or not isinstance(body, dict):
+        return None
+    to_wxid = str(body.get("ToWxid") or body.get("toWxid") or "")
+    if not to_wxid:
+        return None
+    return {"toWxid": to_wxid, "msgType": msg_type,
+            "content": outbound_content_for(endpoint, body)}
+
+
 def send_error_text(resp: Any) -> str:
     """从失败响应里取可读错误（vendor ``BaseResponse.errMsg`` + Code）。"""
     if not isinstance(resp, dict):
@@ -231,7 +361,8 @@ def chunk_text(content: str, limit: int = _TEXT_CHUNK_LIMIT) -> list[str]:
     1. 先扫全文跟踪 ```` ``` ```` 围栏，按**空行**切段 —— 代码块内的空行**不算**
        段落边界（v1.3.63 P2-1：否则围栏会被段级切分拆断）；
     2. 段落 ≤ limit：尽量与相邻段落拼成一段（留 2 字符给 ``\\n\\n``）；
-    3. 段落 > limit：交给 :func:`_chunk_long_paragraph`，**含硬切**。
+    3. 段落 > limit：交给 :func:`_chunk_long_paragraph`；正文优先在句末/逗号处
+       断开（2026-10-18 老板要求"自然一些"），代码块与无标点长串才按长度硬切。
 
     ⚠️ 与"旧 Python 实现"的两处**故意不同**（旧实现是错的，别改回去）：
 
@@ -303,12 +434,13 @@ def _chunk_long_paragraph(text: str, limit: int) -> list[str]:
         if _FENCE_TIGHT_RE.match(line):
             in_code_block = not in_code_block
 
-        # 单行超限 → 硬切
+        # 单行超限 → 切。正文优先在句末/逗号处断开（别把一句话拦腰砍断）；
+        # 代码块里保持旧行为按长度硬切（在代码中间找中文标点没有意义）。
         if len(line) > limit:
             if current:
                 out.append(current)
                 current = ""
-            out.extend(_hard_split_line(line, limit))
+            out.extend(_hard_split_line(line, limit, natural=not in_code_block))
             continue
 
         sep = "\n" if current else ""
@@ -333,23 +465,106 @@ def _chunk_long_paragraph(text: str, limit: int) -> list[str]:
     return out
 
 
-def _hard_split_line(line: str, limit: int) -> list[str]:
-    """硬切超限单行（对齐 TS ``hardSplitLine``）。
+#: 长段落的**自然断点**（从强到弱）。正文切分优先落在这些字符**之后**，
+#: 避免「识盈」这种把半句话切给下一条的观感；代码块不参与（见 ``natural=``）。
+_BREAK_STRONG = "。！？!?；;\n"
+_BREAK_SOFT = "，,、：:）】」』…"
+
+
+def _hard_split_line(line: str, limit: int, *, natural: bool = True) -> list[str]:
+    """切超限单行。
+
+    2026-10-18 老板反馈「切分长文本应该自然一些，不要生硬切断」：旧实现严格按
+    ``limit`` 切，中文长段落会在句子中间断开（真机那条 977 字回复就是被砍在
+    「识盈」后面）。现在正文优先在**句末标点**处断，其次在逗号/顿号处断，
+    都找不到才按长度切；代码块仍按长度硬切（``natural=False``）。
 
     ⚠️ TS 要按 ``codePointAt`` 对齐，是因为 JS 字符串是 **UTF-16 码元**，
     切点可能落在星面字符（emoji）的前半个代理对里。Python 字符串是**码点
     序列**，切片不可能切出半个字符 ⇒ 代理对保护在本移植里是**结构性不需要**，
     不是漏写。副作用方向是安全的：同一个 emoji 在 JS 里算 2、在 Python 里算 1，
     所以同样 ``limit`` 下 Python 切出的片段在 JS 口径下**更短**。
+
+    断点搜索范围：
+
+    * 强断点（。！？；）—— 只要不早于 ``limit // 3`` 就接受；
+    * 弱断点（，、：）—— 要求不早于 ``limit * 2 // 3``，免得一条消息太短；
+    * 都没有 —— 才退化成按 ``limit`` 切。
+
+    断点处的空白（含换行）会从下一片开头剥掉，避免新消息以空格/空行开场。
     """
     if limit <= 0:
         return [line]
-    return [line[i:i + limit] for i in range(0, len(line), limit)]
+    if not natural:
+        return [line[i:i + limit] for i in range(0, len(line), limit)]
+
+    out: list[str] = []
+    rest = line
+    strong_min = max(1, limit // 3)
+    soft_min = max(1, limit * 2 // 3)
+    while len(rest) > limit:
+        window = rest[:limit]
+        cut = 0
+        for i in range(len(window) - 1, strong_min - 1, -1):
+            if window[i] in _BREAK_STRONG:
+                cut = i + 1
+                break
+        if not cut:
+            for i in range(len(window) - 1, soft_min - 1, -1):
+                if window[i] in _BREAK_SOFT:
+                    cut = i + 1
+                    break
+        if not cut:
+            cut = limit
+        piece = rest[:cut].rstrip()
+        if not piece:
+            piece, cut = rest[:limit], limit
+        out.append(piece)
+        rest = rest[cut:].lstrip()
+    if rest:
+        out.append(rest)
+    return out
 
 
 def is_rejection_phrase(content: str) -> bool:
     """是不是「拒绝话术」。命中 ⇒ 出站直接丢弃（**不报错，静默丢**）。"""
     return bool(content and REJECTION_PHRASE_RE.search(content))
+
+
+def is_machinery_notice(content: str) -> bool:
+    """是不是网关**内部机械通知**（静默兜底报错 / 💾 自审摘要）。
+    命中 ⇒ 出站静默丢弃（见 :data:`MACHINERY_NOTICE_RE`，2026-10-18 事故）。"""
+    return bool(content and MACHINERY_NOTICE_RE.search(content))
+
+
+def strip_self_mention(content: str, self_wxid: str, self_nickname: str) -> str:
+    """摘掉 agent 回复里**指向机器人自己**的 @（防「机器人 @ 自己」）。
+
+    **2026-10-02 真机现场**（``.183`` live-test）：群里有人 @ 了本账号
+    （正文 ``@接晓银\\u2005你好``），模型把上下文里那条 ``@接晓银`` 原样抄进回复 ——
+    于是账号在群里 **@ 了自己**，而它明明是在回别人的话（老板当场指出
+    「回复时候 @ 的对象也不对」）。群里的表现是「接晓银 @ 接晓银 你好！…」，
+    一眼假。
+
+    判据：``@<selfWxid>`` / ``@<selfNickname>`` / ``<selfWxid>@`` 三种形态
+    （微信 @ 后面跟的是 U+2005 四分之一空格，``normalize_mention`` 收尾的
+    ``strip()`` 一并吃掉 —— U+2005 在 Python 里算空白）。判据复用**入站同款**
+    :func:`inbound.parser.normalize_mention`（那里的 docstring 就写着
+    「去掉内容里的 @bot 提及，避免 AI 重复回 @」—— 本函数把它接到**出站**这一侧：
+    此前它只在 ``prepare_text`` 单向生效，模型抄回来的那条没人管）。
+
+    ⚠️ **与 TS 有意不齐**：TS 没有这一道（模型 @ 自己就照发）。保留它的理由与
+    本模块其它出站守卫一致 —— 它**只会**摘掉指向自己的 @，不可能改变一条正常回复
+    的语义（`.strip()` 之外不动任何字符），而代价是群里出现"自己 @ 自己"。
+    行为钉在 ``plugin/tests/test_mentions.py`` 的 §6。
+    """
+    if not content:
+        return content
+    # 延迟导入：``platform → inbound`` 只在真发消息时用到这一条边，
+    # 不把它抬到模块级（本模块的纪律是"只放无状态纯函数"，导入面越窄越好）。
+    from ..inbound.parser import normalize_mention
+
+    return normalize_mention(content, self_wxid or "", self_nickname or "")
 
 
 def is_group_peer(peer_id: str) -> bool:
@@ -373,8 +588,12 @@ def build_quote_reply_xml(reply_content: str, svrid: str, fromusr: str = "") -> 
           <refermsg><svrid>..</svrid><fromusr>..</fromusr></refermsg></appmsg>
 
     ``svrid`` 为空时**不带 refermsg** —— 没有可引用的目标，带了反而让 vendor 拒。
+
+    ⚠️ 这里仍保留 ``[:QUOTE_REPLY_MAX_CHARS]`` 只是兜底：微信只渲染引用气泡前 500
+    字符，超长正文**必须在** :meth:`WppAdapter._send_chunk` 改走普通文本
+    （:func:`quote_reply_fits` 是那道判据）。把它当分片用 = 静默丢字。
     """
-    reply = (reply_content or "引用回复").strip()[:500]
+    reply = (reply_content or "引用回复").strip()[:QUOTE_REPLY_MAX_CHARS]
     title = escape_xml(reply)
     svrid_e = escape_xml((svrid or "").strip())
     refermsg = ""

@@ -220,6 +220,52 @@ def is_hf_sample_informative(signal: Any, ambient_p: float, ambient_max: float) 
     return ambient_p < ambient_max
 
 
+def is_hf_silence_exempted(
+    signal: Any,
+    engaged: Any,
+    judge_overall: Any,
+    threshold_at_judge_time: Any,
+    margin_min: Any,
+) -> bool:
+    """v1.16.2 silence-exempt：高置信回复被「无人接话」时，该沉默样本不得充当抬阈负样本。
+
+    ## 为什么要改口径（2026-10-16/17 生产两次复现的自锁）
+
+    全员群真人不会去 @/引用机器人 —— 修好「看图」后回复内容对味（读出截图里的型号/金额/
+    直播数据），但 ``engaged`` 仍全 0 ⇒ 学习闭环把它读成「此群不欢迎我」⇒ 4h/步单调抬阈
+    0.60 → 0.80，预计回到 0.90 钉死 —— 与 10-16 事故的链逐字重演。实测账本：全员群
+    18 条 closed 里 14 条是 ``margin ≥ 0.10`` 的 silence（judge 明确认为值得回、回完没人接），
+    若照样计负 = 惩罚「质量高但不抢镜」。
+
+    ## 判据（只豁免一种组合，其余全部照常）
+
+    ``signal=silence`` 且 ``engaged=0`` 且 ``(judge_overall − 判定时生效阈值) ≥ margin_min``
+    ⇒ 不计入调阈样本。
+
+    - ❗ ``negative`` / ``veto`` **永不豁免** —— 那是「主动嫌弃」，才是该收敛的真信号
+      （老板 9-26 治刷屏的本意不动）；
+    - ❗ 低 margin 的沉默照常计负 —— 擦边回复被无视仍会抬阈，保留机制的收敛能力；
+    - 两个分数任一缺失/非数字 ⇒ **不豁免**（退回旧行为，宁严勿宽）。
+
+    ## 1e-9 容差
+
+    ``judge_overall`` / ``effective_threshold`` 是 ``DECIMAL`` 经浮点收口的值，而 margin 是
+    两者相减 —— ``0.75-0.65`` 得 ``0.09999999999999998``，恰在边距上的真样本会被错杀
+    （2026-10-17 单测当场拓出这个坑）。容差只宽 1e-9，不影响「擦边 0.055/0.005 仍计负」的
+    收敛力。
+
+    ``margin_min <= 0``：总开关关，退回旧行为（纯函数自守，不依赖调用方闸门）。
+    """
+    if not _finite(margin_min) or not (margin_min > 0):
+        return False
+    # 与 TS 严格相等：``engaged`` 必须是数字 0（NULL/字符串都不算「没人接」）
+    if signal != "silence" or isinstance(engaged, bool) or engaged != 0:
+        return False
+    if not _finite(judge_overall) or not _finite(threshold_at_judge_time):
+        return False
+    return judge_overall - threshold_at_judge_time >= margin_min - 1e-9
+
+
 def _finite(v: Any) -> bool:
     """``Number.isFinite`` 的等价：bool 不算数（``True`` 会被当 1 混进来）。"""
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)

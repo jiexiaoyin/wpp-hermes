@@ -5,7 +5,7 @@
     P=<环境 venv>/bin/python
     $P /tmp/wpp-py2-verify/tools/probe_adapter_contract.py
 
-⚠️ **本探针不是计划里的 V6**。V6 的定义是「全部 262 个工具都注册上」，
+⚠️ **本探针不是计划里的 V6**。V6 的定义是「全部 299 个工具都注册上」，
 那要等工具层（第 4 步）搬完、且 `hermes tools list | grep -c '^wpp_'` 对得上
 才算数 —— 届时在 `probe_registration.py` 里验。本探针只证明**平台这一侧**：
 适配器满足 Hermes 契约、注册进真 registry 后 ``Platform(...)`` 成立、

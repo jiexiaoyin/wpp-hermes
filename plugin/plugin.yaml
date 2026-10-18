@@ -23,6 +23,12 @@ requires_hermes: ">=0.21.5"
 #
 #    2026-10-01 实测：生成器 262 条 == `hermes plugins doctor` 的
 #    「registrations: 262 tool(s)」逐条一致（wecom 7 + phoneerp 4 + wpp 251）。
+#    2026-10-02：`tools/policy.py` 撤注册 2 个危险工具（对齐 TS 裁决）+ 补注册 1 个
+#    setProxy ⇒ **261**（wpp 251 → 250）。
+#    2026-10-18：补齐 TS 工具面缺口 33 个 ⇒ **294**（wpp 283 + wecom 7 + phoneerp 4）。
+#    本字段已按新注册面重生成。
+#    ⚠️ 生成本地是用探针的 gateway 空壳驱动的（注册面不依赖 Hermes 内部），
+#    deploy.sh 会在 .183 的**真运行时**再生成一次并 diff —— 不一致即中止。
 provides_tools:
   - phoneerp_imei
   - phoneerp_location
@@ -42,18 +48,21 @@ provides_tools:
   - wpp_fav_item
   - wpp_fav_sync
   - wpp_fc_active_tasks
+  - wpp_fc_auto_forward
+  - wpp_fc_auto_forward_status
   - wpp_fc_by_snsid
   - wpp_fc_by_user
   - wpp_fc_cdn_download_video
   - wpp_fc_collect_circle
   - wpp_fc_comment
   - wpp_fc_comments
-  - wpp_fc_download_video
+  - wpp_fc_export
+  - wpp_fc_export_download
+  - wpp_fc_export_status
   - wpp_fc_list
   - wpp_fc_operate
   - wpp_fc_publish_ai
   - wpp_fc_publish_images
-  - wpp_fc_publish_raw
   - wpp_fc_publish_text
   - wpp_fc_publish_video
   - wpp_fc_push_comment
@@ -61,6 +70,7 @@ provides_tools:
   - wpp_fc_send_one_id
   - wpp_fc_set_background
   - wpp_fc_set_days
+  - wpp_fc_set_privacy
   - wpp_fc_sync
   - wpp_fc_upload_image
   - wpp_fc_upload_images
@@ -76,7 +86,9 @@ provides_tools:
   - wpp_finder_mine
   - wpp_finder_msg_session
   - wpp_finder_play_video
+  - wpp_finder_play_video_status
   - wpp_finder_play_video_stop
+  - wpp_finder_play_video_tasks
   - wpp_finder_recommend
   - wpp_finder_search
   - wpp_finder_search_list
@@ -93,6 +105,7 @@ provides_tools:
   - wpp_friend_request_list
   - wpp_friend_search
   - wpp_friend_send_request
+  - wpp_friend_set_auto_accept
   - wpp_friend_set_remarks
   - wpp_friend_state
   - wpp_group_add_member
@@ -104,6 +117,7 @@ provides_tools:
   - wpp_group_info_detail
   - wpp_group_invite_member
   - wpp_group_list
+  - wpp_group_list_compat
   - wpp_group_mass_text
   - wpp_group_member_detail
   - wpp_group_move_contract
@@ -127,6 +141,8 @@ provides_tools:
   - wpp_label_list
   - wpp_label_update_list
   - wpp_label_update_name
+  - wpp_label_update_order
+  - wpp_login_62data_qr_verify
   - wpp_login_auto_heartbeat
   - wpp_login_cache_info
   - wpp_login_check_can_set_alias
@@ -142,6 +158,7 @@ provides_tools:
   - wpp_login_qr_pad_cloud
   - wpp_login_qr_pad_ppmt
   - wpp_login_submit_verify_code
+  - wpp_mcp_account_status
   - wpp_mcp_get_contact
   - wpp_mcp_get_group
   - wpp_mcp_list_contacts
@@ -158,10 +175,12 @@ provides_tools:
   - wpp_oa_history
   - wpp_oa_history_message
   - wpp_oa_jsapi_preverify
+  - wpp_oa_mp_get_a8key
   - wpp_oa_oauth_authorize
   - wpp_oa_qr_authorize
   - wpp_oa_qr_authorize_confirm
   - wpp_oa_quit
+  - wpp_other_rank_like
   - wpp_quote_reply
   - wpp_qw_add
   - wpp_qw_apply
@@ -171,14 +190,17 @@ provides_tools:
   - wpp_sayhello_v2
   - wpp_sayhello_v3
   - wpp_search_ai
+  - wpp_search_ai_conversation
   - wpp_search_ai_followup
   - wpp_search_all
   - wpp_search_articles
   - wpp_search_baike
   - wpp_search_books
+  - wpp_search_capabilities
   - wpp_search_channels
   - wpp_search_channels_comments
   - wpp_search_channels_detail
+  - wpp_search_channels_media
   - wpp_search_channels_resolve
   - wpp_search_emoji
   - wpp_search_gateway
@@ -192,15 +214,18 @@ provides_tools:
   - wpp_search_wechat_index
   - wpp_send_ai_image
   - wpp_send_ai_voice
-  - wpp_send_app_msg
+  - wpp_send_app_message
   - wpp_send_card
   - wpp_send_cdn_file
+  - wpp_send_cdn_image
+  - wpp_send_cdn_video
   - wpp_send_emoji
   - wpp_send_file
   - wpp_send_file_v2
   - wpp_send_image
   - wpp_send_link
   - wpp_send_location
+  - wpp_send_message
   - wpp_send_mini_program
   - wpp_send_text
   - wpp_send_video
@@ -210,12 +235,15 @@ provides_tools:
   - wpp_sync_message
   - wpp_tenpay_collect_money
   - wpp_tenpay_confirm_pre_transfer
+  - wpp_tenpay_create_pre_transfer
+  - wpp_tenpay_create_redpacket
   - wpp_tenpay_ge_ma_skd_qcode
   - wpp_tenpay_generate_pay_qcode
   - wpp_tenpay_get_encrypt_info
   - wpp_tenpay_open_hongbao
   - wpp_tenpay_open_hongbao_params
   - wpp_tenpay_open_redpacket
+  - wpp_tenpay_pay_qcode_status
   - wpp_tenpay_query_hongbao
   - wpp_tenpay_receive_hongbao
   - wpp_tenpay_receive_no_encryption
@@ -228,20 +256,24 @@ provides_tools:
   - wpp_tool_download_file
   - wpp_tool_download_file_binary
   - wpp_tool_download_img
+  - wpp_tool_download_mini_program_cover
   - wpp_tool_download_video
   - wpp_tool_download_voice
   - wpp_tool_download_voice_binary
   - wpp_tool_generate_pay_qrcode
   - wpp_tool_get_a8key
+  - wpp_tool_set_proxy
   - wpp_tool_set_step_count
   - wpp_tool_upload_file
   - wpp_tools_list
   - wpp_translate_send
   - wpp_translate_text
+  - wpp_upload_image
   - wpp_user_add_me_methods
   - wpp_user_bind_email
   - wpp_user_bind_mobile
   - wpp_user_bind_qq
+  - wpp_user_can_set_alias
   - wpp_user_change_password
   - wpp_user_del_device
   - wpp_user_friend_verification
@@ -259,6 +291,7 @@ provides_tools:
   - wpp_voice_message_transcribe
   - wpp_voice_result
   - wpp_voice_transcribe
+  - wpp_webhook_business_get
   - wpp_webhook_business_set
   - wpp_webhook_get
   - wpp_webhook_remove
@@ -276,21 +309,32 @@ provides_tools:
   - wpp_wxapp_record
   - wpp_wxapp_unionpay
   - wpp_wxapp_verify_plugin
+  - wpp_xw_a2a_list
+  - wpp_xw_cancel
   - wpp_xw_card_screenshot_check
   - wpp_xw_card_users
   - wpp_xw_create_session
+  - wpp_xw_events
+  - wpp_xw_get_session
   - wpp_xw_history_delete
   - wpp_xw_history_fill
   - wpp_xw_history_list
   - wpp_xw_invite
+  - wpp_xw_invite_candidates
+  - wpp_xw_invite_info
+  - wpp_xw_permission
   - wpp_xw_reddots
   - wpp_xw_reddots_read
+  - wpp_xw_regenerate
+  - wpp_xw_send_message
   - wpp_xw_suggestions
+  - wpp_xw_switch_room
 description: >
   WeChat Pad protocol gateway adapter for Hermes Agent (vendor wx.juhe.chat).
   Registers the ``wechatpadpro`` platform; relays WeChat chats between
   vendors (GetQR login, /ws/sync push, /Msg/SendTxt send) and the Hermes agent.
-  v2.0.0: full Python rewrite — heartflow 9-module port (aligned to TS v1.11.0),
+  v2.0.0: full Python rewrite — heartflow 9-module port (aligned to TS v1.16.2:
+  image-caption pass + silence-exempt threshold learning),
   single registration entry, migration-based data layer.
 
 requires_env:

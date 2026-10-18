@@ -180,11 +180,19 @@ def _src(rel: str) -> str:
 
 
 def _methods() -> dict[str, ast.AST]:
+    """类方法 + **模块级函数**（2026-10-18 起落库本体提成模块级
+    ``_persist_outbound_record``，由 live/cron/工具出站共用；断言仍看它）。"""
+    module_fn: dict[str, ast.AST] = {}
+    cls_fn: dict[str, ast.AST] = {}
     for node in ast.parse(_src(ADAPTER_REL)).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            module_fn[node.name] = node
         if isinstance(node, ast.ClassDef) and node.name == ADAPTER_CLS:
-            return {n.name: n for n in node.body
-                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    raise AssertionError(f"{ADAPTER_REL} 里找不到 class {ADAPTER_CLS}")
+            cls_fn = {n.name: n for n in node.body
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    if not cls_fn:
+        raise AssertionError(f"{ADAPTER_REL} 里找不到 class {ADAPTER_CLS}")
+    return {**module_fn, **cls_fn}
 
 
 def _code(node: ast.AST) -> str:
@@ -214,7 +222,7 @@ def test_persist_outbound_stores_server_id():
 
     群友引用 bot 消息带的是 ``svrid``（≙ ``newMsgId``）—— 落成客户端 id 就永远匹配不上。
     """
-    code = _code(_methods()["_persist_outbound"])
+    code = _code(_methods()["_persist_outbound_record"])
     assert "new_msg_id=ids.new_msg_id" in code, "必须把 new_msg_id 落进库"
     assert "ids.new_msg_id or ids.msg_id" in code, "msg_id 必须服务端 id 优先"
 

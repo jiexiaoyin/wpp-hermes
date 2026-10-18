@@ -1,41 +1,185 @@
-"""WPP jargon 群黑话挖掘（迁移自 wpp-openclaw inbound/jargon.ts）。
+"""WPP jargon 群黑话 —— **统计层**（迁移自 wpp-openclaw ``src/inbound/jargon.ts:29-338``）。
 
-自主学习：统计群内高频词 → 提供查询（AI 可查群黑话含义）。
-词频统计纯规则；含义推断可选 LLM 增强。
+黑话挖掘是三层流水线（TS 文件头 ``:10-24`` 自述，降 LLM 成本 70–80%）::
+
+    ① 统计预筛（零 LLM）  每消息更新词频表 → 跨群 IDF + burst + 用户集中度 → 高分候选
+    ② LLM 批量验证        一次调用筛掉普通词，只留真黑话      ← ``inbound/jargon_mine.py``
+    ③ LLM 三步推断含义    上下文推断 vs 纯字面推断 → 对比定黑话 ← 同上
+    ④ 查询工具            ``wpp_jargon_query`` 让模型查含义
+
+**本文件只装 ①**（以及 ④ 的取数：``query_jargon`` / ``list_hot_jargon``）。
+②③ 在 :mod:`plugin.inbound.jargon_mine`（拆两个文件是因为它们**共用**"候选从哪来、
+往哪降级"这一套判断，而且 ① 是纯算法、可本机真跑，②③ 要真调 LLM）。
+
+## 与 TS 的四处 JS/Python 分叉（都写成判据）
+
+1. **``Math.round`` ≠ ``round()``**：JS 是"四舍五入、.5 向上"（``floor(x+0.5)``），
+   Python 的 ``round`` 是**银行家舍入**（``round(0.5) == 0``）。候选分/IDF/burst 三个数
+   都要过这道取整 ⇒ 见 :func:`_js_round`。差这一下，分数会**只差 1e-4** 地分叉，
+   而排序又**用的就是取整后的分**（``jargon.ts:275-288``），足以把两个候选换个位置。
+2. **``\\d`` / ``\\w`` 是 ASCII 的**：Python 的 ``\\d`` 连阿拉伯-印度数字都算，``\\w``
+   连汉字都算 ⇒ 本文件里所有正则都写成**显式 ASCII 类**（``[0-9]`` / ``[A-Za-z0-9_]``）。
+   与 W7-1 的 ``re.ASCII``、W7-3 的 ``[0-9]`` 是同一族教训。
+3. **``String.length`` 是 UTF-16 码元数，Python ``len`` 是码点数**：代际/emoji 上两者差 1。
+   本模块**够不到**这条 —— 分词只从 ``[\\u4e00-\\u9fff]{2,}|[a-zA-Z]{2,}`` 里取，
+   两个集合都在 BMP 且都不是代理对 ⇒ 记在这里，免得下次有人"顺手改成 utf-16 计数"。
+4. **``Array.sort`` 与 ``sorted`` 都是稳定排序** ⇒ 同分候选保持"首次出现顺序"
+   （dict 保序 ＝ TS ``Map`` 保序）。**别加次级键**（``key=(score, term)`` 就是分叉）。
+
+## py2 独有的两处（都不是分叉，是本地约束）
+
+* **内存上限裁剪**（``MAX_GLOBAL_TERMS`` / ``MAX_GROUP_TERMS`` / ``_PRUNE_THRESHOLD``）：
+  TS 没有。n-gram 降级分词会把每个中文段切成 O(n) 个子串（见 :func:`ngram_tokens`），
+  不设上限就是一条长消息换几千个 token 常驻 —— 保留下限裁剪，**只增不减**地留着。
+* **可注入时钟**：``calc_burst_score`` / ``get_jargon_candidates`` 多一个 kw-only ``now``
+  （不传 = ``time.time()``，与 TS 直接读 ``Date.now()`` 逐字等价）。没有它，
+  burst 那半只能靠 mock 时间或"差不多"地断言。
+
+## ⚠️ 一条看着像 bug、其实是 TS 的现状
+
+:func:`should_filter_candidate` 的 ``HARD_BLOCK_RE`` **含中文即拉黑**（``[@一-鿿]``）
+⇒ 中文候选在这里就被挡掉，真正能进 LLM 的只有 ASCII 缩写（``yyds``/``xswl``）。
+**这是 ``jargon.ts:323`` 的原样，不顺手放宽** —— 放宽了 py2 就与 TS 分叉，
+而且分叉的那侧恰好是"我们看着更合理"的那侧，最容易被当成改进。
 """
+
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 log = logging.getLogger(__name__)
 
+# ===== 常量（对齐 ``jargon.ts:30-40``）=====
+MIN_TERM_LENGTH = 2
+MIN_FREQUENCY = 5
 MAX_CONTEXT_EXAMPLES = 10
+WEIGHT_IDF = 0.4
+WEIGHT_BURST = 0.3
+WEIGHT_CONCENTRATION = 0.3
+#: 中文 n-gram 长度上限（降级分词用）
+NGRAM_MAX = 4
+#: 词条年龄上限（天）：超过则视为稳定词，burst 不再继续衰减
+BURST_AGE_CAP_DAYS = 14
 
-# 网络常用但含义明确的词（不是黑话，跳过统计）
-_COMMON_WORDS = {
-    "的", "了", "在", "是", "我", "你", "他", "她", "它", "我们", "你们", "他们",
-    "这", "那", "就", "都", "也", "还", "很", "有", "没", "不", "好", "吗", "呢",
-    "啊", "吧", "嗯", "哦", "哈", "哈哈", "呵呵", "嘿嘿",
-    "hello", "hi", "ok", "好的", "可以", "谢谢", "感谢", "微信", "群", "消息",
-}
+#: 停用词表（``jargon.ts:43-67`` 逐字）。**顺序无关**（Set 语义），但内容别删 ——
+#: 少一个，那个词就会进候选，然后被 LLM 验证那一关按次计费地筛掉。
+STOPWORDS = frozenset([
+    # 虚词/助词/语气词
+    "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "个", "上", "也", "很",
+    "到", "说", "要", "去", "你", "会", "着", "没", "看", "好", "自", "这", "他", "她", "它", "们",
+    "吗", "吧", "呢", "啊", "哦", "嗯", "呀", "哈", "那", "么", "什", "啦", "噢", "嘛", "哇",
+    "来", "对", "把", "让", "被", "给", "从", "还", "比", "得", "过", "可", "能", "为", "以", "而",
+    "但", "或", "如", "与", "等", "及", "其", "之",
+    # 代词/指示词
+    "这个", "那个", "什么", "怎么", "哪里", "这里", "那里", "自己", "大家", "我们", "你们", "他们",
+    "她们", "谁", "哪个", "这些", "那些", "多少", "几个", "某个", "别人",
+    # 常见动词
+    "知道", "觉得", "感觉", "可以", "应该", "需要", "已经", "开始", "然后", "因为", "所以", "虽然",
+    "如果", "不是", "没有", "不会", "不能", "不要", "不用", "不行", "出来", "出去", "进来", "起来",
+    "下去", "回来", "过来", "喜欢", "希望", "想要", "能够", "可能", "一定", "必须", "告诉", "问题",
+    "时候", "东西", "事情", "地方", "方面",
+    # 时间词
+    "今天", "昨天", "明天", "现在", "刚才", "以前", "以后", "时间", "上午", "下午", "晚上", "早上",
+    "中午",
+    # 常见形容词/副词
+    "真的", "确实", "其实", "当然", "特别", "非常", "一直", "还是", "而且", "只是", "只有", "所有",
+    "一些", "比较", "最后", "首先", "接着", "终于", "竟然",
+    # 常见名词
+    "朋友", "老师", "同学", "学生", "家里", "公司", "学校", "手机", "电脑", "工作", "生活",
+    # 网络常用但含义明确的词（不是黑话）
+    "哈哈", "哈哈哈", "呵呵", "嘻嘻", "啊啊", "嗯嗯", "谢谢", "感谢", "抱歉", "不好意思", "没关系",
+    "图片", "表情", "语音", "视频", "文件", "链接",
+])
 
-_TOKEN_RE = re.compile(r"[一-鿿]{2,}|[a-zA-Z0-9_]{2,}")
+# ===== 分词（**只有 n-gram 降级那半**，见下）=====
+#
+# TS 会先试 ``require("@node-rs/jieba")``（可选增强），失败才降级 n-gram
+# （``jargon.ts:77-108``）。py2 **不装 jieba**（它不在 ``plugin.yaml`` 的
+# ``python_dependencies`` 里，也不该加 —— 纯为分词装一个带原生扩展的包不值），
+# 所以这里实现的是 TS 的**降级路径**，行为与"TS 侧 jieba 加载失败"逐字一致。
+#
+# ⚠️ 少掉的那截是 ``isStandardVocabulary``（jieba 词典频率 > 100 视为标准词）：
+#    jieba 缺席时 TS 的它**恒返回 False**（``jargon.ts:102`` 第一行就 return false）
+#    ⇒ 两边在这一路径上等价，不是缺口。真装了 jieba 的 TS 会多一道过滤 ⇒
+#    py2 的候选里可能多出标准词，但下游还有 ``should_filter_candidate`` 与 LLM 验证两道。
+_CJK = "一-鿿"
+_AT_RE = re.compile(r"@\S+")
+_URL_RE = re.compile(r"https?://\S+")
+_BRACKET_RE = re.compile(r"\[.*?\]")
+#: 连续汉字段 / 连续 ASCII 字母段（``jargon.ts:140``）
+_SEG_RE = re.compile(rf"[{_CJK}]{{2,}}|[a-zA-Z]{{2,}}")
+_ASCII_ALPHA_RE = re.compile(r"^[a-zA-Z]+$")
+#: 纯数字（**显式 ASCII**：JS ``\d`` 不含阿拉伯-印度数字，见模块 docstring ②）
+_PURE_DIGITS_RE = re.compile(r"^[0-9\s]+$")
+#: 纯标点（**显式 ASCII ``\w``**：`[^\w一-鿿]+` 的 Python 写法）
+_PURE_PUNCT_RE = re.compile(rf"^[^A-Za-z0-9_{_CJK}]+$")
+
+
+def ngram_tokens(text: str) -> list[str]:
+    """降级分词：连续汉字/字母段 → 2-4 gram（``jargon.ts:139-156``）。
+
+    英文/拼音缩写**整体**作为候选（``yyds``/``nbcs``），长度 ≤ 8 才收；
+    中文段生成 **4-gram → 3-gram → 2-gram** 的全部子串（注意 TS 是从长到短生成，
+    输出顺序影响后续"首次出现顺序"，见模块 docstring ④）。
+
+    ⚠️ 一段 n 字的中文文本会产出约 ``3n`` 个 token —— 这就是
+    ``MAX_GLOBAL_TERMS`` 那道裁剪必须留着的理由。
+    """
+    if not text:
+        return []
+    tokens: list[str] = []
+    for seg in _SEG_RE.findall(text):
+        if _ASCII_ALPHA_RE.match(seg):
+            if len(seg) <= 8:
+                tokens.append(seg)
+            continue
+        for n in range(NGRAM_MAX, 1, -1):
+            for i in range(len(seg) - n + 1):
+                tokens.append(seg[i:i + n])
+    return tokens
 
 
 def tokenize(text: str) -> list[str]:
-    """提取候选词（中文 2 字以上 + 英文数字 2 字符以上）。"""
+    """提取候选词：去 @提及 / URL / 方括号标记 → 分词 → 四道过滤（``jargon.ts:116-136``）。
+
+    过滤顺序与 TS 逐条一致：长度 < 2 → 停用词 → 纯数字 → 纯标点。
+    （TS 的第五道 ``isStandardVocabulary`` 在无 jieba 时恒假，见上面的说明。）
+
+    ⚠️ ``[.*?]`` 那道 `[[图片]]` 式标记要先去掉：vendor 把媒体标记写进正文，
+    不去掉就会切出 ``图片`` 这类没意义的段（``图片`` 其实也在停用词表里，双保险）。
+    """
     if not text:
         return []
-    # 去掉 @提及
-    text = re.sub(r"@\S+", "", text)
-    tokens = _TOKEN_RE.findall(text)
-    return [t for t in tokens if t not in _COMMON_WORDS]
+    cleaned = _AT_RE.sub(" ", str(text))
+    cleaned = _URL_RE.sub(" ", cleaned)
+    cleaned = _BRACKET_RE.sub(" ", cleaned)
+
+    out: list[str] = []
+    for raw in ngram_tokens(cleaned):
+        # TS 这里是 ``w.trim()``。n-gram 的输出**不含**空白/BOM（来源正则只有汉字与字母）
+        # ⇒ ``.strip()`` 与 JS ``trim()`` 在这条路上无差别，不必搬 ``_js_trim``。
+        word = raw.strip()
+        if len(word) < MIN_TERM_LENGTH:
+            continue
+        if word in STOPWORDS:
+            continue
+        if _PURE_DIGITS_RE.match(word):
+            continue
+        if _PURE_PUNCT_RE.match(word):
+            continue
+        out.append(word)
+    return out
 
 
-# P1-7.2 修复：内存上限（防 token 集合无限膨胀 OOM）
+# ===== 统计表（内存；**按 group 分桶、不分账号** —— 与 TS 同构）=====
+#
+# P1-7.2 修复：内存上限（防 token 集合无限膨胀 OOM）。
+# 这三条是 **py2 独有**的，TS 侧没有任何上限（它的 jieba 路径 token 数远小于 n-gram）。
 MAX_GLOBAL_TERMS = 20000      # 全局 token 数上限（跨群）
 MAX_GROUP_TERMS = 5000        # 单群 token 数上限
 _PRUNE_THRESHOLD = 3          # 裁剪时删除 <3 次的低频词
@@ -48,12 +192,17 @@ class JargonStats:
         self.user_term_freq: dict[str, dict[str, dict[str, int]]] = {}  # group → term → user → count
         self.term_first_seen: dict[str, dict[str, float]] = {}    # group → term → ts
         self.term_contexts: dict[str, dict[str, list[str]]] = {}  # group → term → samples
+        self.dirty_groups: set[str] = set()                       # 活跃群（TS 同名字段）
 
     def _prune_if_needed(self) -> None:
         """容量超限时裁剪低频词（保留高频黑话，控制内存）。"""
         if len(self.global_term_freq) > MAX_GLOBAL_TERMS:
             # 裁剪 global：删除低频词
-            low = [t for t, c in self.global_term_freq.items() if c < _PRUNE_THRESHOLD]
+            # ⚠️ 必须是 **set**：下面 `t in low` 是逐词成员判定，用 list 会退化成
+            #   O(群词数 × |low|) 的二次复杂度 —— 实测 10 群×4000 词 + low=10000
+            #   时单条消息卡事件循环 6.6s（本函数挂在 update_from_message 末尾，
+            #   每条群消息都走）。
+            low = {t for t, c in self.global_term_freq.items() if c < _PRUNE_THRESHOLD}
             for t in low:
                 del self.global_term_freq[t]
             # 同步裁剪各群
@@ -66,7 +215,7 @@ class JargonStats:
                         self.term_contexts.get(g, {}).pop(t, None)
         for g, gf in self.group_term_freq.items():
             if len(gf) > MAX_GROUP_TERMS:
-                low = [t for t, c in gf.items() if c < _PRUNE_THRESHOLD]
+                low = {t for t, c in gf.items() if c < _PRUNE_THRESHOLD}
                 for t in low:
                     del gf[t]
                     self.user_term_freq.get(g, {}).pop(t, None)
@@ -76,14 +225,45 @@ class JargonStats:
 
 _stats = JargonStats()
 
+#: 已挖到的含义（group → term → meaning）。**这是 py2 追加的一小块**，理由：
+#: TS 的查询工具直接读 ``wpp_jargon_terms`` 表（``jargon-meta.ts`` 的 ``getJargonTerms``），
+#: 而 py2 的 ``wpp_jargon_query`` 是**生成物**（``port_tools_domain.py`` 从冻结旧树搬来，
+#: schema/取数与旧实现逐字绑定，改它就要动三道构建工具），读的是**本模块的内存统计**。
+#: ⇒ 挖掘出的含义若只在 DB 里，模型这条消费路就是"写了没人读"。所以挖掘成功时
+#: 顺手记一份到内存，``query_jargon`` / ``list_hot_jargon`` 把它带上。
+#: 代价与口径都在 :func:`remember_meaning` 里写明（不进 DB、重启即失、以 DB 为准）。
+_term_meanings: dict[str, dict[str, str]] = {}
+
 
 def reset_stats() -> None:
     global _stats
     _stats = JargonStats()
+    _term_meanings.clear()
+
+
+def remember_meaning(group_id: str, term: str, meaning: str) -> None:
+    """记下某个词在某个群的含义（供查询工具当次进程内使用）。
+
+    ⚠️ **这不是第二份真相源**：权威副本在 ``wpp_jargon_terms``（``upsert_jargon`` 写的），
+    这里只是"让已经挖到的含义能被 ``wpp_jargon_query`` 读到"的桥梁 —— py2 的查询工具
+    读内存统计（见 ``_term_meanings`` 的注释），而挖掘的产出落在 DB。
+    空的 ``meaning`` **不记**（TS 在"无法确定"时就是空串，记下来会让查询工具
+    把"不知道"当成"知道，含义是空"）。
+    """
+    if not group_id or not term or not meaning:
+        return
+    _term_meanings.setdefault(group_id, {})[term] = meaning
+
+
+def known_meaning(group_id: str, term: str) -> str:
+    return _term_meanings.get(group_id, {}).get(term, "")
 
 
 def update_from_message(content: str, group_id: str, sender_id: str) -> None:
-    """统计一条群消息的词频。"""
+    """统计一条群消息的词频（``jargon.ts:199-230``）。
+
+    **每条群消息调用，< 1ms**。空正文/空群号直接返回（TS 同）。
+    """
     if not content or not group_id:
         return
     tokens = tokenize(content)
@@ -102,34 +282,201 @@ def update_from_message(content: str, group_id: str, sender_id: str) -> None:
         ctx = _stats.term_contexts.setdefault(group_id, {}).setdefault(token, [])
         if len(ctx) < MAX_CONTEXT_EXAMPLES:
             ctx.append(content)
+    _stats.dirty_groups.add(group_id)
     _stats._prune_if_needed()  # P1-7.2：容量超限裁剪
 
 
+def reset_group_jargon(group_id: str) -> None:
+    """清空某群统计（``jargon.ts:314-320``）。"""
+    _stats.group_term_freq.pop(group_id, None)
+    _stats.user_term_freq.pop(group_id, None)
+    _stats.term_first_seen.pop(group_id, None)
+    _stats.term_contexts.pop(group_id, None)
+    _stats.dirty_groups.discard(group_id)
+    _term_meanings.pop(group_id, None)
+
+
+# ===== 候选打分 =====
+
+
+def _js_round(x: float) -> int:
+    """JS ``Math.round`` 的对等物：**四舍五入、.5 朝 +∞**（``floor(x + 0.5)``）。
+
+    Python 的 ``round`` 是银行家舍入（``round(0.5) == 0``、``round(2.5) == 2``）
+    ⇒ 直接用它会在 .5 上分叉（见模块 docstring ①）。
+    负数也一致：``Math.round(-1.5) === -1``、``floor(-1.0) === -1``。
+    """
+    return math.floor(x + 0.5)
+
+
+@dataclass(frozen=True)
+class JargonCandidate:
+    """一个黑话候选（``jargon.ts:232-240`` 的 ``JargonCandidate``）。
+
+    ``score``/``idf``/``burst_score`` 都是**已取整到 4 位**的值 —— 与 TS 一样，
+    排序用的就是取整后的分（别改成"按原始分排序"，那是分叉）。
+    """
+
+    term: str
+    score: float
+    frequency: int
+    idf: float
+    burst_score: float
+    unique_users: int
+    context_examples: list[str] = field(default_factory=list)
+
+
+def calc_burst_score(term: str, group_id: str, *, now: float | None = None) -> float:
+    """burst 分：``freq / max(age_days, 1)``，年龄上限 14 天（``jargon.ts:293-299``）。
+
+    年龄**下限是 1 天**（不是 0）—— 刚出现的词除以 1 而不是除以 0，这是 TS 的原样。
+    首见时间缺失（``first_seen == 0``）直接返 0，别让它落进分母。
+    """
+    first_seen = _stats.term_first_seen.get(group_id, {}).get(term, 0)
+    if first_seen == 0:
+        return 0.0
+    now = time.time() if now is None else now
+    age_days = min(max((now - first_seen) / 86400, 1), BURST_AGE_CAP_DAYS)
+    freq = _stats.group_term_freq.get(group_id, {}).get(term, 0)
+    return freq / age_days
+
+
+def get_jargon_candidates(
+    group_id: str, top_k: int = 20, exclude_terms: Optional[set[str]] = None,
+    *, now: float | None = None,
+) -> list[JargonCandidate]:
+    """取群内 top-K 候选（``jargon.ts:245-290``）。
+
+    综合分 = ``idf*0.4 + burst*0.3 + 集中度*0.3``；集中度 = ``1/max(unique_users,1)``
+    —— "一个人反复说"的分**低于**"很多人都在说"（这是黑话与口头禅的分野）。
+    """
+    group_freq = _stats.group_term_freq.get(group_id)
+    if not group_freq:
+        return []
+
+    num_groups = max(len(_stats.group_term_freq), 1)
+    exclude = exclude_terms or set()
+    candidates: list[JargonCandidate] = []
+
+    for term, freq in group_freq.items():
+        if freq < MIN_FREQUENCY:
+            continue
+        if term in exclude:
+            continue
+
+        # IDF：跨群稀有度（在越少的群里出现，越可能是"这个群的内部话"）
+        groups_containing = 0
+        for gf in _stats.group_term_freq.values():
+            if term in gf:
+                groups_containing += 1
+        idf = math.log(num_groups / max(groups_containing, 1))
+
+        burst_score = calc_burst_score(term, group_id, now=now)
+
+        unique_users = len(_stats.user_term_freq.get(group_id, {}).get(term, {}))
+        concentration = 1.0 / max(unique_users, 1)
+
+        score = idf * WEIGHT_IDF + burst_score * WEIGHT_BURST + concentration * WEIGHT_CONCENTRATION
+
+        candidates.append(JargonCandidate(
+            term=term,
+            score=_js_round(score * 10000) / 10000,
+            frequency=freq,
+            idf=_js_round(idf * 10000) / 10000,
+            burst_score=_js_round(burst_score * 10000) / 10000,
+            unique_users=unique_users,
+            context_examples=list(_stats.term_contexts.get(group_id, {}).get(term) or [])[:5],
+        ))
+
+    # 稳定排序（同分保持"首次出现顺序"）—— 见模块 docstring ④，别加次级键。
+    candidates.sort(key=lambda c: -c.score)
+    return candidates[:top_k]
+
+
+def get_group_stats(group_id: str) -> dict[str, int]:
+    """群统计摘要（``jargon.ts:302-311``）。"""
+    group_freq = _stats.group_term_freq.get(group_id) or {}
+    total = 0
+    above = 0
+    for f in group_freq.values():
+        total += f
+        if f >= MIN_FREQUENCY:
+            above += 1
+    return {
+        "total_unique_terms": len(group_freq),
+        "total_occurrences": total,
+        "terms_above_threshold": above,
+    }
+
+
+# ===== 黑话硬编码过滤（``jargon.ts:322-338``；**含中文即拉黑**，见模块 docstring 末节）=====
+HARD_BLOCK_RE = re.compile(rf"[@{_CJK}]|[\[\]]|https?://|[\s　]")
+#: ⚠️ ``[\s　]``：``　``（全角空格）在 JS 与 Python 的 ``\s`` 里**都是**空白
+#: ⇒ 这一项两边都冗余。**保留**它是因为它是 TS 原文的一部分，删掉会让下一处对照看不见它。
+COMMON_BLOCK = frozenset([
+    "哈哈", "哈哈哈", "呵呵", "嘻嘻", "啊啊", "嗯嗯", "谢谢", "感谢", "好的", "可以", "不错",
+    "收到", "明白", "知道", "看看", "这个", "那个", "什么", "怎么", "真的", "确实", "其实",
+])
+
+
+def should_filter_candidate(term: str) -> bool:
+    """候选是否该过滤（纯规则，``jargon.ts:330-338``）。"""
+    if not term:
+        return True
+    if len(term) < 2 or len(term) > 8:
+        return True
+    if HARD_BLOCK_RE.search(term):   # 含中文/方括号/URL/空白
+        return True
+    if re.match(r"^[0-9]+$", term):
+        return True
+    if re.match(r"^[a-zA-Z]{7,}$", term):   # 超长纯英文
+        return True
+    if term in COMMON_BLOCK:
+        return True
+    return False
+
+
+# ===== 查询（④ 的取数端；被 ``tools/jargon_tool.py`` 的 ``wpp_jargon_query`` 调用）=====
+
+
 def query_jargon(group_id: str, term: str, min_freq: int = 3) -> Optional[dict]:
-    """查询某群某词的黑话信息。返回 {term, count, users, contexts, first_seen} 或 None。"""
+    """查询某群某词的信息。返回 ``{term, count, users, contexts, first_seen[, meaning]}`` 或 ``None``。
+
+    ⚠️ ``min_freq`` 默认 **3**：TS 的查询工具是"从 DB 取全部已确认词条"，
+    py2 这份是内存统计的高频词查询 ⇒ 阈值 3 是它自己的口径（**不是 TS 的 MIN_FREQUENCY=5**，
+    那个常量管的是候选打分）。改这两个数前先想清楚在改哪一个。
+    """
     gf = _stats.group_term_freq.get(group_id, {})
     count = gf.get(term, 0)
     if count < min_freq:
         return None
     users = _stats.user_term_freq.get(group_id, {}).get(term, {})
     contexts = _stats.term_contexts.get(group_id, {}).get(term, [])
-    return {
+    out = {
         "term": term,
         "count": count,
         "users": {uid: c for uid, c in users.items()},
         "contexts": contexts,
         "first_seen": _stats.term_first_seen.get(group_id, {}).get(term),
     }
+    meaning = known_meaning(group_id, term)
+    if meaning:
+        out["meaning"] = meaning
+    return out
 
 
 def list_hot_jargon(group_id: str, limit: int = 10, min_freq: int = 3) -> list[dict]:
-    """列出某群高频词（黑话候选）。"""
+    """列出某群高频词（黑话候选）。有已挖到的含义就一并带上。"""
     gf = _stats.group_term_freq.get(group_id, {})
     hot = sorted(gf.items(), key=lambda x: -x[1])[:limit]
     out = []
     for term, count in hot:
         if count >= min_freq:
-            out.append({"term": term, "count": count})
+            item = {"term": term, "count": count}
+            meaning = known_meaning(group_id, term)
+            if meaning:
+                item["meaning"] = meaning
+            out.append(item)
     return out
 
 

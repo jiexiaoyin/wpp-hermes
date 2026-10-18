@@ -93,17 +93,27 @@ CACHE_REGISTRY = HfCacheRegistry()
 
 
 def _preload_steps() -> list[tuple[str, str, Callable[[str], int]]]:
-    """三条启动预热的 ``(键, 中文名, 加载函数)``。取不到模块 ⇒ 空表（见 :func:`preheat_account`）。
+    """启动预热的 ``(键, 中文名, 加载函数)``。取不到模块 ⇒ 空表（见 :func:`preheat_account`）。
 
     导入放在**函数体内**：九模块未就位时（F5 的注册链纪律）不许在加载期炸。
+
+    前三条对齐 TS ``startAccount`` 的三条 fire-and-forget 预热；**第四条（``dedupe``，
+    2026-10-02 / B7）是本侧补的** —— 复读闸历史同样只活在内存里，不预热就等于"每次
+    重启后 6 小时内没有复读闸"，而那种失效在日志与状态页上完全看不出来。
+    **第五条（``profiles``，2026-10-18）** 是回复侧开始消费群画像后补的：缓存原先
+    只在 sweep 第 1 步预热，重启后前 300s judge/回复侧都拿不到画像。
     """
     try:
+        from . import dedupe as hf_dedupe
         from . import layer as hf_layer
         from . import learn as hf_learn
+        from . import profile as hf_profile
         return [
             ("learned", "learned 阈值", hf_learn.load_learned_thresholds),
             ("budget", "发言预算计数", hf_learn.load_hf_budget_seed),
             ("layer", "分层统计", hf_layer.load_hf_layer_stats),
+            ("dedupe", "复读历史", hf_dedupe.load_hf_dedupe_history),
+            ("profiles", "群画像", hf_profile.load_hf_profiles),
         ]
     except Exception as exc:  # noqa: BLE001 —— 未就位 / 少了函数都算"没有可预热的"
         log.debug("[WPP HF] 启动预热取不到加载函数（心流未就位？）: %s", exc)
@@ -111,22 +121,29 @@ def _preload_steps() -> list[tuple[str, str, Callable[[str], int]]]:
 
 
 def preheat_account(account_id: str) -> dict[str, int]:
-    """账号启动预热：把三条"judge 读得到、DB 里存着"的缓存灌满，返回各条加载条数。
+    """账号启动预热：把"judge 读得到、DB 里存着"的缓存灌满，返回各条加载条数。
 
-    对应 TS ``startAccount`` 里的三条 fire-and-forget 预热（``loadLearnedThresholds`` /
-    ``loadHfBudgetSeed`` / ``loadHfLayerStats``）。**为什么非预热不可**：judge 热路径
-    零 DB IO（V7），读的全是内存 —— 冷启动到首个 sweep 之间隔着 300s，这段时间里
-    阈值回落账号级、预算从 0 起算（= 给"重启刷额度"开后门）、分层统计整个缺席。
+    前三条对应 TS ``startAccount`` 里的三条 fire-and-forget 预热
+    （``loadLearnedThresholds`` / ``loadHfBudgetSeed`` / ``loadHfLayerStats``）。
+    **为什么非预热不可**：judge 热路径零 DB IO（V7），读的全是内存 —— 冷启动到首个
+    sweep 之间隔着 300s，这段时间里阈值回落账号级、预算从 0 起算（= 给"重启刷额度"
+    开后门）、分层统计整个缺席。
+
+    第四条（``dedupe`` 复读历史，B7 / 2026-10-02）是本侧补的，同样出于"内存缓存冷启动"
+    这个理由，只是它的失效更隐蔽：复读闸空转 6 小时，日志与状态页一切正常，只有群友
+    能看到 bot 又把同一段话说了第二遍。
 
     与 TS 的**一处刻意不同**：那边是 ``void load().then()``，不阻塞启动（第一条消息可能
     撞上冷缓存）；本侧 DB 是同步的，于是**同步跑完再起 WS** —— 进来的第一条消息就是热的。
     这是更强的那一侧，不构成行为差异（TS 也没保证预热早于首条消息）。
 
-    三条**各自独立**：一条炸了不影响另外两条（被调模块里还有自己那层降级）。
+    每条**各自独立**：一条炸了不影响其余（被调模块里还有自己那层降级）。
     本函数**不抛** —— 预热失败不是账号接入的阻塞点。
 
-    画像不在这一批里：TS 的画像预热在 sweep 第 1 步（``maybeGenerateHfGroupProfiles``），
-    本侧照做（``profile.maybe_generate_hf_group_profiles``），别在这里多灌一份。
+    第五条（``profiles`` 群画像，2026-10-18）只**读**画像行灌缓存，不生成：
+    生成仍在 sweep 第 1 步（``profile.maybe_generate_hf_group_profiles``）。
+    原先画像缓存要等首个 sweep 才热，回复侧开始消费画像后，那 300s 会直接表现为
+    "重启后回复风格退化成通用人设"。
     """
     out: dict[str, int] = {}
     for key, label, fn in _preload_steps():

@@ -1,4 +1,4 @@
-"""验证 ``plugin/tools/`` 是旧扁平 ``plugin/tools.py`` 的**无损**搬迁。
+"""验证 ``plugin/toolkit/`` 是旧扁平 ``plugin/tools.py`` 的**无损**搬迁。
 
 检查两层，缺一不可：
 
@@ -39,6 +39,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from port_tools_domain import (  # noqa: E402
+    DECLARED_AST_DIFFS,
+    DECLARED_EXTRA_TOOLS,
+    DECLARED_REGISTRATION_DIFFS,
     GENERATED,
     LEGACY,
     RENAMES,
@@ -90,7 +93,7 @@ def _top_funcs(tree: ast.Module) -> dict[str, ast.AST]:
 def check_ast(legacy_text: str) -> None:
     print("① AST 逐函数等价（旧区间 → 新文件，套登记在案的重写 + 改名）")
     for name in SPLITS:
-        path = ROOT / "plugin" / "tools" / name
+        path = ROOT / "plugin" / "toolkit" / name
         if not path.exists():
             fail(f"{name}: 新文件不存在")
             continue
@@ -104,13 +107,17 @@ def check_ast(legacy_text: str) -> None:
             continue
 
         bad = 0
+        declared = DECLARED_AST_DIFFS.get(name, {})
         for fn, node in old.items():
             if fn not in new:
                 fail(f"{name}: 旧函数 {fn}() 在新文件里找不到")
                 bad += 1
             elif ast.dump(node) != ast.dump(new[fn]):
-                fail(f"{name}: {fn}() 的函数体与旧实现不一致（且未登记在 REWRITES/RENAMES）")
-                bad += 1
+                if fn in declared:
+                    note(f"{name}: {fn}() 有意偏离蓝本 —— {declared[fn]}")
+                else:
+                    fail(f"{name}: {fn}() 的函数体与旧实现不一致（且未登记在 REWRITES/RENAMES/DECLARED_AST_DIFFS）")
+                    bad += 1
         extra = sorted(set(new) - set(old))
         if not bad:
             tag = "生成物" if name in GENERATED else "人工"
@@ -155,10 +162,10 @@ def _import_legacy() -> types.ModuleType:
     sys.modules["legacyplugin"] = pkg
     sys.modules["legacyplugin.api_client"] = stub
 
-    spec = importlib.util.spec_from_file_location("legacyplugin.tools", LEGACY)
+    spec = importlib.util.spec_from_file_location("legacyplugin.toolkit", LEGACY)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["legacyplugin.tools"] = mod
+    sys.modules["legacyplugin.toolkit"] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -211,7 +218,7 @@ def check_diff(legacy_text: str) -> None:
         note(f"本机缺 {'/'.join(stubbed)} —— 已用空壳替身（注册期用不到它们）")
     legacy = _import_legacy()
 
-    from plugin.tools import jargon_tool, mcp, msg  # noqa: PLC0415
+    from plugin.toolkit import jargon_tool, mcp, msg  # noqa: PLC0415
 
     pairs = (
         ("msg", legacy, msg, ("register_msg_tools",)),
@@ -225,26 +232,37 @@ def check_diff(legacy_text: str) -> None:
         if old_ctx.dupes or new_ctx.dupes:
             fail(f"{label}: 注册了重名工具 {sorted(set(old_ctx.dupes + new_ctx.dupes))}")
 
+        declared_reg = DECLARED_REGISTRATION_DIFFS.get(label, {})
+        declared_extra = DECLARED_EXTRA_TOOLS.get(label, {})
         only_old = sorted(set(old_ctx.tools) - set(new_ctx.tools))
         only_new = sorted(set(new_ctx.tools) - set(old_ctx.tools))
         if only_old:
             fail(f"{label}: 旧有 {len(only_old)} 个工具在新实现里丢了: {only_old[:8]}")
-        if only_new:
-            fail(f"{label}: 新实现多出未申报的工具: {only_new[:8]}")
+        undeclared_new = [n for n in only_new if n not in declared_extra]
+        if undeclared_new:
+            fail(f"{label}: 新实现多出未申报的工具: {undeclared_new[:8]}")
+        for n in only_new:
+            if n in declared_extra:
+                note(f"{label}: 新增工具 {n} —— {declared_extra[n]}")
 
         drifted = [
             n for n in sorted(set(old_ctx.tools) & set(new_ctx.tools))
             if old_ctx.tools[n] != new_ctx.tools[n]
         ]
-        if drifted:
-            fail(f"{label}: {len(drifted)} 个工具的 (toolset, schema) 与旧实现不同: {drifted[:5]}")
+        undeclared_drift = [n for n in drifted if n not in declared_reg]
+        if undeclared_drift:
+            fail(f"{label}: {len(undeclared_drift)} 个工具的 (toolset, schema) 与旧实现不同: {undeclared_drift[:5]}")
+        for n in drifted:
+            if n in declared_reg:
+                note(f"{label}: {n} 有意偏离蓝本 —— {declared_reg[n]}")
 
         bad_toolset = [n for n, (ts, _s) in new_ctx.tools.items() if ts != "wechatpadpro"]
         if bad_toolset:
             fail(f"{label}: toolset 不是 'wechatpadpro' 的: {bad_toolset[:5]}")
 
-        if not (only_old or only_new or drifted or bad_toolset):
-            print(f"  ✅ {label:8s} {len(new_ctx.tools):3d} 个工具：名称 / toolset / schema 全等")
+        if not (only_old or undeclared_new or undeclared_drift or bad_toolset):
+            suffix = "（含已申报差异）" if (only_new or drifted) else ""
+            print(f"  ✅ {label:8s} {len(new_ctx.tools):3d} 个工具：名称 / toolset / schema 一致{suffix}")
 
 
 # --------------------------------------------------------------------------- 入口

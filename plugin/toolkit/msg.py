@@ -10,12 +10,19 @@
 本文件由 ``tools/port_tools_domain.py`` 生成，``tools/verify_tools_port.py``
 用 AST 逐函数与旧实现比对 —— **任何未登记在案的字面改动都会让它红。**
 
-## 与旧实现的全部差异（就这两条）
+## 与旧实现的全部差异（就这三条）
 
 1. 函数体内 ``from .api_client import WppApiError``
    → ``from ..core.api_client import WppApiError``（包结构变了）
 2. 旧的**同文件模块级** ``_get_client`` / ``_mk_handler`` / ``_resolve_to_base64``
    现在由本文件头部提供别名 / 包装：前两个指向 :mod:`.registry`，第三个见下。
+3. **W7-5（2026-10-02）**：四处朋友圈守卫的"开关"那半收口到 :mod:`.policy` 的运行期
+   门禁（头部因此多一个 ``policy`` 导入）。旧实现在这四处调 ``adapter.get_account(aid)``
+   —— **适配器上没有这个方法**（全树只在旧原文这 4 行出现过）⇒ 真机必然
+   ``AttributeError`` ⇒ 回话是「调用失败: …」而不是那句"未启用"，且**白名单那一支
+   永远走不到**（等于白名单形同没有）。⇒ 这是**第二处"改了语义"的有意偏离**，
+   详见 :data:`REWRITES` 里 ``msg.py`` 那条与 ``plugin/toolkit/policy.py`` 的
+   :data:`FRIEND_CIRCLE_PUBLISH_GATE`。
 
 ## ``_resolve_to_base64`` 为什么要包一层（别图省事直接引用）
 
@@ -33,8 +40,9 @@
 from __future__ import annotations
 
 import logging
+import time
 
-from . import registry
+from . import policy, registry
 
 log = logging.getLogger(__name__)
 
@@ -63,12 +71,117 @@ async def _resolve_to_base64(ref: str) -> str:
     return b64
 
 
+def _generate_image_via_hermes(prompt: str, aspect_ratio: str) -> dict:
+    """生图走 Hermes ``image_gen`` 注册表（百炼 qwen-image / wan / z-image）。
+
+    旧实现 fork ``mmx``（MiniMax image-01），与 Hermes 的模型供应商体系完全脱节：
+    即使 ``image_gen.provider`` 已经指向百炼，WPP 工具仍会用 MiniMax。这里改为
+    调用当前激活的 provider，图片落到 ``$HERMES_HOME/cache/generated/images/``。
+    """
+    try:
+        # 延迟导入：``register()`` 会在隔离 probe 子进程里整体跑一遍，那个解释器
+        # 没有 Hermes 的 ``agent`` 包；模块级导入只能依赖标准库 + ``registry``。
+        from agent.image_gen_registry import get_active_provider
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"Hermes 生图后端加载失败: {exc}"}
+    provider = get_active_provider()
+    if provider is None:
+        return {"success": False, "error": "未配置生图后端（image_gen.provider）"}
+    try:
+        return provider.generate(prompt=prompt, aspect_ratio=aspect_ratio)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"{getattr(provider, 'name', 'image_gen')} 生图异常: {exc}"}
+
+
+def _localize_generated_image(image: str, prefix: str) -> str:
+    """把 provider 返回的 URL 兜底下载到 /tmp（缓存失败时 URL 24h 后会过期）。"""
+    if not image or not image.startswith(("http://", "https://")):
+        return image
+    import os as _os
+    import shutil as _shutil
+    import time as _time
+    import urllib.request as _urlreq
+
+    path = f"/tmp/{prefix}-{_os.getpid()}-{int(_time.time() * 1000)}.png"
+    with _urlreq.urlopen(image, timeout=60) as src, open(path, "wb") as dst:
+        _shutil.copyfileobj(src, dst)
+    return path
+
+
+def _persist_tool_outbound(account_id: str, peer_id: str, content: str, resp,
+                           msg_type: str = "text") -> None:
+    """落库工具路径的出站记录（``wpp_send_text`` / ``wpp_send_image``）。
+
+    live ``adapter.send()`` 与 cron ``_standalone_send`` 都会落库；工具直发
+    原先只有 ``quote_reply`` 落库 ⇒ Stage2 这种"agent 调工具发群"的消息在
+    ``wpp_messages`` 里完全隐形。失败只 warn，不影响已完成的发送。
+    """
+    try:
+        from ..data import repo_messages
+        from ..inbound.persist import db_chat_id, db_peer_kind
+        from ..platform import outbound
+
+        resp_ids = outbound.extract_outbound_msg_ids(resp)
+        is_group = outbound.is_group_peer(peer_id)
+        repo_messages.save_message(
+            account_id,
+            direction="outbound",
+            peer_kind=db_peer_kind("group" if is_group else "dm"),
+            peer_id=peer_id,
+            chat_id=db_chat_id(peer_id, is_group=is_group),
+            msg_id=resp_ids.new_msg_id or resp_ids.msg_id or None,
+            new_msg_id=resp_ids.new_msg_id,
+            content=content,
+            msg_type=msg_type,
+            ts=int(time.time()),
+        )
+        try:
+            from ..core import metrics
+
+            metrics.inc_outbound_persist(True)
+        except Exception:  # noqa: BLE001 —— 埋点失败不影响落库结论
+            pass
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from ..core import metrics
+
+            metrics.inc_outbound_persist(False)
+        except Exception:  # noqa: BLE001 —— 埋点失败绝不能盖住原始错误
+            pass
+        log.warning("[WPP:%s] 工具出站落库失败: %s", account_id, exc)
+
+
+def _send_payload(resp, *, msg_id=None, **extra) -> dict:
+    """发送类工具的统一返回 —— **成败判据只有一处**：``platform.outbound.send_ok``。
+
+    ⚠️ 旧实现各自判 ``BaseResponse.ret == 0``（或 ``Code == 0``），**不看**
+    ``Data.List[].Ret``：厂商回 ``Code=0`` + ``BaseResponse.ret=0``、但逐条结果是
+    ``Ret=-2``（被拒收）时，工具报 ``ok:true`` —— 模型以为已经发出去，群里什么也没有
+    （v1.5.6 ``SEND-LIST-RET`` 事故的同型复发：适配器侧早就改用 ``send_ok``，
+    工具面 15 处漏了）。判据不许在调用点另写一份。
+    """
+    from ..platform import outbound
+
+    ids = outbound.extract_outbound_msg_ids(resp)
+    ok = outbound.send_ok(resp)
+    payload: dict = {"ok": ok, "msgId": msg_id or ids.msg_id}
+    if ids.new_msg_id:
+        payload["newMsgId"] = ids.new_msg_id
+    if not ok:
+        payload["error"] = outbound.send_error_text(resp)
+    payload.update(extra)
+    return payload
+
+
 def register_msg_tools(ctx, adapter_getter) -> None:
     """注册 msg 域工具（迁移自 msg-meta.ts）。adapter_getter() 返回当前 adapter。"""
     from ..core.api_client import WppApiError
 
     def acct(adapter, params):
-        aid = params.get("account_id") or "default"
+        # ``default`` 是 schema 的**占位哨兵**，不是真账号名：单账号部署里账号文件
+        # 叫 ``boss2`` 时，按字面量 ``default`` 去查存在性会被判"账号不存在" ⇒ 所有
+        # /Msg 工具全拒。先解析成**已连接的那个**（仅单账号 + 请求的就是 default 时回退）。
+        aid = registry.resolve_account_id(adapter, params.get("account_id"))
         # Phase 4.3: 账号存在性 + 跨账号权限校验（账号互相隔离防线）
         if adapter is not None and hasattr(adapter, "authorize_account"):
             caller = params.get("callerWxid")
@@ -92,11 +205,28 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         content = params["content"]
         ats = params.get("ats")
         aid, client = acct(adapter, params)
-        resp = await client.send_text(to_wxid, content, ats)
-        data = resp.get("Data") or {}
-        br = data.get("BaseResponse") or {}
-        msg_id = data.get("Newmsgid") or br.get("NewMsgId") or data.get("Msgid")
-        return {"ok": br.get("ret") == 0 or msg_id is not None, "msgId": msg_id}
+        # ★ 2026-10-18：工具路径也必须分片。微信个人号超过约 2000 字符会被
+        #   静默截断；agent 直接用 ``wpp_send_text`` 发长文时同样会丢后半段。
+        #   ``@`` 只挂在第一片，后续补发不重复打扰。
+        from ..platform import outbound
+        chunks = outbound.chunk_text(content)
+        payload: dict = {}
+        sent = 0
+        for idx, chunk in enumerate(chunks):
+            resp = await client.send_text(to_wxid, chunk, ats if idx == 0 else None)
+            data = resp.get("Data") or {}
+            br = data.get("BaseResponse") or {}
+            msg_id = data.get("Newmsgid") or br.get("NewMsgId") or data.get("Msgid")
+            payload = _send_payload(resp, msg_id=msg_id)
+            if not payload.get("ok"):
+                break
+            sent += 1
+            _persist_tool_outbound(aid, to_wxid, chunk, resp)
+        if len(chunks) > 1:
+            payload["chunked"] = True
+            payload["chunks"] = len(chunks)
+            payload["sentChunks"] = sent
+        return payload
 
     # sendImage: 发送图片（UploadImg 上传即发送）
     async def send_image(**params):
@@ -112,14 +242,16 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
         msg_id = data.get("Newmsgid") or data.get("Msgid")
-        return {"ok": br.get("ret") == 0 or msg_id is not None, "msgId": msg_id}
+        payload = _send_payload(resp, msg_id=msg_id)
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, "[图片]", resp, msg_type="image")
+        return payload
 
-    # Phase 5.1: AI 图片生成 + 自动发送（mmx-cli 标准化）
+    # Phase 5.1: AI 图片生成 + 自动发送（Hermes image_gen 注册表，百炼 qwen-image）
     async def send_ai_image(**params):
+        import asyncio as _aio
         import base64 as _b64
         import os as _os
-        import subprocess as _sp
-        import time as _time
         adapter = adapter_getter()
         to_wxid = params["toWxid"]
         prompt = params["prompt"]
@@ -127,29 +259,17 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         aid, client = acct(adapter, params)
         if client is None:
             return {"error": f"账号 {aid} 未连接"}
-        # 1. 调 mmx CLI 生成图片到 /tmp（纯数据生成，vendor authcode 不参与）
-        out_path = f"/tmp/mmx-ai-{aid}-{int(_time.time())}.png"
+        # 1. 走 Hermes image_gen 注册表（默认百炼 qwen-image），不再 fork mmx
+        result = await _aio.to_thread(_generate_image_via_hermes, prompt, aspect_ratio)
+        if not result.get("success"):
+            return {"error": result.get("error") or "图片生成失败"}
+        # 2. provider 已落盘；缓存失败时返回的 URL 兜底下载（URL 24h 过期）
         try:
-            proc = _sp.run(
-                ["mmx", "image", "generate", "--prompt", prompt,
-                 "--aspect-ratio", aspect_ratio, "--out", out_path, "--quiet"],
-                capture_output=True, text=True, timeout=180,
-            )
-            if proc.returncode != 0:
-                return {"error": f"mmx 图片生成失败: {(proc.stderr or proc.stdout).strip()[:300]}"}
-        except FileNotFoundError:
-            return {"error": "mmx CLI 不可用（未安装 /usr/bin/mmx）"}
-        except _sp.TimeoutExpired:
-            return {"error": "mmx 图片生成超时（180s）"}
+            out_path = _localize_generated_image(str(result.get("image") or ""), "wpp-ai-image")
         except Exception as e:  # noqa: BLE001
-            return {"error": f"mmx 图片生成异常: {e}"}
-        # 2. 确认文件存在（--out 可能带后缀，兜底扫 /tmp 最新 mmx-ai 图）
-        if not _os.path.isfile(out_path):
-            import glob as _glob
-            cands = sorted(_glob.glob(f"/tmp/mmx-ai-{aid}-*.png"), key=_os.path.getmtime, reverse=True)
-            if not cands:
-                return {"error": f"mmx 生成后文件不存在: {out_path}"}
-            out_path = cands[0]
+            return {"error": f"生图结果下载失败: {e}"}
+        if not out_path or not _os.path.isfile(out_path):
+            return {"error": f"生图后文件不存在: {out_path}"}
         # 3. 读文件转 base64 调 vendor 发送（vendor API 在 plugin 层）
         with open(out_path, "rb") as f:
             b64 = _b64.b64encode(f.read()).decode()
@@ -157,8 +277,10 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
         msg_id = data.get("Newmsgid") or data.get("Msgid")
-        return {"ok": br.get("ret") == 0 or msg_id is not None, "msgId": msg_id,
-                "image_path": out_path}
+        payload = _send_payload(resp, msg_id=msg_id, image_path=out_path)
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, "[图片]", resp, msg_type="image")
+        return payload
 
     # Phase 5.1: AI 语音合成 + 自动发送（mmx TTS → 发文件，微信语音走 SILK 专有格式）
     async def send_ai_voice(**params):
@@ -195,11 +317,14 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         with open(out_path, "rb") as f:
             b64 = _b64.b64encode(f.read()).decode()
         fname = f"语音_{int(_time.time())}.mp3"
-        body = {"ToWxid": to_wxid, "FileName": fname, "Base64": b64}
-        resp = await client.call("/Msg/UploadFile", body)
+        # 文件消息走 UploadFile + ShareLink Type=6（旧 /Msg/UploadFile 端点不存在）
+        resp = await client.send_file_via_app(to_wxid, fname, b64)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": br.get("ret") == 0, "msgId": data.get("Msgid"), "voice_path": out_path}
+        payload = _send_payload(resp, msg_id=data.get("Msgid"), voice_path=out_path)
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, f"[文件] {fname}", resp, msg_type="file")
+        return payload
 
     # sendLocation: 发送定位卡片（/Msg/ShareLocation, Type 48）
     # 对齐原 wpp sendLocation: X=纬度, Y=经度, Label/Poiname/Scale/Infourl
@@ -215,7 +340,11 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
         msg_id = data.get("Newmsgid") or br.get("NewMsgId") or data.get("Msgid")
-        return {"ok": br.get("ret") == 0 or msg_id is not None, "msgId": msg_id}
+        payload = _send_payload(resp, msg_id=msg_id)
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, f"[位置] {label or poi_name}".strip(),
+                                   resp, msg_type="location")
+        return payload
 
     # publishImages: 发布图片朋友圈（1-9 张，带 guard 校验）
     async def publish_circle_images(**params):
@@ -224,9 +353,15 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         image_base64_list = params.get("imageBase64List", params.get("images", []))
         aid, client = acct(adapter, params)
         # guard：friendCirclePublishEnabled + 白名单（对齐 OpenClaw v1.3.41）
-        acct_cfg = adapter.get_account(aid) if adapter else {}
-        if not acct_cfg.get("friendCirclePublishEnabled"):
-            return {"error": "朋友圈发布未启用 (friendCirclePublishEnabled=false)"}
+        # guard：``friendCirclePublishEnabled`` 那条**开关**由 policy 的运行期门禁把关
+        #   （所有调用路径都过 ``hermes_contract.wrap_ctx``，收口到 tools/policy.py）。
+        #   这里只剩**按调用方**的白名单判定。
+        #   ⚠️ 本行原先是 ``adapter.get_account(aid)`` —— 适配器上**没有这个方法**
+        #   （全树只在这 4 行出现过）⇒ 真机必然 AttributeError，回话是"调用失败: …"而
+        #   不是那句"未启用"，且白名单这一支**永远走不到**。2026-10-02 修。
+        acct_cfg = policy.raw_account_cfg(adapter, aid)
+        if acct_cfg is None:
+            return {"error": "读不到账号配置，拒绝发布朋友圈"}
         allow = acct_cfg.get("friendCirclePublishAllowFrom") or acct_cfg.get("adminUsers") or []
         caller = params.get("callerWxid") or ""
         if caller and allow and caller not in allow:
@@ -234,7 +369,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         resp = await client.publish_circle_images(title, image_base64_list)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": resp.get("Code") == 0 or br.get("ret") == 0, "msgId": data.get("Newmsgid"), "code": resp.get("Code")}
+        return _send_payload(resp, msg_id=data.get("Newmsgid"), code=resp.get("Code"))
 
     # publishVideo: 发布视频朋友圈（带 guard）
     async def publish_circle_video(**params):
@@ -243,9 +378,15 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         video_base64 = params.get("videoBase64", params.get("video", ""))
         thumb_base64 = params.get("thumbBase64", params.get("thumb", ""))
         aid, client = acct(adapter, params)
-        acct_cfg = adapter.get_account(aid) if adapter else {}
-        if not acct_cfg.get("friendCirclePublishEnabled"):
-            return {"error": "朋友圈发布未启用 (friendCirclePublishEnabled=false)"}
+        # guard：``friendCirclePublishEnabled`` 那条**开关**由 policy 的运行期门禁把关
+        #   （所有调用路径都过 ``hermes_contract.wrap_ctx``，收口到 tools/policy.py）。
+        #   这里只剩**按调用方**的白名单判定。
+        #   ⚠️ 本行原先是 ``adapter.get_account(aid)`` —— 适配器上**没有这个方法**
+        #   （全树只在这 4 行出现过）⇒ 真机必然 AttributeError，回话是"调用失败: …"而
+        #   不是那句"未启用"，且白名单这一支**永远走不到**。2026-10-02 修。
+        acct_cfg = policy.raw_account_cfg(adapter, aid)
+        if acct_cfg is None:
+            return {"error": "读不到账号配置，拒绝发布朋友圈"}
         allow = acct_cfg.get("friendCirclePublishAllowFrom") or acct_cfg.get("adminUsers") or []
         caller = params.get("callerWxid") or ""
         if caller and allow and caller not in allow:
@@ -253,16 +394,22 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         resp = await client.publish_circle_video(title, video_base64, thumb_base64)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": resp.get("Code") == 0 or br.get("ret") == 0, "msgId": data.get("Newmsgid"), "code": resp.get("Code")}
+        return _send_payload(resp, msg_id=data.get("Newmsgid"), code=resp.get("Code"))
 
     # publishText: 发布文字朋友圈（带 guard）
     async def publish_circle_text(**params):
         adapter = adapter_getter()
         title = params.get("title", params.get("content", ""))
         aid, client = acct(adapter, params)
-        acct_cfg = adapter.get_account(aid) if adapter else {}
-        if not acct_cfg.get("friendCirclePublishEnabled"):
-            return {"error": "朋友圈发布未启用 (friendCirclePublishEnabled=false)"}
+        # guard：``friendCirclePublishEnabled`` 那条**开关**由 policy 的运行期门禁把关
+        #   （所有调用路径都过 ``hermes_contract.wrap_ctx``，收口到 tools/policy.py）。
+        #   这里只剩**按调用方**的白名单判定。
+        #   ⚠️ 本行原先是 ``adapter.get_account(aid)`` —— 适配器上**没有这个方法**
+        #   （全树只在这 4 行出现过）⇒ 真机必然 AttributeError，回话是"调用失败: …"而
+        #   不是那句"未启用"，且白名单这一支**永远走不到**。2026-10-02 修。
+        acct_cfg = policy.raw_account_cfg(adapter, aid)
+        if acct_cfg is None:
+            return {"error": "读不到账号配置，拒绝发布朋友圈"}
         allow = acct_cfg.get("friendCirclePublishAllowFrom") or acct_cfg.get("adminUsers") or []
         caller = params.get("callerWxid") or ""
         if caller and allow and caller not in allow:
@@ -270,14 +417,13 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         resp = await client.publish_circle_text(title)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": resp.get("Code") == 0 or br.get("ret") == 0, "msgId": data.get("Newmsgid"), "code": resp.get("Code")}
+        return _send_payload(resp, msg_id=data.get("Newmsgid"), code=resp.get("Code"))
 
-    # Phase 5.2: AI 配图朋友圈（mmx 生成配图 → 自动发布朋友圈）
+    # Phase 5.2: AI 配图朋友圈（Hermes image_gen 注册表生成配图 → 自动发布朋友圈）
     async def publish_circle_ai(**params):
+        import asyncio as _aio
         import base64 as _b64
         import os as _os
-        import subprocess as _sp
-        import time as _time
         adapter = adapter_getter()
         title = params.get("title", params.get("content", ""))
         image_prompts = params.get("imagePrompts") or []
@@ -288,9 +434,15 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         if client is None:
             return {"error": f"账号 {aid} 未连接"}
         # guard（对齐 publish_circle_images）
-        acct_cfg = adapter.get_account(aid) if adapter else {}
-        if not acct_cfg.get("friendCirclePublishEnabled"):
-            return {"error": "朋友圈发布未启用 (friendCirclePublishEnabled=false)"}
+        # guard：``friendCirclePublishEnabled`` 那条**开关**由 policy 的运行期门禁把关
+        #   （所有调用路径都过 ``hermes_contract.wrap_ctx``，收口到 tools/policy.py）。
+        #   这里只剩**按调用方**的白名单判定。
+        #   ⚠️ 本行原先是 ``adapter.get_account(aid)`` —— 适配器上**没有这个方法**
+        #   （全树只在这 4 行出现过）⇒ 真机必然 AttributeError，回话是"调用失败: …"而
+        #   不是那句"未启用"，且白名单这一支**永远走不到**。2026-10-02 修。
+        acct_cfg = policy.raw_account_cfg(adapter, aid)
+        if acct_cfg is None:
+            return {"error": "读不到账号配置，拒绝发布朋友圈"}
         allow = acct_cfg.get("friendCirclePublishAllowFrom") or acct_cfg.get("adminUsers") or []
         caller = params.get("callerWxid") or ""
         if caller and allow and caller not in allow:
@@ -301,33 +453,26 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             return {"error": "缺少配图描述（传 imagePrompts 数组，或 prompt + n）"}
         if len(prompts) > 9:
             prompts = prompts[:9]  # 微信朋友圈最多 9 张图
-        # mmx 生成每张配图 → base64 数组
+        # Hermes image_gen 生成每张配图 → base64 数组
         base64_list = []
         for i, p in enumerate(prompts):
-            out_path = f"/tmp/mmx-fc-{aid}-{int(_time.time())}-{i}.png"
+            result = await _aio.to_thread(_generate_image_via_hermes, str(p), aspect_ratio)
+            if not result.get("success"):
+                return {"error": f"配图生成失败（第{i+1}张）: {result.get('error') or '未知错误'}"}
             try:
-                proc = _sp.run(
-                    ["mmx", "image", "generate", "--prompt", str(p),
-                     "--aspect-ratio", aspect_ratio, "--out", out_path, "--quiet"],
-                    capture_output=True, text=True, timeout=180,
-                )
-                if proc.returncode != 0:
-                    return {"error": f"mmx 配图生成失败（第{i+1}张）: {(proc.stderr or proc.stdout).strip()[:200]}"}
-            except FileNotFoundError:
-                return {"error": "mmx CLI 不可用（未安装 /usr/bin/mmx）"}
+                out_path = _localize_generated_image(str(result.get("image") or ""), "wpp-fc-image")
             except Exception as e:  # noqa: BLE001
-                return {"error": f"mmx 配图生成异常（第{i+1}张）: {e}"}
-            if not _os.path.isfile(out_path):
-                return {"error": f"mmx 配图文件不存在: {out_path}"}
+                return {"error": f"配图下载失败（第{i+1}张）: {e}"}
+            if not out_path or not _os.path.isfile(out_path):
+                return {"error": f"配图文件不存在（第{i+1}张）: {out_path}"}
             with open(out_path, "rb") as f:
                 base64_list.append(_b64.b64encode(f.read()).decode())
         # 发布朋友圈
         resp = await client.publish_circle_images(title, base64_list)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": resp.get("Code") == 0 or br.get("ret") == 0,
-                "msgId": data.get("Newmsgid"), "code": resp.get("Code"),
-                "image_count": len(base64_list)}
+        return _send_payload(resp, msg_id=data.get("Newmsgid"), code=resp.get("Code"),
+                             image_count=len(base64_list))
 
     # sendEmoji: 发送 Emoji（md5）
     async def send_emoji(**params):
@@ -339,7 +484,11 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         resp = await client.send_emoji(to_wxid, emoji_md5, emoji_size)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": br.get("ret") == 0, "msgId": data.get("Newmsgid")}
+        payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, f"[表情] {emoji_md5}".strip(),
+                                   resp, msg_type="emoji")
+        return payload
 
     # sendContactCard: 分享名片（/Msg/ShareCard）
     async def send_contact_card(**params):
@@ -352,24 +501,38 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         resp = await client.share_card(to_wxid, card_wxid, card_nickname, card_alias)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": br.get("ret") == 0, "msgId": data.get("Newmsgid")}
+        payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, f"[名片] {card_nickname}".strip(),
+                                   resp, msg_type="card")
+        return payload
 
     # sendMiniProgram: 发送小程序（/Msg/SendXCX）
     async def send_mini_program(**params):
         adapter = adapter_getter()
         to_wxid = params["toWxid"]
         aid, client = acct(adapter, params)
+        title = params.get("xcxTitle", params.get("title", ""))
+        page_path = params.get("pagePath", "")
         resp = await client.send_xcx(
             to_wxid,
-            params.get("xcxTitle", params.get("title", "")),
+            title,
             params.get("xcxDesc", params.get("desc", "")),
             params.get("xcxUrl", params.get("url", "")),
             params.get("xcxAppId", params.get("appId", "")),
             params.get("thumbUrl", ""),
+            page_path,
+            params.get("username", params.get("xcxUsername", "")),
         )
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": br.get("ret") == 0, "msgId": data.get("Newmsgid")}
+        payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
+        if payload.get("ok"):
+            _persist_tool_outbound(
+                aid, to_wxid,
+                f"[小程序] {title}".strip() + (f" (页面 {page_path})" if page_path else ""),
+                resp, msg_type="miniprogram")
+        return payload
 
     # sendLink: 分享链接（/Msg/ShareLink, type=5 appmsg）
     async def send_link(**params):
@@ -383,7 +546,11 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         resp = await client.share_link(to_wxid, title, desc, link_url, thumb_url)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": br.get("ret") == 0, "msgId": data.get("Newmsgid")}
+        payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, f"[链接] {title}".strip(),
+                                   resp, msg_type="link")
+        return payload
 
     # sendGroupMassMsgText: 群发文本到多个群（/Msg/SendGroupMassMsgText）
     async def send_group_mass_text(**params):
@@ -394,7 +561,14 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         resp = await client.send_group_mass_text(to_ids, content)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": br.get("ret") == 0, "msgId": data.get("Newmsgid")}
+        payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
+        if payload.get("ok"):
+            # 群发是 N 个目标共用一次响应；逐目标落库（同一 msgId 在不同 peer 下唯一）。
+            targets = ([to_ids] if isinstance(to_ids, str)
+                       else (to_ids or []))
+            for to_id in targets:
+                _persist_tool_outbound(aid, str(to_id), content, resp)
+        return payload
 
     # sendFileV2: 发送文件（/Msg/SendFile, 自动上传）
     async def send_file_v2(**params):
@@ -406,7 +580,10 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         resp = await client.send_file_v2(to_wxid, file_name, base64)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": br.get("ret") == 0, "msgId": data.get("Newmsgid")}
+        payload = _send_payload(resp, msg_id=data.get("Newmsgid"))
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, f"[文件] {file_name}", resp, msg_type="file")
+        return payload
 
     # sendFile: 发送文件（下载 URL → UploadFile）
     async def send_file(**params):
@@ -415,13 +592,15 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         file_url = params.get("fileUrl") or params.get("fileUrl2") or ""
         file_name = params.get("fileName", "file")
         aid, client = acct(adapter, params)
-        # 下载文件 → base64 → UploadFile（安全：SSRF 防护 + 本地白名单目录）
+        # 下载文件 → base64 → UploadFile + ShareLink Type=6（安全：SSRF 防护 + 本地白名单）
         b64 = await _resolve_to_base64(file_url)
-        body = {"ToWxid": to_wxid, "FileName": file_name, "Base64": b64}
-        resp = await client.call("/Msg/UploadFile", body)
+        resp = await client.send_file_via_app(to_wxid, file_name, b64)
         data = resp.get("Data") or {}
         br = data.get("BaseResponse") or {}
-        return {"ok": br.get("ret") == 0, "msgId": data.get("Msgid")}
+        payload = _send_payload(resp, msg_id=data.get("Msgid"))
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, f"[文件] {file_name}", resp, msg_type="file")
+        return payload
 
     # sendVoice: 发送语音
     async def send_voice(**params):
@@ -430,11 +609,29 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         voice = params.get("voiceUrl") or params.get("voiceBase64") or ""
         duration = params.get("duration", 0)
         aid, client = acct(adapter, params)
-        # 简化：假设 voice 已是 base64/silk；非 base64 尝试下载（安全：SSRF 防护）
+        if not voice:
+            return {"error": "voiceUrl/voiceBase64 至少给一个（厂商不收空语音）"}
+        # 非 base64 尝试下载（安全：SSRF 防护）
         base64_str = await _resolve_to_base64(voice) if (voice.startswith("http") or voice.startswith("/")) else voice
-        body = {"ToWxid": to_wxid, "Base64": base64_str, "VoiceTime": int(duration)}
-        resp = await client.call("/Msg/SendVoice", body)
-        return {"ok": resp.get("Success", False), "resp": resp.get("Code")}
+        # 厂商 /Msg/SendVoice **只收 SILK**（Type=4）。mp3 等其它格式没有转码器时
+        # 降级成文件消息（TS v1.3.53 VOICE-DEGRADE 同口径），绝不把 mp3 当语音发。
+        no_query = voice.split("?")[0].lower()
+        is_silk = (voice.startswith("data:audio/silk") or no_query.endswith(".silk")
+                   or params.get("formatHint") == "silk")
+        if not is_silk:
+            fname = voice.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "voice.mp3"
+            resp = await client.send_file_via_app(to_wxid, fname, base64_str)
+            data = resp.get("Data") or {}
+            br = data.get("BaseResponse") or {}
+            payload = _send_payload(resp, msg_id=data.get("Msgid"), degraded="file")
+            if payload.get("ok"):
+                _persist_tool_outbound(aid, to_wxid, f"[文件] {fname}", resp, msg_type="file")
+            return payload
+        resp = await client.send_voice(to_wxid, base64_str, 4, int(duration))
+        payload = _send_payload(resp, code=resp.get("Code"))
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, "[语音]", resp, msg_type="voice")
+        return payload
 
     # sendVideo: 发送视频
     async def send_video(**params):
@@ -451,7 +648,10 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             thumb_b64 = await _resolve_to_base64(thumb)
         body = {"ToWxid": to_wxid, "Base64": base64_str, "ImageBase64": thumb_b64, "PlayLength": int(duration)}
         resp = await client.call("/Msg/SendVideo", body)
-        return {"ok": resp.get("Success", False), "resp": resp.get("Code")}
+        payload = _send_payload(resp, code=resp.get("Code"))
+        if payload.get("ok"):
+            _persist_tool_outbound(aid, to_wxid, "[视频]", resp, msg_type="video")
+        return payload
 
     # revokeMsg: 撤回消息
     async def revoke_msg(**params):
@@ -461,26 +661,96 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         to_wxid = params.get("toWxid") or ""
         create_time = params.get("createTime") or 0
         aid, client = acct(adapter, params)
-        body = {"MsgId": msg_id, "NewMsgId": new_msg_id, "ToWxid": to_wxid, "CreateTime": int(create_time)}
-        resp = await client.call("/Msg/Revoke", body)
-        return {"ok": resp.get("Success", False), "resp": resp.get("Code")}
+        resp = await client.revoke_msg(msg_id, new_msg_id, int(create_time), to_wxid)
+        return _send_payload(resp, code=resp.get("Code"))
 
-    # quoteReply: 引用回复
+    # quoteReply: 引用回复（对齐 TS src/send/quote-reply.ts）
     async def quote_reply(**params):
         adapter = adapter_getter()
         to_wxid = params["toWxid"]
         content = params["content"]
+        msg_id = str(params.get("msgId") or "")
+        new_msg_id = str(params.get("newMsgId") or "")
         aid, client = acct(adapter, params)
-        # 简化引用：走 SendTxt（完整引用在阶段4 实现）
-        resp = await client.send_text(to_wxid, content)
-        return {"ok": resp.get("Success", False), "resp": resp.get("Code")}
+        if not msg_id and not new_msg_id:
+            return {"ok": False, "error": "msgId/newMsgId 至少填一个（被引用消息的 id）"}
+        # ★ 2026-10-18：原实现是假引用 —— 只发了一条普通 SendTxt，既没有 type=57
+        #   refermsg，也不会 @ 被回复人。这里对齐 TS 的主路径：
+        #   ① 回查被引用消息（**不限方向**：被引用的可能是 bot 自己的回复）；
+        #   ② 群聊补 ``@昵称 `` 前缀（唯一产出点 inbound.quote_ref.build_mention_prefix）；
+        #   ③ 生成 type=57 XML，走 ``/Msg/ShareLink {ToWxid,Type:5,Xml}``。
+        from ..data import repo_messages
+        from ..inbound import quote_ref
+        from ..platform import outbound
+
+        svrid = new_msg_id or msg_id
+        ident = quote_ref.QuoteIdentity()
+        try:
+            row = repo_messages.get_message_by_id_or_new_id(
+                aid, msg_id=msg_id or None, new_msg_id=new_msg_id or None)
+            ident = quote_ref.resolve_quote_identity(row)
+        except Exception as exc:  # noqa: BLE001 —— 查库失败只降级，不挡发送
+            log.debug("[WPP:%s] quote_reply 回查降级 %s: %s", aid, svrid, exc)
+        name = ident.display_name
+        if ident.fromusr and (not name or name == ident.fromusr):
+            try:
+                name = adapter._contact_name(aid, ident.fromusr) if adapter is not None else ""
+            except Exception:  # noqa: BLE001 —— 昵称只是装饰
+                name = ""
+        prefix = quote_ref.build_mention_prefix(to_wxid, name, ident.fromusr)
+        quote_text = f"{prefix}{content}".strip()
+        peer_kind = "group" if to_wxid.endswith("@chatroom") else "direct"
+
+        def _persist_sent(msg_ids, text: str, msg_type: str) -> None:
+            # 任意渠道发送都要入库（TS v1.3.16 OUTBOUND-PERSIST）：否则之后"引用 bot
+            # 这条回复"会查不到锚点。入库失败只留痕，不把发送结果翻成失败。
+            try:
+                repo_messages.save_message(
+                    aid, direction="outbound", peer_kind=peer_kind,
+                    peer_id=to_wxid, msg_id=msg_ids.msg_id,
+                    new_msg_id=msg_ids.new_msg_id, msg_type=msg_type,
+                    content=text)
+            except Exception as exc:  # noqa: BLE001 —— 入库是附带动作
+                log.warning("[WPP:%s] quote_reply 入库失败（不影响发送）: %s", aid, exc)
+
+        if not outbound.quote_reply_fits(quote_text):
+            # ★ 2026-10-18：引用气泡只渲染 500 字（vendor 侧同样 slice）⇒ 长正文走
+            #   ShareLink 会被静默砍半。超限改发普通文本，按平台上限分段；宁可多发
+            #   几条，也不让调用方拿到"成功"却只发出去半句话。
+            log.info("[WPP:%s] quote_reply 正文 %d 字超引用气泡上限 %d ⇒ 改发普通文本",
+                     aid, len(quote_text), outbound.QUOTE_REPLY_MAX_CHARS)
+            ok = True
+            ids = None
+            for ch in outbound.chunk_text(quote_text):
+                resp = await client.send_text(to_wxid=to_wxid, content=ch)
+                chunk_ok = outbound.send_ok(resp)
+                ok = ok and chunk_ok
+                ids = outbound.extract_outbound_msg_ids(resp)
+                if chunk_ok:
+                    _persist_sent(ids, ch, "text")
+            return {"ok": ok,
+                    "msgId": getattr(ids, "msg_id", None),
+                    "newMsgId": getattr(ids, "new_msg_id", None),
+                    "chunked": True}
+
+        xml = outbound.build_quote_reply_xml(
+            reply_content=quote_text, svrid=svrid, fromusr=ident.fromusr)
+        resp = await client.call("/Msg/ShareLink",
+                                 {"ToWxid": to_wxid, "Type": 5, "Xml": xml})
+        ok = outbound.send_ok(resp)
+        ids = outbound.extract_outbound_msg_ids(resp)
+        if ok:
+            _persist_sent(ids, content, "quote")
+        return {"ok": ok, "msgId": ids.msg_id, "newMsgId": ids.new_msg_id}
 
     # syncMessage: 同步消息
     async def sync_message(**params):
         adapter = adapter_getter()
         aid, client = acct(adapter, params)
         resp = await client.sync_message()
-        return {"ok": resp.get("Success", False), "count": len((resp.get("Data") or {}).get("messages") or [])}
+        # 读端点：Code 缺失属正常形状（见 api_client._request），别用 Success 单独定成败
+        return {"ok": resp.get("Success") is not False and resp.get("Code") in (0, 200, None),
+                "count": len((resp.get("Data") or {}).get("messages") or [])}
 
     tools = [
         ("wpp_send_text", "发送文本消息到微信", {
@@ -500,7 +770,8 @@ def register_msg_tools(ctx, adapter_getter) -> None:
                 "imgBase64": {"type": "string", "description": "图片 base64 或 URL 或本地路径"},
                 "account_id": {"type": "string"},
             },
-            "required": ["toWxid"],
+            # TS ``uploadImage`` 要求 imgBase64；漏了它只会得到“拿不到内容”的运行时错误
+            "required": ["toWxid", "imgBase64"],
         }, send_image),
         ("wpp_send_location", "发送定位卡片到微信 (Type 48 位置消息)", {
             "type": "object",
@@ -580,6 +851,10 @@ def register_msg_tools(ctx, adapter_getter) -> None:
                 "url": {"type": "string", "description": "小程序页面 URL"},
                 "appId": {"type": "string"},
                 "thumbUrl": {"type": "string"},
+                "pagePath": {"type": "string",
+                             "description": "小程序内部页面路径（如 pages/index/index?x=1）；给了才发可直达页面的现代卡片"},
+                "username": {"type": "string",
+                             "description": "小程序 username（gh_xxx@app），现代卡片定位小程序用"},
                 "account_id": {"type": "string"},
             },
             "required": ["toWxid", "title", "url", "appId"],
@@ -623,7 +898,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
                 "fileName": {"type": "string", "description": "文件名含扩展名"},
                 "account_id": {"type": "string"},
             },
-            "required": ["toWxid", "fileUrl"],
+            "required": ["toWxid", "fileUrl", "fileName"],
         }, send_file),
         ("wpp_send_voice", "发送语音到微信", {
             "type": "object",
@@ -633,7 +908,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
                 "duration": {"type": "integer", "description": "时长毫秒"},
                 "account_id": {"type": "string"},
             },
-            "required": ["toWxid"],
+            "required": ["toWxid", "voiceUrl"],
         }, send_voice),
         ("wpp_send_video", "发送视频到微信", {
             "type": "object",
@@ -644,7 +919,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
                 "videoDuration": {"type": "integer"},
                 "account_id": {"type": "string"},
             },
-            "required": ["toWxid"],
+            "required": ["toWxid", "videoUrl"],
         }, send_video),
         ("wpp_revoke_msg", "撤回微信消息", {
             "type": "object",
@@ -657,14 +932,16 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             },
             "required": ["msgId", "toWxid"],
         }, revoke_msg),
-        ("wpp_quote_reply", "引用回复微信消息", {
+        ("wpp_quote_reply", "引用回复微信消息. 自动从 DB 取被引用消息构造完整引用卡片（文本/图片通用），群聊自动 @ 被回复人.", {
             "type": "object",
             "properties": {
-                "toWxid": {"type": "string"},
-                "content": {"type": "string"},
+                "toWxid": {"type": "string", "description": "目标 wxid / 群 id"},
+                "content": {"type": "string", "description": "回复内容"},
+                "msgId": {"type": "string", "description": "被引用消息的 msgId（DB 回查用）"},
+                "newMsgId": {"type": "string", "description": "被引用消息的 newMsgId（可选，svrid 优先用它）"},
                 "account_id": {"type": "string"},
             },
-            "required": ["toWxid", "content"],
+            "required": ["toWxid", "content", "msgId"],
         }, quote_reply),
         ("wpp_sync_message", "同步微信消息增量", {
             "type": "object",
@@ -674,7 +951,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             "type": "object",
             "properties": {},
         }, accounts_context),
-        ("wpp_send_ai_image", "AI 生成图片并自动发送到微信（mmx image-01 生成 → 自动 send_image）。一步完成「生成海报/配图 → 发微信」", {
+        ("wpp_send_ai_image", "AI 生成图片并自动发送到微信（Hermes image_gen → 百炼 qwen-image 生成 → 自动 send_image）。一步完成「生成海报/配图 → 发微信」", {
             "type": "object",
             "properties": {
                 "toWxid": {"type": "string", "description": "接收者 wxid（私聊用户或 @chatroom 群）"},
@@ -694,7 +971,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             },
             "required": ["toWxid", "text"],
         }, send_ai_voice),
-        ("wpp_fc_publish_ai", "AI 配图并发布朋友圈（mmx 生成 1-9 张配图 → 自动发布图文朋友圈）。一步完成「写文案 + 自动配图 + 发朋友圈」", {
+        ("wpp_fc_publish_ai", "AI 配图并发布朋友圈（Hermes image_gen → 百炼 qwen-image 生成 1-9 张配图 → 自动发布图文朋友圈）。一步完成「写文案 + 自动配图 + 发朋友圈」", {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "朋友圈文案"},

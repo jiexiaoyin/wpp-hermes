@@ -22,10 +22,11 @@ TS 侧这段有 370 行，且是 ``index.ts`` 里最大的一块（2026-09-28 �
    是为了绕开"配置单例可能被谁写脏"。Py 侧 2026-10-01 把那个单例**删掉**了，
    配置的唯一来源就是 ``core.accounts.resolve(account_id).heartflow``（已并入
    ``core/overrides`` 的覆盖），所以这里取一次 cfg 就同时是"账号档"与"生效档"。
-2. **写配置是内存覆盖，不是落盘**。TS 的 ``setAccountField`` 写 ``accounts/*.json``；
-   本侧走 ``core.overrides``（**进程内**，见该模块 docstring）。所以凡是**写**的子命令
-   （``threshold`` / ``group add|del``）必须在回复里说清「重启回退」—— 不说就等于骗人：
-   老板按回复以为改好了，重启后行为回到旧值而**没有任何痕迹**。
+2. ~~**写配置是内存覆盖，不是落盘**~~ —— **2026-10-02（W6）已改**：本侧现在和 TS 一样
+   写 ``accounts/*.json``（``core/account_store``，带备份 + 原子替换 + 600），并靠
+   ``adapter.reload_account`` 让新值**当次**生效。所以写命令的回复改成承诺
+   「已写入账号配置，当次生效、重启不回退」—— 承诺变了，是因为实现变了
+   （旧文案写「重启回退」是当时的实话：命令只改内存，重启就没了）。
 3. **``/pair`` 兑换不在本模块**（Py 侧已删，见 ``commands.py`` docstring）；本模块与它无关。
 
 ## 一个必须照抄的行为：分段兜底
@@ -77,11 +78,14 @@ STALL_WARN_DAYS = 3
 _ON_OFF = frozenset({"on", "off", "1", "true", "yes", "0", "false", "no"})
 
 
-def handle(account_id: str, args: Sequence[str]) -> str:
+def handle(account_id: str, args: Sequence[str], *, adapter: Any = None) -> str:
     """处理 ``/heartflow <子命令> ...``。**任何输入都返回一句可回复的话**（不抛、不返回空）。
 
     返回空串会让 ``adapter._maybe_command`` 静默不回 —— 命令打进 filehelper 却毫无反应，
     是最难排查的一种失败（老板只能猜"是不是又停摆了"）。
+
+    ``adapter``：写配置的三个子命令（on|off / threshold / group）写回账号文件后，
+    靠它让新值当次生效（见 ``commands.write_back``）。
     """
     arg_list = [a for a in args if a]
     sub = arg_list[0].lower() if arg_list else ""
@@ -89,13 +93,14 @@ def handle(account_id: str, args: Sequence[str]) -> str:
     # on|off（含 /heartflow 1 这类别名）：与 /affection /jargon 共用同一份实现
     # —— 别在这里再写一遍开关语义（旧实现支持 1/true/yes，删掉别名就是悄悄改行为）
     if sub in _ON_OFF:
-        return _commands()._handle_feature_toggle(account_id, "heartflow", arg_list)
+        return _commands()._handle_feature_toggle(account_id, "heartflow", arg_list,
+                                                  adapter=adapter)
     if sub == "status":
         return _status(account_id)
     if sub == "threshold":
-        return _threshold(account_id, arg_list)
+        return _threshold(account_id, arg_list, adapter=adapter)
     if sub == "group":
-        return _group(account_id, arg_list)
+        return _group(account_id, arg_list, adapter=adapter)
     if sub == "profile":
         return _profile(account_id, arg_list)
     if sub == "why":
@@ -120,7 +125,7 @@ def _commands():
 
 
 def _cfg(account_id: str) -> dict[str, Any]:
-    """账号档心流配置（**已并入内存覆盖**）；取不到 / 形状脏 ⇒ ``{}``。
+    """账号档心流配置（账号文件 + 内存覆盖，都已并入）；取不到 / 形状脏 ⇒ ``{}``。
 
     直接复用 :func:`commands._safe_cfg` 的读法而不是自己 ``accounts.resolve`` 一次：
     "解析失败怎么办"只有一处判断（那里返空 dict 并 warn），再写一份迟早在那条分支上分叉。
@@ -206,7 +211,7 @@ def _safe(fallback: str, fn: Callable[[], str]) -> str:
 
 def _usage(account_id: str) -> str:
     """未知子命令 / 空参数：用法 + 当前开关状态（TS 末尾的兜底分支）。"""
-    state = "✅ 开启" if _commands()._feature_state(account_id, "heartflow") else "❌ 关闭"
+    state = _commands().state_label(_commands()._feature_state(account_id, "heartflow"))
     return (
         "用法: /heartflow on|off|status"
         "\n  或 /heartflow threshold <0-1>"
@@ -238,6 +243,7 @@ def _status(account_id: str) -> str:
     learn_head = "\n自适应调阈: " + ("✅ 开启" if hf_learn.resolve_hf_learning(hf_cfg)["enabled"]
                                    else "❌ 关闭")
     extra = f"\n心流群白名单: {len(groups)} 个"
+    extra += _safe("\nDB: (读体检状态失败)", lambda: _block_db_health())
     extra += _safe("\n生效阈值: (读取失败)",
                    lambda: _block_effective(account_id, hf_cfg, threshold, groups, now))
     extra += _safe("", lambda: _block_last_send(account_id, now))
@@ -255,8 +261,30 @@ def _status(account_id: str) -> str:
                    lambda: _block_share_and_dedupe(account_id, hf_cfg, now))
 
     return (f"心流主动回复 (account={account_id}):"
-            f"\n状态: {'✅ 开启' if enabled else '❌ 关闭'}{extra}"
+            f"\n状态: {_commands().state_label(enabled)}{extra}"
             f"\n用法: /heartflow on|off|status")
+
+
+def _block_db_health() -> str:
+    """**DB 体检**一行（D7，2026-10-02 修）。
+
+    为什么状态页必须有这一行：``migration 未完成`` 的旧形态是**启动时一行 warn**。
+    进程照跑、``SELECT 1`` 照通，于是"schema 只建了一半"在运维面上与"一切正常"
+    完全一样（心流每条都写不进台账，而 0 条发言看起来就像群里没人说话）。
+    这里把它变成一条**每次查状态都看得到**的行。
+    """
+    from ..data import db
+
+    h = db.health()
+    state = str(h.get("state") or "unknown")
+    mark = {"ok": "✅", "drift": "⚠️", "failed": "❌", "unavailable": "❌"}.get(state, "❔")
+    detail = str(h.get("detail") or "")
+    line = f"\nDB: {mark} {state}"
+    if state == "drift":
+        line += "（**只报不改**，R8）"
+    if detail:
+        line += f" — {detail}"
+    return line
 
 
 def _block_effective(account_id: str, hf_cfg: Mapping[str, Any], threshold: float,
@@ -446,33 +474,37 @@ def _block_share_and_dedupe(account_id: str, hf_cfg: Mapping[str, Any], now: int
 # ------------------------------------------------------------------- threshold
 
 
-def _threshold(account_id: str, args: Sequence[str]) -> str:
-    """``/heartflow threshold <0-1>``：改账号级阈值。
-
-    ⚠️ 覆盖是**内存态**（``core/overrides``）⇒ 回复里必须写「重启回退」。
-    TS 走 ``setAccountField`` 落盘，文案里没有这句 —— 照抄那份文案就等于向老板
-    承诺了一件本侧做不到的事。
-    """
+def _threshold(account_id: str, args: Sequence[str], *, adapter: Any = None) -> str:
+    """``/heartflow threshold <0-1>``：改账号级阈值（写回账号文件，W6 起持久）。"""
     v = _num_of(args[1] if len(args) > 1 else None)
     if v is None or v < 0 or v > 1:
         return ("用法: /heartflow threshold <0-1>"
                 "\n示例: /heartflow threshold 0.5 (0.6=默认, 越低越活跃)")
-    cfg = dict(_commands()._feature_cfg(account_id, "heartflow"))
+    base = _commands()._feature_cfg(account_id, "heartflow")
+    if base is None:
+        # 底稿读不出来 ⇒ 拒绝写（否则会把整个 heartflow 段替换成只剩 replyThreshold）
+        return _commands().UNREADABLE_CFG_MSG
+    cfg = dict(base)
     cfg["replyThreshold"] = v
-    _commands().overrides.set_override(account_id, "heartflow", cfg)
-    log.info("[WPP] /heartflow threshold → %s (account=%s, 内存覆盖)", v, account_id)
+    err = _commands().write_back(account_id, "heartflow", cfg, adapter=adapter)
+    if err:
+        return err
+    log.info("[WPP] /heartflow threshold → %s (account=%s, 已写回账号配置)", v, account_id)
     return (f"✅ 心流阈值已设为 {v:g} (account={account_id})\n"
-            "⚠️ 这是**内存覆盖**：进程重启后回退到账号配置里的值（要持久请改 accounts/*.json）")
+            "已写入账号配置（accounts/<账号>.json），当次生效、重启不回退")
 
 
 # ----------------------------------------------------------------------- group
 
 
-def _group(account_id: str, args: Sequence[str]) -> str:
-    """``/heartflow group add|del|list [群ID...]``：心流群白名单。
+def _group(account_id: str, args: Sequence[str], *, adapter: Any = None) -> str:
+    """``/heartflow group add|del|list [群ID...]``：心流群白名单（写回账号文件）。
 
     ``add`` 会**顺带**把群补进群聊白名单（否则心流收不到那个群的消息），``del`` 不动它
     —— 与 TS ``updateHeartflowGroups`` 同一条规矩（照抄：只增不减）。
+
+    ⚠️ 两个键分两次写（``heartflow`` / ``groupAllowFrom``）⇒ 第二次失败时第一次**已经生效**。
+    这时必须让运维看见"改了一半"（回复里点名哪个键没写进去），而不是笼统报个 ❌。
     """
     sub = args[1].lower() if len(args) > 1 else ""
     targets = [a for a in args[2:] if a]
@@ -483,7 +515,13 @@ def _group(account_id: str, args: Sequence[str]) -> str:
         return f"心流群白名单 ({len(wl)}):\n{body}"
 
     if sub in ("add", "del") and targets:
-        cfg = dict(_commands()._feature_cfg(account_id, "heartflow"))
+        cmd = _commands()
+        base = cmd._feature_cfg(account_id, "heartflow")
+        if base is None:
+            # 底稿读不出来 ⇒ **拒绝写**：整体替换那个键会把阈值等同级键一起抹掉，
+            # 而回话还是 ✅（见 commands.py 的 W7-5 一节）。
+            return cmd.UNREADABLE_CFG_MSG
+        cfg = dict(base)
         cur = list(wl)
         for t in targets:
             if sub == "add" and t not in cur:
@@ -491,21 +529,34 @@ def _group(account_id: str, args: Sequence[str]) -> str:
             elif sub == "del" and t in cur:
                 cur.remove(t)
         cfg["whitelistGroups"] = cur
-        _commands().overrides.set_override(account_id, "heartflow", cfg)
+        err = cmd.write_back(account_id, "heartflow", cfg, adapter=adapter)
+        if err:
+            return err
 
-        gal = _commands()._allowlist_items(account_id, "groupAllowFrom")
+        # ⚠️ 这里也走**盘上那份**（不是 resolve()）：写回是整体替换 ⇒ 空底稿会把
+        #    群聊白名单清成只剩新加的那个群。
+        gal = cmd._allowlist_items(account_id, "groupAllowFrom")
         if sub == "add":
+            if gal is None:
+                return (f"✅ 心流群白名单已添加: {', '.join(targets)}"
+                        f"\n⚠️ 但**读不到账号文件**，群聊白名单没能补上 ——"
+                        f" 那个群仍收不到消息。重发一次这条命令即可")
             added = [t for t in targets if t not in gal]
             if added:
-                _commands().overrides.set_override(
-                    account_id, "groupAllowFrom", [*gal, *added])
+                err2 = cmd.write_back(account_id, "groupAllowFrom", [*gal, *added],
+                                      adapter=adapter)
+                if err2:
+                    return (f"{err2}\n⚠️ 但心流群白名单**已经写入**（{', '.join(cur)}）"
+                            f"—— 群聊白名单没跟上，那个群仍收不到消息。重发一次这条命令即可")
                 gal = [*gal, *added]
-        log.info("[WPP] /heartflow group %s %s (account=%s, 内存覆盖)", sub, targets, account_id)
+        log.info("[WPP] /heartflow group %s %s (account=%s, 已写回账号配置)",
+                 sub, targets, account_id)
+        gal_line = "读不到" if gal is None else f"{len(gal)} 个"
         return (f"✅ 心流群白名单已{'添加' if sub == 'add' else '移除'}: {', '.join(targets)}"
                 f"\n当前心流群 ({len(cur)}): {', '.join(cur) or '(空)'}"
                 f"\n(add 自动补群聊白名单; del 不删群聊白名单,"
-                f" 当前群聊白名单 {len(gal)} 个)"
-                "\n⚠️ 内存覆盖：进程重启后回退到账号配置里的白名单")
+                f" 当前群聊白名单 {gal_line})"
+                "\n已写入账号配置，当次生效、重启不回退")
 
     return ("用法: /heartflow group add <群ID> [群ID...]"
             "\n  或 /heartflow group del <群ID> [群ID...]"

@@ -8,7 +8,7 @@ Hermes 的 ``plugin_validate`` 会把声明与实注册逐名比对：
 - ``actual − declared ≠ ∅``  ⇒ **FAIL 级**
 - ``declared − actual ≠ ∅``  ⇒ WARN
 
-手写必然漂移（本插件有 255 个工具，其中 219 个是厂商端点机械映射）。
+手写必然漂移（本插件注册 299 个工具，其中 216 个是厂商端点机械映射）。
 所以 deploy.sh 会**重新生成并与仓库里的值 diff，不为空即中止**。
 
 ## 必须在 Hermes 运行时里跑

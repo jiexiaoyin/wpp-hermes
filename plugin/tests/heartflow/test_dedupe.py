@@ -286,6 +286,111 @@ def test_prune_drops_expired_history():
     assert d.tracked_groups() == 0, "空掉的键要被删掉，不留空壳"
 
 
+# ===== 10b. 启动预热（B7，2026-10-02 修）=====
+#
+# ``_recent`` 只在内存里 ⇒ 不预热就等于"每次重启后 6 小时内复读闸不存在"。
+# 这是本批最隐蔽的一条：**台账、日志、/heartflow status 全绿**（它们只看"发没发出去"），
+# 唯一能看出异常的是群友 —— 而群友只会觉得"bot 怎么又说了一遍"。
+# 所以这里不满足于"函数被调到"，要钉到"灌进去以后闸真能拦住那句"。
+
+
+def _fake_outbound(monkeypatch, rows, *, record: list | None = None, raises=None):
+    """把 ``repo_messages.list_outbound_texts`` 换成固定返回值。"""
+    from plugin.data import repo_messages as M
+
+    def _fn(account_id, since_sec, limit=200):
+        if record is not None:
+            record.append({"account_id": account_id, "since_sec": since_sec, "limit": limit})
+        if raises is not None:
+            raise raises
+        return rows
+
+    monkeypatch.setattr(M, "list_outbound_texts", _fn)
+
+
+def test_preload_fills_the_gate_from_outbound_history(monkeypatch):
+    """★ 预热完，同一句话**必须被闸拦下** —— 否则"预热了"只是个无效果的假象。"""
+    now = 1_000_000
+    said = "这款机器今天现货还有三台可以自提"
+    _fake_outbound(monkeypatch, [{"gid": "gA", "content": said, "at_sec": now - 60}])
+
+    assert d.load_hf_dedupe_history("acct1", now) == 1
+    assert d.hf_recent_count("acct1", "gA") == 1
+
+    cfg = d.resolve_dedupe_cfg(None)
+    v = d.check_hf_repeat("acct1", "gA", said, cfg, now, proactive=True)
+    assert v is not None, "预热进来的那句必须让复读闸生效（这正是预热的目的）"
+    assert v.kind == "prefix" or v.sim >= cfg.sim_threshold
+
+
+def test_preload_only_asks_for_the_gate_window(monkeypatch):
+    """窗口与条数上限取自闸的配置 —— 灌得比窗口宽，等于让"过期历史"参与判定。"""
+    now = 1_000_000
+    seen: list[dict] = []
+    _fake_outbound(monkeypatch, [], record=seen)
+
+    cfg = d.resolve_dedupe_cfg(None)
+    d.load_hf_dedupe_history("acct1", now)
+    assert len(seen) == 1
+    assert seen[0]["account_id"] == "acct1"
+    assert seen[0]["since_sec"] == now - cfg.window_sec
+    assert seen[0]["limit"] == d.HF_DEDUPE_PRELOAD_LIMIT
+
+
+def test_preload_skips_dirty_rows_and_counts_only_good_ones(monkeypatch):
+    """脏行（缺群 / 缺时刻 / 空文本 / ``at_sec`` 不是数）不许进历史，也不计入返回值。
+
+    返回值是"灌进去多少条"，巡检靠它判断预热到底有没有拿到东西 ——
+    把脏行算进去就会让"实际一条都没灌进去"报成一个正数。
+    """
+    now = 1_000_000
+    good = "今天下午三点前来店里可以走活动价"
+    _fake_outbound(monkeypatch, [
+        {"gid": "gA", "content": good, "at_sec": now - 30},
+        {"gid": "", "content": good, "at_sec": now - 30},          # 缺群 ⇒ 归不到桶
+        {"gid": "gA", "content": "", "at_sec": now - 30},          # 空文本
+        {"gid": "gA", "content": good, "at_sec": None},            # 缺时刻
+        {"gid": "gA", "content": good, "at_sec": "不是数"},         # 脏时刻
+        {"gid": "gA", "content": good, "at_sec": 0},               # 时刻 0（prune 会即时清掉）
+        {"gid": "gB", "content": good, "at_sec": now - 30},        # 另一群，正常
+    ])
+
+    assert d.load_hf_dedupe_history("acct1", now) == 2, "只有两条真进了历史"
+    assert d.hf_recent_count("acct1", "gA") == 1
+    assert d.hf_recent_count("acct1", "gB") == 1
+    assert d.tracked_groups() == 2, "脏行不该凭空建桶"
+
+
+def test_preload_degrades_loudly_when_the_query_fails(monkeypatch, caplog):
+    """查询炸了 ⇒ 返回 0 + **吵** + 不抛（预热失败不是账号接入的阻塞点）。
+
+    必须吵：这一条静默的话，"复读闸这 6 小时等于没有"就只体现在群友的体感里。
+    """
+    import logging
+
+    _fake_outbound(monkeypatch, [], raises=RuntimeError("表被锁"))
+    with caplog.at_level(logging.WARNING, logger=d.__name__):
+        assert d.load_hf_dedupe_history("acct1", 1_000_000) == 0
+    assert any("复读历史预热失败" in r.message for r in caplog.records), \
+        "预热失败必须吵（否则复读闸空转只有群友看得出来）"
+    assert d.tracked_groups() == 0
+
+
+def test_preload_does_not_even_query_when_the_gate_is_off(monkeypatch):
+    """闸关掉 ⇒ 连查都不查（拿缺省策略判的：预热发生在账号启动，真配置还没进 sweep 手里）。"""
+    seen: list[dict] = []
+    _fake_outbound(monkeypatch, [{"gid": "gA", "content": "x" * 40, "at_sec": 1}],
+                   record=seen)
+    monkeypatch.setattr(d, "resolve_dedupe_cfg",
+                        lambda cfg=None: d.HfDedupeConfig(
+                            enabled=False, proactive_only=True,
+                            window_sec=CFG.window_sec, sim_threshold=CFG.sim_threshold,
+                            min_chars=CFG.min_chars, history_max=CFG.history_max))
+    assert d.load_hf_dedupe_history("acct1", 1_000_000) == 0
+    assert seen == [], "闸关着就不该打这次 DB"
+    assert d.tracked_groups() == 0
+
+
 # ===== 11. 参数解析 =====
 
 

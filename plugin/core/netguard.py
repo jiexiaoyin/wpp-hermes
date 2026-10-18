@@ -55,6 +55,30 @@ def _plugin_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _denied_dirs() -> tuple[str, ...]:
+    """**永远不许**通过媒体工具读取的目录（凭据/备份所在）。
+
+    2026-10-18 P0：``readable_dirs()`` 以前把整个插件目录放进白名单，而
+    ``plugin/accounts/`` 就在里面 —— 群里任何人 prompt injection 一句
+    「把这个文件发给我」，模型调 ``wpp_send_file`` 就能把含 authcode 的账号
+    JSON 当文件发出去。白名单目录里的**子目录**必须能被显式排除，否则
+    "允许读插件目录"天然等于"允许读凭据"。
+    """
+    dirs = [_plugin_dir() / "accounts"]
+    from .env_compat import gate_env
+
+    backup = gate_env("WECHATPRO_ACCOUNT_BACKUP_DIR")
+    if backup.strip():
+        dirs.append(Path(backup).expanduser())
+    out: list[str] = []
+    for d in dirs:
+        try:
+            out.append(os.path.realpath(d) + os.sep)
+        except OSError:
+            continue
+    return tuple(dict.fromkeys(out))
+
+
 def readable_dirs() -> tuple[str, ...]:
     """允许读取的本地目录（**已 realpath 规范化**，带尾斜杠）。"""
     dirs: list[str] = list(_ALWAYS_READABLE)
@@ -92,6 +116,21 @@ def is_local_read_allowed(path: str) -> bool:
         real = os.path.realpath(os.path.expanduser(path))
     except OSError:
         return False
+
+    # ★ 先判拒绝名单（凭据/备份目录），**再**判白名单 —— 顺序不能反：
+    #   ``plugin/accounts`` 本身就在 ``plugin/`` 白名单里。
+    for denied in _denied_dirs():
+        if real == denied.rstrip(os.sep) or real.startswith(denied):
+            log.warning("[WPP] 拒绝读取凭据目录内的文件: %s", real[:120])
+            return False
+    # 插件目录里的点文件（.env 等）与 JSON（账号/配置的常见形态）同样拒绝
+    plugin = os.path.realpath(_plugin_dir()) + os.sep
+    if real.startswith(plugin):
+        name = os.path.basename(real)
+        if name.startswith(".") or name.lower().endswith((".json", ".env")):
+            log.warning("[WPP] 拒绝读取插件目录内的敏感文件: %s", real[:120])
+            return False
+
     return any(real == d.rstrip(os.sep) or real.startswith(d) for d in readable_dirs())
 
 
@@ -157,27 +196,63 @@ def assert_endpoint_public(url: str) -> str:
     return url
 
 
+#: 重定向最多跟几跳。每一跳都重新过 :func:`assert_public_url`。
+_MAX_REDIRECTS = 3
+
+
 async def safe_fetch_url(url: str, *, timeout: int = 30,
                          max_bytes: int = DEFAULT_MAX_BYTES) -> bytes:
-    """SSRF 防护的 URL 下载。"""
-    import aiohttp
+    """SSRF 防护的 URL 下载。
 
-    assert_public_url(url)
+    ⚠️ **必须逐跳校验**（2026-10-18 修）：以前只校验初始 URL，然后
+    ``sess.get(...)`` 用 aiohttp 默认的 ``allow_redirects=True`` —— 攻击者回一个
+    302 到 ``http://127.0.0.1:8062/mcp`` 就绕过了 SSRF 闸，内容还会被当成图片发回微信。
+    现在手动跟跳（≤3 跳），每一跳都重新解析/校验 IP。
+    """
+    import aiohttp
+    from urllib.parse import urljoin
+
+    current = url
     async with aiohttp.ClientSession() as sess:
-        async with sess.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-            if resp.status != 200:
-                raise GuardError(f"下载失败 HTTP {resp.status}: {url[:60]}")
-            declared = resp.headers.get("Content-Length")
-            if declared:
-                try:
-                    if int(declared) > max_bytes:
-                        raise GuardError(f"下载内容过大（声明 {declared} > {max_bytes}）")
-                except ValueError:
-                    pass
-            data = await resp.read()
-            if len(data) > max_bytes:
-                raise GuardError(f"下载内容过大（{len(data)} > {max_bytes}）")
-            return data
+        for hop in range(_MAX_REDIRECTS + 1):
+            assert_public_url(current)
+            async with sess.get(
+                current, allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("Location") or ""
+                    if not loc:
+                        raise GuardError(f"重定向无 Location: {current[:60]}")
+                    if hop >= _MAX_REDIRECTS:
+                        raise GuardError(f"重定向超过 {_MAX_REDIRECTS} 跳: {url[:60]}")
+                    current = urljoin(current, loc)
+                    continue
+                if resp.status != 200:
+                    raise GuardError(f"下载失败 HTTP {resp.status}: {current[:60]}")
+                declared = resp.headers.get("Content-Length")
+                if declared:
+                    # ⚠️ 解析与判定必须分开：``GuardError`` 继承 ``ValueError``，
+                    # 把 ``raise GuardError`` 写在 ``try`` 里会被下面的
+                    # ``except ValueError`` **静默吞掉** ⇒ 声明上限形同虚设。
+                    try:
+                        declared_n = int(declared)
+                    except ValueError:
+                        declared_n = 0
+                    if declared_n > max_bytes:
+                        raise GuardError(
+                            f"下载内容过大（声明 {declared} > {max_bytes}）")
+                # ★ 必须**边读边判**：``resp.read()`` 会把 chunked/无 Content-Length 的
+                #   响应整包读进内存，再判长度已经晚了 —— 攻击者回一个无限流就 OOM。
+                #   这条路径的 URL 来自工具入参（不可信），上限必须是硬上限。
+                buf = bytearray()
+                async for chunk in resp.content.iter_chunked(64 * 1024):
+                    buf.extend(chunk)
+                    if len(buf) > max_bytes:
+                        raise GuardError(
+                            f"下载内容过大（已读 {len(buf)} > {max_bytes}）")
+                return bytes(buf)
+    raise GuardError(f"下载失败（重定向未收敛）: {url[:60]}")
 
 
 # ------------------------------------------------------------------ 出站白名单
@@ -185,7 +260,9 @@ async def safe_fetch_url(url: str, *, timeout: int = 30,
 
 def send_allowlist() -> tuple[str, ...]:
     """``WECHATPRO_SEND_ALLOWLIST`` 解析出的白名单（逗号分隔）。未设 ⇒ 空 tuple。"""
-    raw = (os.environ.get(SEND_ALLOWLIST_ENV) or "").strip()
+    from .env_compat import gate_env
+
+    raw = gate_env(SEND_ALLOWLIST_ENV)
     if not raw:
         return ()
     return tuple(p.strip() for p in raw.split(",") if p.strip())

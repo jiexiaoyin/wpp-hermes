@@ -5,9 +5,11 @@
 1. **禁网**：默认把 ``socket.connect`` 打掉。心流的 judge 热路径 / 预算 / 去重
    都不该产生任何网络 IO —— 这条不是为了跑得快，是为了让"某处偷偷发了个请求"
    **在测试里就炸**，而不是等到 .183 上才发现。
-2. **禁生产库**：``WECHATPRO_DB_NAME`` 未显式指到非生产库时，任何带 ``db`` 标记的
-   用例直接 fail。缺省值就是 ``wechatpro``（生产库名），而"忘了设环境变量"是
-   最容易发生、后果最重的一种失误 —— 所以判据是**必须显式声明**，不是"看着像就行"。
+2. **禁生产库**：带 ``db`` 标记的用例（真库用例，见 ``test_db_live.py``）必须显式
+   声明 ``WECHATPRO_DB_NAME`` 且**必须以 ``_test`` 结尾**；指到生产库名 ``wechatpro``
+   或没设就**当场 fail / skip**，绝不放行。缺省值就是 ``wechatpro``（生产库名），
+   而"忘了设环境变量"是最容易发生、后果最重的一种失误 —— 所以判据是**必须显式声明**。
+   库连不上（本机没有那个库；真测试库在 .183 上）⇒ **大声跳过**，那不算通过。
 3. **禁生产 bot**：任何用例里出现 ``wxid_eezdbu1ytws422``（益融小助理，生产号）
    一律 fail。铁律：**绝不能**拿生产号连调试实例（厂商的客户端实例锁会把生产踢下线
    并劫持它的 webhook）。
@@ -33,6 +35,9 @@ if str(_ROOT) not in sys.path:
 #: 生产库名（``plugin/data/db.py`` 的 ``_DEFAULT_NAME``）—— 测试**绝不允许**指到它。
 PROD_DB_NAME = "wechatpro"
 
+#: 允许真库用例连的库名后缀（``wechatpro_test``）。**必须显式**，不给"看着像"留口子。
+TEST_DB_SUFFIX = "_test"
+
 #: 生产 bot 的 wxid（益融小助理）。出现即 fail。
 PROD_SELF_WXID = "wxid_eezdbu1ytws422"
 
@@ -42,14 +47,17 @@ PROD_SELF_WXID = "wxid_eezdbu1ytws422"
 
 def pytest_configure(config) -> None:
     config.addinivalue_line("markers", "network: 允许真实网络（默认禁网）")
-    config.addinivalue_line("markers", "db: 需要数据库（默认按生产库名护栏检查环境变量）")
+    config.addinivalue_line(
+        "markers", "db: 需要真库（须显式 WECHATPRO_DB_NAME=<*_test>；连不上则**大声跳过**）")
 
 
 def pytest_collection_modifyitems(config, items) -> None:
-    """带 ``network`` 标记的用例不挂禁网夹具（夹具自己按 marker 判断，这里只做提醒）。"""
+    """允许真实网络/真库的用例，收集时逐个点名（默认是禁网 + 禁库的）。"""
     for item in items:
         if "network" in item.keywords:
             print(f"  ⚠️ 该用例允许真实网络: {item.nodeid}")
+        if "db" in item.keywords:
+            print(f"  ⚠️ 该用例允许连**本地测试库**: {item.nodeid}")
 
 
 def _env_guard(request) -> None:
@@ -62,13 +70,59 @@ def _env_guard(request) -> None:
         return
     name = os.environ.get("WECHATPRO_DB_NAME", "").strip()
     if not name:
-        raise AssertionError(
-            f"带 db 标记的用例要求**显式**设 WECHATPRO_DB_NAME（不得让缺省值 {PROD_DB_NAME!r} 生效）。"
-            f"例: WECHATPRO_DB_NAME=wechatpro_test")
+        _skip_or_fail(
+            f"⏭  真库用例跳过：未显式设 WECHATPRO_DB_NAME（缺省值 {PROD_DB_NAME!r} 是**生产库**，绝不使用）。"
+            f" 这不是通过 —— 真测试库在 .183 上，例: WECHATPRO_DB_NAME=wechatpro_test "
+            f"WECHATPRO_DB_HOST=127.0.0.1")
     if name == PROD_DB_NAME:
         raise AssertionError(
             f"WECHATPRO_DB_NAME={name!r} 是**生产库**。钦定红线：生产密钥/生产库永不可用于调试。"
             f"请用 wechatpro_test。")
+    if not name.endswith(TEST_DB_SUFFIX):
+        raise AssertionError(
+            f"WECHATPRO_DB_NAME={name!r} 不以 {TEST_DB_SUFFIX!r} 结尾 —— 真库用例只许连"
+            f"**显式命名的测试库**（如 wechatpro{TEST_DB_SUFFIX}）。判据是名字，不是「看着像测试库」。")
+    _require_reachable_test_db()
+
+
+def _skip_or_fail(msg: str) -> None:
+    """真库缺席时**跳过**；但门禁在 .183 上会设 ``WPP_REQUIRE_LIVE_DB=1`` ⇒ 那时缺席=**红**。
+
+    为什么要有这个开关：跳过是"本机没有参照物"的诚实表达（照 ``tools/gates.sh`` 里 TS 差分
+    那条的口径），但到了**本该有真库**的机器上还跳过，就变成"看起来绿"。两种情形必须分开。
+    """
+    if os.environ.get("WPP_REQUIRE_LIVE_DB") == "1":
+        raise AssertionError(msg + " —— 但 WPP_REQUIRE_LIVE_DB=1 要求真库必须可达（不许跳过）。")
+    pytest.skip(msg)
+
+
+def _require_reachable_test_db() -> None:
+    """连得上吗？连不上就**大声跳过** —— 本机（dev 树所在机器）没有真测试库。
+
+    ⚠️ 走到这里检查的库名已经过上面三道闸（非空 / 非生产 / ``*_test``），
+    而 ``db.get_conn()`` 自己还有 R3 host 白名单 —— 三处叠加，**不可能**连到生产库。
+    """
+    from plugin.data import db
+
+    try:
+        ok = db.is_available()
+    except Exception as exc:  # noqa: BLE001 —— 连库失败只该跳过，不该把收集期炸掉
+        _skip_or_fail(f"⏭  真库用例跳过：连不上测试库（{exc}）。这不是通过。")
+        return
+    if not ok:
+        _skip_or_fail(
+            f"⏭  真库用例跳过：测试库不可达（{db.health().get('detail') or db.describe()}）。"
+            " 这不是通过 —— 真测试库在 .183 上。")
+
+
+def _release_db() -> None:
+    """真库用例收尾：关掉本线程连接（线程内复用 ⇒ 不关就跨用例带着旧快照）。"""
+    try:
+        from plugin.data import db
+
+        db.close()
+    except Exception:  # noqa: BLE001 —— 收尾失败不该让用例变红
+        pass
 
 
 def _forbid_sockets(monkeypatch) -> None:
@@ -113,9 +167,12 @@ def _test_env(request, monkeypatch):
             f"环境变量 {k} 里出现生产 bot {PROD_SELF_WXID} —— 绝不能用生产号连调试实例")
 
     _env_guard(request)
-    if "network" not in request.keywords:
+    if "network" not in request.keywords and "db" not in request.keywords:
+        # 真库用例要连 localhost —— 它的 host 由 R3 白名单 + 库名三道闸管着（见 _env_guard）
         _forbid_sockets(monkeypatch)
 
     _reset_hf_caches()
     yield
+    if "db" in request.keywords:
+        _release_db()
     _reset_hf_caches()

@@ -25,6 +25,7 @@ HTTP 那一层被收在 :func:`plugin.inbound.stt._post_wav` 一个函数里，�
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import struct
@@ -37,9 +38,9 @@ from plugin.inbound import stt
 from plugin.inbound.media import voice_transcript
 from plugin.inbound.parser import MT_APP, MT_TEXT, MT_VOICE, InboundPipeline, WppMessage
 
-#: 复用注册面那套空壳环境（``gateway.*`` 只在 Hermes 运行时里存在）—— 见
-#: ``plugin/tests/test_registration.py`` 顶部的分工说明，**不另写一份**。
-from .test_registration import stubbed  # noqa: F401 —— 本模块的 adapter 夹具要用它
+#: 复用注册面那套空壳环境（``gateway.*`` 只在 Hermes 运行时里存在），**不另写一份**。
+#: ⚠️ ``stubbed`` 住在 ``conftest.py``（2026-10-02 提上来的）⇒ pytest 按名字解析，
+#: **不需要 import**；从 test_registration 导入会在收集期 ImportError。
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -165,6 +166,64 @@ def test_api_key_prefers_plugin_yaml_name(monkeypatch) -> None:
     assert stt.siliconflow_api_key() == "sk-new"
     monkeypatch.delenv("WECHATPRO_STT_API_KEY")
     assert stt.siliconflow_api_key() == "sk-old"
+
+
+def test_stt_backend_explicit_and_auto_detect(monkeypatch) -> None:
+    """显式 ``WPP_STT_BACKEND`` 优先；不写时只在 URL 含 token-plan 时自动切换。"""
+    monkeypatch.delenv("WPP_STT_BACKEND", raising=False)
+    monkeypatch.delenv("SILICONFLOW_STT_URL", raising=False)
+    assert stt.stt_backend() == "siliconflow"
+
+    monkeypatch.setenv("SILICONFLOW_STT_URL", "https://token-plan.cn-beijing.maas.aliyuncs.com/x")
+    assert stt.stt_backend() == "dashscope"
+
+    monkeypatch.setenv("WPP_STT_BACKEND", "siliconflow")
+    assert stt.stt_backend() == "siliconflow"
+    monkeypatch.setenv("WPP_STT_BACKEND", "tokenplan")
+    assert stt.stt_backend() == "dashscope"
+
+
+def test_dashscope_key_falls_back_to_judge_key(monkeypatch) -> None:
+    """Token Plan 后端用 JUDGE_API_KEY 兜底，不会拿 SiliconFlow key 去发。"""
+    monkeypatch.setenv("WPP_STT_BACKEND", "dashscope")
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "sk-silicon")
+    monkeypatch.delenv("WECHATPRO_STT_API_KEY", raising=False)
+    monkeypatch.setenv("JUDGE_API_KEY", "tp-key")
+    assert stt.stt_api_key() == "tp-key"
+    monkeypatch.delenv("JUDGE_API_KEY")
+    assert stt.stt_api_key() == ""
+
+
+def test_dashscope_payload_inlines_wav_as_data_url() -> None:
+    """请求体必须是 ``input_audio.data`` + ``data:audio/wav;base64,``，且采样率与 WAV 头一致。"""
+    wav = stt.build_wav_buffer(b"\x01\x02" * 10)
+    payload = stt.build_dashscope_payload(wav)
+    assert payload["model"] == stt.DASHSCOPE_STT_MODEL
+    part = payload["input"]["messages"][0]["content"][0]
+    assert part["type"] == "input_audio"
+    data = part["input_audio"]["data"]
+    assert data.startswith("data:audio/wav;base64,")
+    assert base64.b64decode(data.split(",", 1)[1]) == wav
+    assert payload["parameters"] == {"format": "wav", "sample_rate": str(stt.WAV_SAMPLE_RATE)}
+
+
+def test_transcribe_uses_dashscope_post_when_selected(monkeypatch, tmp_path) -> None:
+    """选 dashscope 后端时：走 ``_post_dashscope``、用 Token Plan key、URL 是原生端点。"""
+    monkeypatch.setenv("WPP_STT_BACKEND", "dashscope")
+    monkeypatch.setenv("JUDGE_API_KEY", "tp-key")
+    monkeypatch.delenv("WECHATPRO_STT_API_KEY", raising=False)
+    _patch_stt_ready(monkeypatch, tmp_path)
+    seen = {}
+
+    async def fake_post(url, key, wav, timeout_s):
+        seen.update(url=url, key=key, wav=wav)
+        return 200, '{"text":"语音识别结果"}'
+
+    monkeypatch.setattr(stt, "_post_dashscope", fake_post)
+    assert asyncio.run(stt.transcribe_silk_buffer(b"\x02#x")) == "语音识别结果"
+    assert seen["url"] == stt.DASHSCOPE_STT_URL
+    assert seen["key"] == "tp-key"
+    assert seen["wav"].startswith(b"RIFF")
 
 
 def test_degradation_warns_loudly_once(caplog) -> None:
@@ -512,14 +571,37 @@ def _adapter_src(adapter) -> str:
     return open(adapter.__file__, encoding="utf-8").read()
 
 
-def test_build_event_fetches_media_before_text(adapter) -> None:
-    """``_build_event`` 必须先取媒体再算正文 —— 反过来语音转写永远赶不上正文。"""
+def test_media_is_fetched_before_text_persist_and_heartflow(adapter) -> None:
+    """媒体必须在**正文之前**取（否则语音转写进不了正文）—— 且要在**更上游**取（W7-1）。
+
+    这条原来判的是 ``_build_event`` 内部那句顺序（先取媒体、再 ``prepare_text``）。
+    W7-1 把取媒体提到了 ``_handle_one`` 的 ④c，于是那个位置**不够了**：
+    ④z（落库）与 ④a（心流缓冲）都排在 ⑤（``_build_event``）**之前**，而心流 judge
+    看图（v1.11.0）抠的是 ``msg.content`` 里 ``[图片] <直链>`` 那一行 ⇒ 在 ⑤ 里取媒体，
+    judge 与 DB 永远拿不到 URL。判据因此换成"全链路只有 ④c 一个取媒体点，
+    且它排在**所有**消费者之前"——比原来那条更强，也不是放宽。
+    """
     src = _adapter_src(adapter)
-    head = src.index("async def _build_event")
-    body = src[head:src.index("async def _fetch_media", head)]
-    i_media = body.index("await self._fetch_media(acct, msg)")
-    i_text = body.index("text = pipeline.prepare_text(msg)")
-    assert i_media < i_text, "_fetch_media 必须在 prepare_text 之前（否则语音转写进不了正文）"
+    one = src[src.index("async def _handle_one"):src.index("async def _maybe_command")]
+    i_media = one.index("await self._fetch_media(acct, msg)")
+    # 2026-10-18 起落库挪进了线程池：``await asyncio.to_thread(persist_inbound, ...)``。
+    i_persist = min(one.index(s) for s in ("persist_inbound(acct, msg)",
+                                           "to_thread(persist_inbound, acct, msg)")
+                    if s in one)
+    assert i_media < i_persist, \
+        "取媒体必须在落库之前（DB 里那行正文要带 OSS URL，对齐 TS enrichAndSave）"
+    assert i_media < one.index("self._hf_note_group(acct, msg"), \
+        "取媒体必须在心流缓冲之前（judge 看图要从 content 里抠直链）"
+    assert i_media < one.index("await self._build_event("), "取媒体必须在构造事件之前"
+    # 2026-10-18：心流回合追加了 keyword-only 的 ``reply_expected``，调用摊成多行；
+    # 不再按整句字面量匹配，改判「调用窗口里确实带上了 media」。
+    _i_build = one.index("await self._build_event(")
+    assert "media=media" in one[_i_build:_i_build + 240], \
+        "取到的 (media_urls, media_types) 必须交给 _build_event（否则附件丢了）"
+
+    build = src[src.index("async def _build_event"):src.index("async def _fetch_media")]
+    assert "await self._fetch_media(" not in build, \
+        "_build_event 不许自己再取一次 —— 取两次＝多下一次、多传一次（白花钱）"
 
 
 def test_fetch_media_wires_voice_transcript(adapter) -> None:

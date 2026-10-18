@@ -53,8 +53,11 @@ def _has_credential(cfg: dict[str, Any]) -> bool:
     if str(cfg.get("authcode") or "").strip():
         return True
     env_name = str(cfg.get("authcodeEnv") or "").strip()
-    if env_name and str(os.environ.get(env_name) or "").strip():
-        return True
+    if env_name:
+        from .env_compat import secret_env
+
+        if secret_env(env_name).strip():
+            return True
     return False
 
 
@@ -84,11 +87,16 @@ def load_local_accounts() -> dict[str, dict[str, Any]]:
     return out
 
 
+def configured_accounts(accounts: Any) -> dict[str, dict[str, Any]]:
+    """过滤出**真配了凭据**的账号（空壳 ``default.json`` 不 seed）。"""
+    if not isinstance(accounts, dict):
+        return {}
+    return {str(k): v for k, v in accounts.items() if _has_credential(v)}
+
+
 def any_configured(accounts: Any) -> bool:
     """给定的账号表里是否**至少有一个**真配了凭据。"""
-    if not isinstance(accounts, dict):
-        return False
-    return any(_has_credential(cfg) for cfg in accounts.values())
+    return bool(configured_accounts(accounts))
 
 
 def any_local_account_configured() -> bool:
@@ -106,7 +114,9 @@ def env_accounts() -> dict[str, dict[str, Any]] | None:
 
     用途：不想把凭据落盘时，用一条 env 直接给账号表。
     """
-    raw = str(os.environ.get("WECHATPRO_ACCOUNTS_JSON") or "").strip()
+    from .env_compat import secret_env
+
+    raw = secret_env("WECHATPRO_ACCOUNTS_JSON").strip()
     if not raw:
         return None
     try:

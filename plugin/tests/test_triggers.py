@@ -316,3 +316,196 @@ def test_red_packet_log_distinguishes_url_and_card(caplog):
             raw={"appMsg": {"type": 2002, "hongbaoInfo": {"url": "https://x/y", "key": "k"}}}))
     assert len(caplog.records) == 1
     assert "url=present" in caplog.records[-1].getMessage()
+
+
+# ==================================================== §8 接龙收窄（A4，2026-10-02）
+#
+# 09-27 事故是"接龙**被吞**"，这一节防的是**反方向**：接龙是 100% 必回（不复用 judge），
+# 而旧判据是裸子串 ``"接龙" in content`` ⇒ 群里**聊到**接龙（不是发接龙）也被迫作答，
+# 还连着把发言预算的额度吃掉（心流压根没机会判"这条该不该接"）。
+#
+# 收窄后的判据 = ``relay.is_relay_message``（**与红包闸同一个函数**，09-27 的教训就是
+# 两处结构判据分叉）∪（卡片 49/53 上的"接龙"字样，含 ``prepare_text`` 打的 ``[接龙]``）。
+# 纯文本（``MT_TEXT``）里出现"接龙"二字 ⇒ 落回心流。
+
+
+@pytest.mark.parametrize("text", [
+    "这个接龙我不参加了",
+    "刚谁发的那个接龙？",
+    "接龙是啥意思",
+])
+def test_chat_about_a_relay_is_not_a_relay(text):
+    """纯文本里**聊到**接龙 ⇒ 交心流判（不许 100% 必回）。"""
+    assert T.should_process(_group(content=text), _cfg()) == (False, "heartflow_candidate"), \
+        "聊到接龙不等于发接龙（收窄前这里恒为 group_solitaire）"
+
+
+def test_a_relay_card_without_numbered_items_is_still_a_relay():
+    """卡片上的接龙（哪怕还没有编号条目）照旧 100% 必回 —— 收窄不许把真接龙收没了。
+
+    这一条守的是**召回**：真的接龙卡片在"刚发起、还没人报名"时正文里也只有"接龙"二字，
+    若只认 ``#接龙`` 模板就会退回 09-27 那种"接龙没回复"。
+    """
+    assert T.should_process(_group(content="接龙：接龙报名", msg_type=MT_APP), _cfg()) == \
+        (True, "group_solitaire")
+    # ``prepare_text`` 给卡片打的显示标记（正文被媒体标记替换后的形态）
+    assert T.should_process(_group(content="[接龙] 报名", msg_type=MT_APP), _cfg()) == \
+        (True, "group_solitaire")
+
+
+def test_old_chat_history_form_is_still_a_relay():
+    """旧 ``msgType=53``（chat-history）仍按接龙走（历史兼容，TS ``isRelayMessage`` 同款）。
+
+    第二种形态（正文里**没有**"接龙"二字）钉的是 **``is_relay_message`` 那一路本身**：
+    53 是纯类型判据，是 :func:`relay.is_relay_message` 独有的结论，本模块的三条结构信号
+    都认不出它 —— 少了它"接龙型聊天记录卡片"就落回心流（历史兼容断掉）。
+    """
+    from plugin.inbound.parser import MT_CHAT_HISTORY
+
+    assert T.should_process(_group(content="#接龙\n1. 我", msg_type=MT_CHAT_HISTORY), _cfg()) == \
+        (True, "group_solitaire")
+    assert T.should_process(_group(content="昨天的聊天记录", msg_type=MT_CHAT_HISTORY),
+                            _cfg()) == (True, "group_solitaire"), \
+        "53 是纯类型判据（is_relay_message 独有），正文里不一定有「接龙」字样"
+
+
+def test_a_non_relay_card_is_not_judged_by_its_type():
+    """**2026-09-01 教训**：49 卡片里含转账 86 / 应用消息 44 条 —— 不许按类型判成接龙。"""
+    assert T.should_process(_group(content="微信转账 100.00 元", msg_type=MT_APP),
+                            _cfg())[1] != "group_solitaire"
+    assert T.should_process(_group(content="[应用消息] 某某应用", msg_type=MT_APP),
+                            _cfg())[1] != "group_solitaire"
+
+
+def test_a_plain_text_relay_template_still_triggers():
+    """**召回护栏**：纯文本形态的真接龙（微信模板 ``#接龙``）照旧 100% 必回。
+
+    收窄只砍"顺口聊到接龙"，不砍"真的在发接龙" —— 微信接龙的模板标记是硬结构，
+    闲聊不会凭空打出 ``#接龙``。
+    """
+    assert T.should_process(_group(content="#接龙 1. 我"), _cfg()) == (True, "group_solitaire")
+
+
+# ============================================ §5 reason 三分类（A8，fail-closed）
+
+
+def test_the_three_reason_classes_partition_the_vocabulary():
+    """三张表**互斥且穷尽** —— 一个 reason 落在两类里，判据就随读表顺序漂。"""
+    assert not (T.ALLOW_REASONS & T.HEARTFLOW_REASONS)
+    assert not (T.ALLOW_REASONS & T.DENY_REASONS)
+    assert not (T.HEARTFLOW_REASONS & T.DENY_REASONS)
+    assert T.ALL_REASONS == T.ALLOW_REASONS | T.HEARTFLOW_REASONS | T.DENY_REASONS
+
+
+def test_every_reason_the_code_can_return_is_registered():
+    """★ 源码里能返回的 reason **必须全部登记**，且分类与 ``ok`` 一致。
+
+    这条防的正是 A8：新增一条 deny reason 而忘了登记 ⇒ 旧实现（``_DROP_REASONS``
+    这种**枚举白名单**）会把它当成"不在丢弃表里"而**喂给 LLM**。
+    判据改成 fail-closed（``should_drop``）之后，忘了登记的后果变成"丢" ——
+    更安全，但**仍然是 bug**（该放出去的放不出去），所以这里让门禁直接红。
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(T.__file__).read_text(encoding="utf-8")
+    pairs = set()
+    # 找 **(bool, "字符串") 这种字面量对**，不限定在 ``return`` 里 ——
+    # ``_decide_dm`` 有一条写成条件表达式
+    # ``return (True, "dm") if … else (False, "dm_not_allowlisted")``，
+    # 只认 ``Return(Tuple)`` 的话那条会**静默漏掉**（而它就是白名单外的那条 deny）。
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Tuple) and len(node.elts) == 2:
+            head, tail = node.elts
+            if isinstance(head, ast.Constant) and isinstance(head.value, bool) \
+                    and isinstance(tail, ast.Constant) and isinstance(tail.value, str):
+                pairs.add((head.value, tail.value))
+    assert pairs, "一条 (bool, \"reason\") 字面量都没扫到 —— 返回形状变了？"
+
+    got = {r for _, r in pairs}
+    assert got == T.ALL_REASONS, (
+        f"词表与源码对不上。源码有、表里没有：{sorted(got - T.ALL_REASONS)}；"
+        f"表里有、源码没有：{sorted(T.ALL_REASONS - got)}"
+    )
+    for ok, reason in sorted(pairs):
+        if ok:
+            assert T.reason_class(reason) == T.CLASS_ALLOW, f"{reason} 是放行类"
+        else:
+            expected = (T.CLASS_HEARTFLOW if reason in T.HEARTFLOW_REASONS
+                        else T.CLASS_DENY)
+            assert T.reason_class(reason) == expected, f"{reason} 的 ok=False 与分类矛盾"
+
+
+def test_an_unregistered_reason_is_dropped_not_fed_to_the_llm():
+    """★ fail-closed：**不认识的 reason ⇒ 丢**。
+
+    多丢一条有日志可查；多喂一条进了 LLM 就撤不回（红线 3 的精神）。
+    """
+    assert T.reason_class("a_deny_reason_someone_added_later") == T.CLASS_DENY
+    assert T.should_drop(False, "a_deny_reason_someone_added_later") is True
+
+
+def test_a_true_verdict_is_never_dropped_even_with_an_unknown_reason():
+    """``ok`` 是**主判据**：``(True, 新理由)`` 要放行。
+
+    否则新增一条触发路（新 reason）会被这道门静默吞掉 —— 那正是"接了但没反应"。
+    """
+    assert T.should_drop(True, "a_brand_new_trigger_route") is False
+    assert T.should_drop(True, "group_mention") is False
+
+
+def test_only_heartflow_candidate_may_leak_past_the_gate():
+    """``(False, …)`` 里**只有** ``heartflow_candidate`` 能漏到下游（交给 judge）。"""
+    assert T.HEARTFLOW_REASONS == frozenset({"heartflow_candidate"}), \
+        "心流漏口就这么一个 —— 加宽等于把「明令拒绝」也送进 LLM"
+    assert T.should_drop(False, "heartflow_candidate") is False
+    for r in sorted(T.DENY_REASONS):
+        assert T.should_drop(False, r) is True, f"{r} 必须被丢掉"
+    for r in sorted(T.ALLOW_REASONS):
+        assert T.should_drop(True, r) is False, f"{r} 是放行类"
+
+
+def test_the_gate_matches_real_verdicts():
+    """拿真判定走一遍：每一类各挑一条，门要判对。
+
+    表与判据是两份东西 —— 只测表（上面那条 AST）不够，得让**真消息**穿过
+    ``should_process`` → ``should_drop`` 这条链。
+    """
+    cases = [
+        (_group(content="@测试小助理 在吗"), _cfg(), False, "group_mention"),
+        (_group(content="#接龙 1. 我"), _cfg(), False, "group_solitaire"),
+        (_group(content="今天天气不错"), _cfg(), False, "heartflow_candidate"),
+        (_group(from_wxid=SELF, content="我自己说的"), _cfg(), True, "self"),
+        (_group(content="微信红包", msg_type=MT_APP), _cfg(), True, "red_packet"),
+        (_group(msg_type=MT_REVOKE), _cfg(), True, "revoke"),
+        (_msg(content="你好"), _cfg(), True, "dm_fail_closed"),
+        (_msg(content="你好"), _cfg(allowAllUsers=True), False, "dm"),
+    ]
+    blacklisted = _cfg(blacklistGroups=["12345@chatroom"])
+    cases.append((_group(content="在吗"), blacklisted, True, "group_blacklist"))
+
+    for msg, cfg, expect_drop, expect_reason in cases:
+        ok, reason = T.should_process(msg, cfg)
+        assert reason == expect_reason, (reason, expect_reason)
+        assert T.should_drop(ok, reason) is expect_drop, (reason, ok)
+
+
+def test_require_at_mention_is_deliberately_not_honoured():
+    """★ A8：``requireAtMention`` 是**死键**，本树照旧不生效 —— 这是**对齐**不是漏做。
+
+    查证过 TS 侧：唯一实现（``group-policy.ts``）只挂在 ``handleWebhookPayload`` 上，
+    而那个函数**零调用者**；活路径 ``shouldTrigger`` 把它硬编码成 ``false``，
+    生产账号写着 ``true`` 而心流在群里一直正常工作。
+
+    所以把它实现成硬门 = **引入分叉**：群里非 @ 的消息会静默不触发（比"多说话"更糟，
+    而且症状是"它不理我"，日志里一行都没有）。配了它的人由
+    ``core.accounts._warn_inert_keys`` 一行 WARN 提醒。
+    """
+    cfg = _cfg(requireAtMention=True)
+    assert T.should_process(_group(content="今天天气不错"), cfg) == \
+        (False, "heartflow_candidate"), "非 @ 群消息照旧进心流（不因这个键被丢）"
+    assert T.should_process(_group(content="@测试小助理 在吗"), cfg) == (True, "group_mention")
+
+    src = Path(T.__file__).read_text(encoding="utf-8")
+    assert "requireAtMention" not in src and "require_at_mention" not in src, \
+        "判据里出现这个键，就说明有人把它实现成了硬门 —— 那要与 TS 分叉，须先改这条测试"

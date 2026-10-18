@@ -90,15 +90,18 @@ def test_path_2_accounts_json_env(_clean_env, monkeypatch):
 
 
 def test_path_3_authcode_env(_clean_env, monkeypatch):
-    """③ 单条 env 凭据（``WECHATPRO_AUTHCODE``）—— 唯一**不能** seed 的路径。"""
+    """③ 单条 env 凭据（``WECHATPRO_AUTHCODE``）必须**合成 default 账号**再 seed。
+
+    旧实现这里 return None：``is_connected`` 判真、探针却不 seed ⇒ 平台永远启用不了。
+    这条路径是单机部署最常见的样子（``.env`` 里只填一个 authcode），必须能起来。
+    """
     monkeypatch.setenv("WECHATPRO_AUTHCODE", "single-env-code")
     assert EN.is_connected(_Cfg()) is True
-    # ⚠️ 这里故意记录一个**已知不对称**：单条 env 凭据没有任何账号结构，
-    #    探针给不出非空 seed ⇒ 平台照样启用不了（seed 必须非空）。
-    #    旧实现正是把 ③ 当成主路径，于是"env 填了 authcode 却起不来"。
-    #    保留 ③ 只为兼容既有部署，**新部署应走 ①/②/④**。
-    assert EN.env_enablement_fn() is None, \
-        "③ 给不出 seed（单条 authcode 没有账号结构）—— 新部署别只配它"
+    seed = EN.env_enablement_fn()
+    assert seed and "default" in seed["accounts"], "③ 必须合成 default 账号，否则平台不启用"
+    acct = seed["accounts"]["default"]
+    assert acct["authcodeEnv"] == "WECHATPRO_AUTHCODE"
+    assert acct["agent"] == "wpp-wechat"
 
 
 def test_path_4_local_account_files_are_seen(_clean_env):
@@ -217,7 +220,7 @@ def test_the_platform_name_is_the_one_tools_register_under():
     """
     from pathlib import Path
 
-    from plugin.tools import registry
+    from plugin.toolkit import registry
 
     root = Path(__file__).resolve().parents[2]
     assert EN.PLATFORM_NAME == "wechatpadpro"
@@ -233,6 +236,6 @@ def test_the_platform_name_is_the_one_tools_register_under():
         "注册必须用符号（写第二遍字面量就多一处会漂的地方）"
     # toolset 侧**故意**保持字面量（旧实现如此，见 tools/registry.py docstring），
     # 所以这里钉的是"注册点确实带着这个字面量"，不是"它已被常量替换"。
-    tools_src = (root / "plugin/tools/registry.py").read_text(encoding="utf-8")
+    tools_src = (root / "plugin/toolkit/registry.py").read_text(encoding="utf-8")
     assert f'toolset="{EN.PLATFORM_NAME}"' in tools_src, \
         "工具注册点的 toolset 必须等于平台名（改一个就得改另一个）"

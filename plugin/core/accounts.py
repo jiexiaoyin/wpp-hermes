@@ -57,6 +57,23 @@ PRODUCTION_WXID = "wxid_eezdbu1ytws422"
 #: 逃生阀：确需在受控环境下以生产身份连接时才置 1（**默认禁止**）
 ALLOW_PRODUCTION_ENV = "WECHATPRO_ALLOW_PRODUCTION_WXID"
 
+#: ⚠️ 生产实例**凭据的指纹**（``sha256(authcode)[:12]``，与 :func:`fingerprint` 和厂商的
+#: 客户端实例锁**同款口径**）。只存**单向指纹**，不存密钥：它不可用于连接，只用于
+#: "这把锁是不是生产那把"的比对（运维还能拿它跟厂商面板上的实例锁对着看）。
+#:
+#: **为什么光有 wxid 不够**（P2-a / C4）：``selfWxid`` 是配置里**写的一句话** ——
+#: 缺省（"还没填"）、写错（复制了别的账号的）、经 ``WECHATPRO_ACCOUNTS_JSON`` 注入的
+#: 空壳，都能让它不再是 ``wxid_eezdbu1ytws422``，而**起决定作用的是 authcode**
+#: （厂商按客户端密钥加实例锁）：拿着生产 authcode 连上去 = 把生产踢下线 + 劫持它的
+#: webhook（红线 2），此时配置里的 selfWxid 写什么都一样。
+#:
+#: ⚠️ 生产轮换 authcode 后**必须同步更新这张表**，否则这道门退化成"只认 wxid"
+#: （那是 fail-open）。所以 :func:`refusal_reason` 的措辞要把**两种触发**分开写，
+#: 让运维一眼看出是哪一道门在拦，别改配置绕过去。
+PRODUCTION_CREDENTIAL_FINGERPRINTS = frozenset({
+    "654c31808b5f",   # 生产 bot「益融小助理」的 authcode（WECHATPRO_AUTHCODE）
+})
+
 
 class AccountError(RuntimeError):
     """账号配置错误 —— 配置问题必须**当场炸**，不许静默降级。"""
@@ -136,6 +153,7 @@ class Account:
     admin_users: tuple[str, ...]
     blacklist_groups: tuple[str, ...]
     require_at_mention: bool
+    #: W7-6 起**真在跑**：到达层聚合窗口（同 key 多条合一批），见 ``inbound/debounce.py``。
     debounce_ms: int
 
     # -- 特色功能开关 ----------------------------------------------
@@ -165,8 +183,23 @@ class Account:
 
     @property
     def is_production_identity(self) -> bool:
-        """是不是生产 bot 的身份。"""
-        return self.self_wxid == PRODUCTION_WXID
+        """是不是生产 bot 的身份 —— **wxid 或凭据**任一对上就算（C4）。
+
+        两道判据缺一不可：
+
+        1. ``self_wxid`` 命中生产 wxid（原有那道）；
+        2. **凭据指纹**命中生产 authcode（新加的那道）—— 见
+           :data:`PRODUCTION_CREDENTIAL_FINGERPRINTS` 的说明：selfWxid 只是配置里的
+           一句话，缺省/写错/被 env 注入都能绕开第 1 道，而"连上去会怎样"由 authcode
+           决定（厂商按客户端密钥上实例锁）。
+
+        这里**不看 enabled** —— 判定"是不是那个身份"与"这次要不要连"是两件事
+        （"要不要连"在 :func:`refusal_reason` / :func:`red_line_reason` 里判）。
+        """
+        if self.self_wxid == PRODUCTION_WXID:
+            return True
+        ft = self.credential_fingerprint
+        return ft != "-" and ft in PRODUCTION_CREDENTIAL_FINGERPRINTS
 
     @property
     def webhook_url(self) -> str:
@@ -287,17 +320,24 @@ def _resolve_secret(cfg: dict[str, Any], literal_key: str, *fallback_envs: str) 
 
     ⚠️ 必须**强制覆盖**而非 ``setdefault`` —— ``accounts/default.json`` 里
     ``authcode`` 是**空串占位**，``setdefault`` 见键已存在就不动了，凭据永远填不进去。
+
+    ⚠️ ``<key>Env`` 写了名字却读不到值 ⇒ **出声**（WARNING）。以前是静默落空，
+    表现为"账号配了 authcodeEnv 却连不上"，而日志里没有任何一行说这件事。
     """
     literal = str(cfg.get(literal_key) or "").strip()
     if literal:
         return literal
+    from .env_compat import secret_env  # 多 profile: 凭据必须走 scoped 口径
+
     indirect = str(cfg.get(f"{literal_key}Env") or "").strip()
     if indirect:
-        got = _env(indirect)
+        got = secret_env(indirect)
         if got:
             return got
+        log.warning("[WPP] %sEnv=%s 指向的环境变量为空/未设置",
+                    literal_key, indirect)
     for name in fallback_envs:
-        got = _env(name)
+        got = secret_env(name)
         if got:
             return got
     return ""
@@ -329,9 +369,19 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         log.debug("[WPP] 账号 %s 无 runtime override（%s）", account_id, exc)
 
     # ① 凭据
-    authcode = _resolve_secret(cfg, "authcode", "WECHATPRO_AUTHCODE")
-    token_key = _resolve_secret(cfg, "tokenKey", "WECHATPRO_TOKEN_KEY")
-    webhook_secret = _resolve_secret(cfg, "webhookSecret", "WECHATPRO_WEBHOOK_SECRET")
+    #    ★ 全局 env 兜底只对 ``default`` 账号生效（或显式开逃生门）。否则多账号
+    #      场景下每个**没配凭据**的账号都会静默继承 ``WECHATPRO_AUTHCODE`` ——
+    #      同一个微信身份被两个 agent 同时连，厂商侧互踢，插件侧却毫不知情。
+    #      非 default 账号必须自带 authcode / authcodeEnv。
+    allow_global = (account_id == "default"
+                    or _env_bool("WECHATPRO_ALLOW_GLOBAL_CREDENTIALS"))
+    authcode = _resolve_secret(cfg, "authcode",
+                               *("WECHATPRO_AUTHCODE",) if allow_global else ())
+    token_key = _resolve_secret(cfg, "tokenKey",
+                                *("WECHATPRO_TOKEN_KEY",) if allow_global else ())
+    webhook_secret = _resolve_secret(cfg, "webhookSecret",
+                                     *("WECHATPRO_WEBHOOK_SECRET",)
+                                     if allow_global else ())
 
     # ② agent 校验（raise 而非跳过 —— 串号是安全事故，不是配置瑕疵）
     agent = str(cfg.get("agent") or "").strip()
@@ -351,6 +401,20 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
     #    作兜底，与 plugin.yaml 自称的 "No default is applied" 自相矛盾；未配就是
     #    空串，由 ``Account.webhook_url`` 显式处理。
     public_url = _resolve_secret(cfg, "webhookPublicUrl", "WECHATPRO_WEBHOOK_PUBLIC_URL")
+
+    # ③ ``ai.judgeModel`` / ``ai.timeoutMs`` 作为三个 LLM 功能的默认值
+    #    （逐字对齐 TS ``config-ai.ts:17 resolveAiConfig``）：功能自己配了就优先，
+    #    没配才用 ai 块。ts 侧只在运行时合并；py2 在 Account 构建处合并一次 ⇒
+    #    心流 / 黑话 / 好感度三条链、以及 ``/heartflow status`` 看到的是同一个生效值。
+    _ai = _as_dict(cfg.get("ai"))
+
+    def _with_ai_defaults(section: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(section)
+        if _ai.get("judgeModel") and not merged.get("model"):
+            merged["model"] = _ai["judgeModel"]
+        if _ai.get("timeoutMs") and not merged.get("timeoutMs"):
+            merged["timeoutMs"] = _ai["timeoutMs"]
+        return merged
 
     return Account(
         id=account_id,
@@ -381,12 +445,19 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         admin_users=_as_str_tuple(cfg.get("adminUsers")),
         blacklist_groups=_as_str_tuple(cfg.get("blacklistGroups")),
         require_at_mention=_as_bool(cfg.get("requireAtMention"), False),
-        debounce_ms=_as_int(cfg.get("debounceMs"), 1500),
-        heartflow=_as_dict(cfg.get("heartflow")),
-        affection=_as_dict(cfg.get("affection")),
-        jargon=_as_dict(cfg.get("jargon")),
+        # W7-6 起这个键**真的生效**（到达层聚合窗口）。默认值对齐 TS ``core/constants.ts:62``
+        # 的 ``DEFAULT_DEBOUNCE_MS = 500`` —— 本树原先写 1500 是 v1.3.74 **之前**的旧值
+        # （2026-08-22 老板拍板降到 500：webhook 到达延迟中位数 < 200ms，等 1.5s 纯属浪费）。
+        # 那时这键没人读，写多少都不影响；现在它进了收信链路，**按 TS 的现值**才对齐。
+        debounce_ms=_as_int(cfg.get("debounceMs"), 500),
+        heartflow=_with_ai_defaults(_as_dict(cfg.get("heartflow"))),
+        affection=_with_ai_defaults(_as_dict(cfg.get("affection"))),
+        jargon=_with_ai_defaults(_as_dict(cfg.get("jargon"))),
         llm_intent_enabled=_as_bool(cfg.get("llmIntentEnabled"), False),
-        mcp_enabled=_as_bool(cfg.get("mcpEnabled"), False),
+        # TS ``mcp-meta.ts:mcpEnabledForCurrentAccount`` 是 ``!== false`` —— 缺省**开**，
+        # 只有显式 false 才关。旧 py2 解析成默认 false 且没人消费（死键），
+        # 2026-10-18 接上 vendor MCP 后按 TS 语义改回默认开。
+        mcp_enabled=_as_bool(cfg.get("mcpEnabled"), True),
         group_context_enabled=_as_bool(cfg.get("groupContextEnabled"), False),
         dm_pairing_enabled=_as_bool(cfg.get("dmPairingEnabled"), False),
         friend_circle_publish_enabled=_as_bool(cfg.get("friendCirclePublishEnabled"), False),
@@ -405,28 +476,117 @@ def load_all(extra_accounts: dict[str, Any] | None = None) -> dict[str, Account]
             out[account_id] = resolve(account_id, (extra_accounts or {}).get(account_id))
         except AccountError as exc:
             log.error("[WPP] 账号 %s 配置错误，已跳过: %s", account_id, exc)
+    _warn_inert_keys(out.values())
     return out
 
 
+#: 已就"死键"提醒过的账号（每进程每人一条，防日志刷屏）
+_INERT_WARNED: set[str] = set()
+
+
+def reset_inert_warnings() -> None:
+    """清掉去重表（**唯一用途是测试**，与心流那些 ``reset_*_cache`` 同款）。"""
+    _INERT_WARNED.clear()
+
+
+def _warn_inert_keys(accounts: Iterable[Account]) -> None:
+    """配置里出现**本树不认的键**时，每人每进程提醒一次（审阅 A8）。
+
+    目前只有 ``requireAtMention`` 一个，它在 TS 侧**也不生效**：
+
+    * 唯一实现 ``src/inbound/group-policy.ts`` 只被 ``handleWebhookPayload`` 调用，
+      而那个函数**零调用者**；
+    * 活路径 ``createWppInboundHandler`` → ``shouldTrigger`` 把 ``requireAtMention``
+      **硬编码成 false**（``triggers.ts``），``enrich.ts`` 的注释也明说
+      非 @ 消息照样会进心流；
+    * 生产 TS 账号写着 ``requireAtMention: true``，而心流在群里一直正常工作。
+
+    所以"只在被 @ 时回复"这个语义**从来没生效过**，本树照抄"不生效"才是
+    **行为对齐**（实现成硬门反而是引入分叉 —— 群里会静默不出声）。
+
+    但**不实现不等于可以静默**：配了 ``true`` 的人以为群里只在被 @ 时才说话，
+    实际每条群消息都进心流 —— 这中间隔着一次"它怎么乱插话"的事故。宁可打一行 WARN。
+    """
+    for acct in accounts:
+        if not acct.require_at_mention or acct.id in _INERT_WARNED:
+            continue
+        _INERT_WARNED.add(acct.id)
+        log.warning(
+            "[WPP] 账号 %s 配了 requireAtMention=true，但本插件**不生效**"
+            "（与 TS 行为对齐：TS 的活路径也把它硬编码成 false，唯一实现挂在"
+            "零调用者的 handleWebhookPayload 上）。群消息仍会全部进心流判定 ——"
+            "要收窄「什么时候出声」，请用心流的预算 / 阈值 / 沉默段，或用 "
+            "groupPolicy / blacklistGroups 收窄「在哪些群出声」。",
+            acct.id,
+        )
+
+
 # ================================================================ 连接前守卫
+
+
+def _production_reason(acct: Account) -> str | None:
+    """生产身份红线的拒因（**没触红线返回 None**，逃生阀已开也返回 None）。"""
+    if not acct.is_production_identity or _env_bool(ALLOW_PRODUCTION_ENV):
+        return None
+    if acct.self_wxid == PRODUCTION_WXID:
+        which = (f"selfWxid 就是生产 bot「益融小助理」（{PRODUCTION_WXID}）")
+    else:
+        which = (f"它的 authcode 是生产实例那把锁（指纹 {acct.credential_fingerprint}，"
+                 f"与实例锁 sha256[:12] 同款口径）—— **selfWxid 写对也没用**，"
+                 f"连上去照样把生产踢下线")
+    return (
+        f"账号 {acct.id!r} 触红线 2：{which}。"
+        f"以它为身份连接会被厂商实例锁踢下线生产 + 劫持其 webhook。"
+        f"确需如此请显式置 {ALLOW_PRODUCTION_ENV}=1。"
+    )
 
 
 def refusal_reason(acct: Account) -> str | None:
     """**为什么不能连** —— 返回 ``None`` 表示可以连。
 
     纯函数、无副作用，供 ``connect()`` 与测试共用。
+
+    ⚠️ **顺序即优先级**：未启用 → 无凭据 → 红线。前两条是"这个账号没配好"
+    （正常跳过，随仓库分发的空壳账号就是这个状态，不能让插件起不来）；
+    最后一条是**红线**（唯一会自动把生产踢下线的那一类），
+    ``connect()`` 对它走 :func:`assert_no_red_line` **当场 raise**，
+    而不是像前两条那样只 warn 一句就跳过。
     """
     if not acct.enabled:
         return f"账号 {acct.id!r} 的 enabled=false（未启用）"
     if not acct.has_credentials:
         return f"账号 {acct.id!r} 无 authcode（authcode / authcodeEnv / WECHATPRO_AUTHCODE 均为空）"
-    if acct.is_production_identity and not _env_bool(ALLOW_PRODUCTION_ENV):
-        return (
-            f"账号 {acct.id!r} 的 selfWxid 是**生产 bot「益融小助理」**（{PRODUCTION_WXID}）。"
-            f"以它为身份连接会被厂商实例锁踢下线生产 + 劫持其 webhook（红线 2）。"
-            f"确需如此请显式置 {ALLOW_PRODUCTION_ENV}=1。"
-        )
-    return None
+    return _production_reason(acct)
+
+
+def red_line_reason(acct: Account) -> str | None:
+    """**这次会不会因为红线被拦下** —— 只认生产身份那一条（"没配好"返回 ``None``）。
+
+    为什么与 ``refusal_reason`` 分开：后者对"未启用 / 无凭据"是**跳过 + warn**
+    （那是正常态），对红线却必须**当场 raise**。两种情况都由同一个函数返回字符串的话，
+    调用方没法区分"该跳过"和"该炸" —— 这正是审阅里 C4 说的"守卫是过滤不是 raise"。
+
+    ⚠️ 判据里**含"本来会不会连"**（``enabled`` ∧ 有凭据）：这个问题问的是
+    "要不要当场炸"，而 ``enabled=false`` 的账号无论如何都不会连上去，
+    把它算成红线只会让 dev 机起不来（``/root/.hermes`` 上那份把 ``selfWxid``
+    写成生产号、``enabled=false`` 的 ``default.json`` 就是这种"摆着不连"的形态）。
+    **"这个账号的身份是不是生产"**是另一个问题，读 :attr:`Account.is_production_identity`。
+    """
+    if not acct.enabled or not acct.has_credentials:
+        return None
+    return _production_reason(acct)
+
+
+def assert_no_red_line(accounts: Iterable[Account]) -> None:
+    """任一账号触红线 ⇒ **raise**（``connect()`` 开头、过滤"可连接"**之前**调用）。
+
+    红线的正确后果只有一个：**别连**（+ 让运维看见），而不是"插件起不来"、
+    也不是"只 warn 一句然后照常连别的账号"。判据在 :func:`red_line_reason`。
+    """
+    for acct in accounts:
+        reason = red_line_reason(acct)
+        if reason:
+            raise AccountError(reason)
 
 
 def assert_connectable(acct: Account) -> None:

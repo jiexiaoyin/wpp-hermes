@@ -6,10 +6,15 @@
 
 旧树里同时存在 ``plugin/inbound.py``（文件）和 ``plugin/inbound/``（目录，且**没有
 ``__init__.py``**）。同名目录无 ``__init__.py`` ⇒ 不是包 ⇒ ``from . import inbound``
-永远命中那个文件，整层新代码**不可达**。同理 ``plugin/tools.py`` 与
-``plugin/tools/`` 并存时，包胜出 ⇒ 生成物生效、扁平文件成了幽灵。
+永远命中那个文件，整层新代码**不可达**。
 
-判据：``plugin/`` 顶层只允许 ``__init__.py`` 与 ``registration.py`` 两个 .py 文件。
+⚠️ 工具实现包现在叫 ``plugin/toolkit/``（**不是** ``plugin/tools/``）：Hermes 规范要求
+``provides_tools`` 指向扁平 ``plugin/tools.py``，而 Python 里同目录不许 ``tools.py`` 与
+``tools/`` 并存。所以 ``tools.py`` 是**唯一允许的扁平入口**，``toolkit/`` 承载实现，
+两者职责分离、名字也不同 ⇒ 原版"包胜出、扁平文件成幽灵"的事故形态不复存在（R1 仍会挡
+任何**其他**扁平模块回流）。
+
+判据：``plugin/`` 顶层只允许 ``__init__.py`` / ``registration.py`` / ``tools.py`` 三个 .py 文件。
 
 ## R2 ``register()`` 执行时会碰到的第三方运行期依赖（历史：F4 —— 隔离解释器缺 pymysql/aiohttp）
 
@@ -19,7 +24,7 @@
 
 判定分两层，因为两者的证据强度不同：
 
-- **``plugin/tools/`` 子树内出现第三方模块级依赖 ⇒ FAIL**。这是计划里写死的硬约束
+- **``plugin/toolkit/`` 子树内出现第三方模块级依赖 ⇒ FAIL**。这是计划里写死的硬约束
   （``plugin_validate.py:320-355`` 在 scratch 解释器里跑 ``register()``），而且当前
   完全满足 —— 一旦破防就是回归。
 - **适配器链路上出现 ⇒ ℹ️ 提示，不 FAIL**。``platform/adapter.py`` 模块级 import
@@ -28,13 +33,13 @@
   plugins validate`` 的 probe 解释器未必有。**根治办法是把这两处 import 挪进函数**
   （一个文件、几行），不是加白名单。第 9 步 V3 必须确认 validate 不报缺依赖。
 
-## R3 ``plugin/tools/__init__.py`` 里 eager import（历史：F5 —— 10 个工具静默不注册）
+## R3 ``plugin/toolkit/__init__.py`` 里 eager import（历史：F5 —— 10 个工具静默不注册）
 
 旧实现把 ``from . import wecom_tools`` 放在模块级，而该模块**加载期**解析外部
 ``wecom-cli.js`` 并抛 ``FileNotFoundError`` ⇒ 被 ``registration._step`` 的兜底吞成一行
 WARNING ⇒ 其后的 wecom 7 + wpp_extras 3 个工具**全部静默不注册**。
 
-判据：``plugin/tools/__init__.py`` 必须**零 import**（子模块由调用方按需 import）。
+判据：``plugin/toolkit/__init__.py`` 必须**零 import**（子模块由调用方按需 import）。
 其他包的 ``__init__.py`` 允许做纯 re-export 门面（它们的加载期依赖由 R2 覆盖）。
 
 用法::
@@ -49,8 +54,13 @@ import ast
 import sys
 from pathlib import Path
 
-#: 允许出现在 ``plugin/`` 顶层的 .py 文件（其余一律是扁平回流）
-TOP_LEVEL_ALLOWED = {"__init__.py", "registration.py"}
+#: 允许出现在 ``plugin/`` 顶层的 .py 文件（其余一律是扁平回流）。
+#:
+#: ``tools.py`` 是 **Hermes 插件规范强制要求**的扁平入口（``plugin.yaml`` 的
+#: ``provides_tools`` 指向它，加载器只认 ``plugin_dir/tools.py`` 这个物理文件）。
+#: 它内部只做 manager 幂等壳 + 把注册转交 ``toolkit/registration.py`` ——
+#: 真正的工具实现仍全在 ``plugin/toolkit/``，不构成"扁平回流"。
+TOP_LEVEL_ALLOWED = {"__init__.py", "registration.py", "tools.py"}
 
 #: **必须**零 import 的包（F5 的直接对策）：包级导入一挂，整批工具静默消失。
 #:
@@ -58,7 +68,7 @@ TOP_LEVEL_ALLOWED = {"__init__.py", "registration.py"}
 #: ``llm``（``adapter`` → 心流 → judge）、``inbound.heartflow``（``adapter._try_heartflow``）。
 #: 判据是"这个包的加载期错误**会不会**被 ``registration._step`` 的兜底吞成一行 WARNING"，
 #: 而不是"它在哪一层"。
-NO_EAGER_INIT_PACKAGES = ("tools", "llm", "inbound.heartflow")
+NO_EAGER_INIT_PACKAGES = ("toolkit", "llm", "inbound.heartflow")
 
 #: 第三方**运行期**依赖 —— 缺了它们的解释器跑 ``register()`` 会直接 ImportError。
 #: （Hermes 自有的 ``gateway`` / ``agent`` 等不算：插件必然在 Hermes 里跑。）
@@ -136,11 +146,37 @@ def _collect_imports(plugin: Path, path: Path) -> tuple[set[str], list[tuple[str
     # 先标出模块级语句（只下钻 try/if/with —— 那几层的东西仍然在加载期跑；**不进函数**）
     top_ids: set[tuple[int, int]] = set()
 
+    def _type_checking(test: ast.expr) -> bool | None:
+        """``if TYPE_CHECKING:`` / ``if typing.TYPE_CHECKING:`` 判定。
+
+        返回 ``True`` = 只在类型检查器里执行（运行期**不跑**）、``False`` = ``not`` 形式、
+        ``None`` = 认不出（按普通 if 处理）。⚠️ 这类 import **不是**加载期依赖
+        （``TYPE_CHECKING`` 运行期恒 False），把它的分支当模块级会误报。
+        """
+        val: bool | None = None
+        if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+            val = True
+        elif isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+            val = True
+        elif isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            inner = _type_checking(test.operand)
+            if inner is not None:
+                return not inner
+        return val
+
     def drill(body: list[ast.stmt]) -> None:
         for n in body:
             if isinstance(n, (ast.Import, ast.ImportFrom)):
                 top_ids.add((n.lineno, n.col_offset))
-            elif isinstance(n, (ast.Try, ast.If, ast.With)):
+            elif isinstance(n, ast.If):
+                tc = _type_checking(n.test)
+                if tc is True:          # 运行期恒 False ⇒ 只有 else 分支会跑
+                    drill(n.orelse)
+                elif tc is False:       # ``if not TYPE_CHECKING:`` ⇒ 只有 body 会跑
+                    drill(n.body)
+                else:
+                    drill(n.body + n.orelse)
+            elif isinstance(n, (ast.Try, ast.With)):
                 drill(n.body + n.orelse)
 
     drill(tree.body)
@@ -204,14 +240,14 @@ def check_register_chain(plugin: Path) -> None:
 
     # ⛔ 计划硬约束：tools 子树不许有任何第三方运行期依赖（模块级 **或** 函数级都不该有，
     #    因为工具 handler 是给 model 调的，注册期与调用期都在 Hermes 进程里）
-    tools_load = {k: v for k, v in load_time.items() if any(x.startswith("tools") for x in v)}
-    tools_call = {k: v for k, v in call_time.items() if any(x.startswith("tools") for x in v)}
+    tools_load = {k: v for k, v in load_time.items() if any(x.startswith("toolkit") for x in v)}
+    tools_call = {k: v for k, v in call_time.items() if any(x.startswith("toolkit") for x in v)}
     if tools_load or tools_call:
         for kind, hits in (("模块级", tools_load), ("函数体", tools_call)):
             for name, where in sorted(hits.items()):
-                fail(f"plugin/tools/ 子树{kind}依赖第三方 {name!r}（{sorted(where)}）")
+                fail(f"plugin/toolkit/ 子树{kind}依赖第三方 {name!r}（{sorted(where)}）")
     else:
-        ok("plugin/tools/ 子树零第三方运行期依赖（计划硬约束满足）")
+        ok("plugin/toolkit/ 子树零第三方运行期依赖（计划硬约束满足）")
 
     # 适配器链路：模块级 = 一 import adapter 就得有它（**必须修**）；
     #             函数体 = 已经延迟好了（**无需动**）。两者混报会把人带偏。

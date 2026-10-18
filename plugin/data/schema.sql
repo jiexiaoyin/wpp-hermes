@@ -3,7 +3,8 @@
 -- ## 出处与「双写陷阱」
 --
 -- 前 15 张表的 DDL **逐字搬自** TS 侧 `/root/dev/wechatpadpro-openclaw/db/schema.sql`
--- （v1.11.0）。TS 自己在 240/253 行写着「⚠️ 与 src/storage/db/mysql.ts 的行内 DDL
+-- （v1.11.0）；16 号表 `wpp_hf_image_caption` 搬自 TS v1.16.0（`src/storage/db/mysql.ts`
+-- 行内 DDL，TS 的 db/schema.sql 尚未同步该表）。TS 自己在 240/253 行写着「⚠️ 与 src/storage/db/mysql.ts 的行内 DDL
 -- 必须同步（改一处必改另一处）」—— 那是个**双写陷阱**：它已经把
 -- `wpp_svrid_mapping` 写歪过一次。
 --
@@ -11,18 +12,20 @@
 -- `migrations.py` 的 `ensure_column` / `ensure_index` 全部**从本文件反推**，
 -- 不手写第二份 DDL。
 --
--- ## 表数（16）
+-- ## 表数（18）
 --
 --   8  legacy       : wpp_accounts / wpp_messages / wpp_contacts / wpp_chatrooms /
 --                     wpp_session_state / wpp_api_calls / wpp_chatroom_members /
 --                     wpp_jargon_terms
---   5  心流          : wpp_hf_ledger / wpp_hf_group_state / wpp_hf_threshold_audit /
---                     wpp_hf_group_profile / wpp_hf_layer_stat
+--   6  心流          : wpp_hf_ledger / wpp_hf_group_state / wpp_hf_threshold_audit /
+--                     wpp_hf_group_profile / wpp_hf_layer_stat / wpp_hf_image_caption
 --   2  辅助          : wpp_svrid_mapping / wpp_sync_state
---   1  Python 独有   : wpp_redpackets   （TS 无对应；从旧树 db.py:357 record_redpacket 反推）
+--   2  Python 独有   : wpp_redpackets   （TS 无对应；从旧树 db.py:357 record_redpacket 反推）
+--                     wpp_affection    （TS 无对应；TS 把好感度/情绪放在进程内 Map，重启清零 ——
+--                                        老板 2026-10-02 拍板落库，见文件末尾那张表的注释）
 --
--- ⚠️ 计划里写的「14 张表 / 9 张 legacy」是错的 —— 亲数 TS DDL 为
---    **15 个 CREATE TABLE，其中 legacy 8 个**。以本文件为准。
+-- ⚠️ 计划里写的「14 张表 / 9 张 legacy」是错的 —— 亲数 TS DDL（v1.16.0）为
+--    **16 个 CREATE TABLE，其中 legacy 8 个**。以本文件为准。
 --
 -- ## 两条必须记住的语义
 --
@@ -55,7 +58,7 @@ CREATE TABLE IF NOT EXISTS wpp_messages (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   account_id VARCHAR(64) NOT NULL,
   msg_id VARCHAR(128),                  -- wechatpadpro msg id (uuid)
-  new_msg_id VARCHAR(128),              -- wechatpadpro new_msg_id
+  new_msg_id VARCHAR(128) NOT NULL DEFAULT '',  -- wechatpadpro new_msg_id（NULL 会绕过唯一键）
   direction ENUM('inbound', 'outbound') NOT NULL,
   peer_kind ENUM('direct', 'group', 'room') NOT NULL,
   peer_id VARCHAR(128) NOT NULL,        -- sender (inbound) / target (outbound)
@@ -277,6 +280,24 @@ CREATE TABLE IF NOT EXISTS wpp_hf_layer_stat (
   KEY idx_hf_layer_acct (account_id, layer_kind, updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 心流图片配文 (v1.16.0 2026-10-16 新增: 群画像样本"看得见图")
+-- PK=url_hash (sha1(OSS URL) 全局唯一 —— 同一张图跨群只配一次)。
+-- caption NULL 且 fail_count<上限 = 可重试; 从不删行 (止损靠 fail_count, 重启/新 sweep 幂等)。
+-- ⚠️ 逐字搬自 TS `src/storage/db/mysql.ts` v1.16.0 (TS 的 db/schema.sql 尚未同步)。
+CREATE TABLE IF NOT EXISTS wpp_hf_image_caption (
+  url_hash CHAR(40) NOT NULL,
+  account_id VARCHAR(64) NOT NULL,
+  group_id VARCHAR(128) NULL,
+  url_sample VARCHAR(255) NULL,
+  caption TEXT NULL,
+  model VARCHAR(64) NULL,
+  fail_count INT UNSIGNED NOT NULL DEFAULT 0,
+  created_at INT UNSIGNED NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (url_hash),
+  KEY idx_hf_cap_acct (account_id, fail_count)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- ============================================================ 辅助 (2)
 
 CREATE TABLE IF NOT EXISTS wpp_svrid_mapping (
@@ -298,7 +319,7 @@ CREATE TABLE IF NOT EXISTS wpp_sync_state (
   PRIMARY KEY (account_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- ============================================================ Python 独有 (1)
+-- ============================================================ Python 独有 (2)
 
 -- 红包记录 (TS 侧无此表)
 -- 出处: 旧树 plugin/db.py:357 record_redpacket + hongbao.py:72
@@ -319,3 +340,34 @@ CREATE TABLE IF NOT EXISTS wpp_redpackets (
   UNIQUE KEY uk_redpacket (account_id, peer_id, from_wxid, hb_url),
   KEY idx_redpacket_acct (account_id, peer_id, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 好感度 / 情绪状态 (TS 侧无此表)
+-- 出处: TS src/inbound/affection.ts (v1.11.0) 的模块级 `groupStates` Map —— 进程一重启
+--       就清零。老板 2026-10-02 拍板**落库持久化**，故 Python 侧多这一张表。
+-- ⚠️ **一张表两种粒度**，靠 `user_id` 哨兵分（见 plugin/data/repo_affection.py:1-36）:
+--        user_id <> ''  → 该用户在群里的好感度分值 (level / updated_at)
+--        user_id =  ''  → 该群的情绪            (mood_type / intensity / description / expires_at)
+--    ⇒ 凡"所有用户"的查询**必须**带 `user_id <> ''`：漏了它，情绪行会被当成一个
+--      level=0 的用户，算进群总量（重分配阈值）与人数（/affection status）。
+-- ⚠️ 高频写（每条群消息一次），**绝不回写 accounts JSON** —— 同 wpp_hf_group_state
+--    的先例（防 fs.watch 抖动）。
+-- ⚠️ `expires_at` 是**绝对 epoch 秒**，不是相对秒 —— 相对秒在进程重启后判不了过期。
+--    ``default_mood()`` 把 expires_at 设成"当下"⇒「平静」等于"不过期"，靠 read 侧
+--    `now > expires_at` 对非平静情绪生效。
+CREATE TABLE IF NOT EXISTS wpp_affection (
+  account_id VARCHAR(64) NOT NULL,
+  group_id VARCHAR(128) NOT NULL,
+  user_id VARCHAR(128) NOT NULL DEFAULT '',        -- '' = 情绪行（哨兵，见上）
+  level INT NOT NULL DEFAULT 0,                    -- 好感度分值（仅 user_id <> ''）
+  mood_type VARCHAR(32) NOT NULL DEFAULT '',       -- 仅情绪行：happy/sad/…（应用层枚举）
+  intensity DECIMAL(4,3) NOT NULL DEFAULT 0,       -- 仅情绪行：0..1
+  description VARCHAR(255) NOT NULL DEFAULT '',    -- 仅情绪行：展示给人看的短句
+  expires_at INT UNSIGNED NOT NULL DEFAULT 0,      -- 仅情绪行：绝对 epoch 秒
+  updated_at INT UNSIGNED NOT NULL DEFAULT 0,      -- epoch 秒（= 写这条时的 now，非 TIMESTAMP）
+  PRIMARY KEY (account_id, group_id, user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+-- 索引：主键前缀就够 —— 三处查询全落在 (account_id[, group_id]) 上：
+--   · 单人分值      → PK 全列精确匹配
+--   · 本群全量/总量/人数 → PK 前缀 (account_id, group_id)
+--   · 该账号有状态的群数 → PK 前缀 (account_id)
+-- 主键总长 64+128+128 = 320 字符，与既有 uk_account_msg 同宽（真库已验证可用）。

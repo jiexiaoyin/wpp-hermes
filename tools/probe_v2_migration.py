@@ -5,9 +5,9 @@
 
 | 步骤 | 判据 |
 |---|---|
-| ① 首跑 ``migrate()`` | 建出 ``schema.sql`` 声明的**全部**表（16）；checksum 记为 ``recorded`` |
+| ① 首跑 ``migrate()`` | 建出 ``schema.sql`` 声明的**全部**表（18）；checksum 记为 ``recorded`` |
 | ② 再跑 ``migrate()`` | **零新建 / 零补齐 / 零应用**（幂等），checksum ``ok`` |
-| ③ 心流表 | `SHOW TABLES LIKE 'wpp_hf_%'` == **5** |
+| ③ 心流表 | `SHOW TABLES LIKE 'wpp_hf_%'` == **6** |
 | ④ 索引 | 5 个热查询索引 + 3 个 ledger 索引**真的在库里**（TS 曾漏搬） |
 | ⑤ ★ 负控 | `_apply_schema_sql("")` 与「非空但切出 0 条」**都必须 raise** —— 这是 TS v1.6.1 静默失效的那道门 |
 | ⑥ ★ 正控 | 塞一个 schema.sql 里多的列 → ``ensure_schema_complete`` **只 ADD** 把它补齐，然后自己删掉收尾 |
@@ -109,7 +109,7 @@ def main(argv: list[str]) -> int:
         f"建了 {len(first['created_tables'])} 张，声明 {len(expected)} 张",
     )
     _check(first["checksum"] == "recorded", "checksum 首次登记", first["checksum"])
-    _check(len(expected) == 16, "schema.sql 声明 16 张表", f"实际 {len(expected)}")
+    _check(len(expected) == 18, "schema.sql 声明 18 张表", f"实际 {len(expected)}")
 
     # ---- ② 幂等 ---------------------------------------------------------
     print("② 再跑 migrate()")
@@ -124,7 +124,7 @@ def main(argv: list[str]) -> int:
     # ---- ③④ 表与索引 ----------------------------------------------------
     print("③ 心流表")
     hf = conn.query("SHOW TABLES LIKE 'wpp_hf_%'")
-    _check(len(hf) == 5, "wpp_hf_* 五张齐全", f"实际 {len(hf)}: {sorted(v for r in hf for v in r.values())}")
+    _check(len(hf) == 6, "wpp_hf_* 六张齐全", f"实际 {len(hf)}: {sorted(v for r in hf for v in r.values())}")
 
     all_tables = {r["t"] for r in conn.query(
         "SELECT TABLE_NAME AS t FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
@@ -180,10 +180,10 @@ def main(argv: list[str]) -> int:
     except Exception as exc:                                   # noqa: BLE001
         _check(False, "非空但切出 0 条必须 raise", f"抛了别的异常 {type(exc).__name__}: {exc}")
 
-    # 切分器本身：16 条 CREATE 必须切出 16 条表语句
+    # 切分器本身：18 条 CREATE 必须切出 18 条表语句
     text = migrations.SCHEMA_FILE.read_text(encoding="utf-8")
     stmts = migrations.split_statements(text)
-    _check(len(stmts) == len(expected), "切分器切出 16 条语句",
+    _check(len(stmts) == len(expected), "切分器切出 18 条语句",
            f"切出 {len(stmts)} 条")
 
     # ---- ⑥ 正控：反推补齐（只 ADD） --------------------------------------

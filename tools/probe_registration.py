@@ -7,7 +7,7 @@
 只能在 ``.183`` 的 Hermes 运行时里跑。本探针是**开发机上的对照**：把 Hermes 内部包与
 缺失的运行期依赖换成空壳，再走同一条 ``register()``，于是：
 
-- 注册**数量**对不对（应为 262 = wpp 251 + wecom 7 + phoneerp 4）；
+- 注册**数量**对不对（应为 299 = wpp 288 + wecom 7 + phoneerp 4）；
 - 有没有**重名**（``sorted(set(...))`` 会把重名吃掉 —— 所以这里用**原始列表**数；
   历史陷阱：把聚合项 ``ALL_EXTRA_TOOLS`` 当组注册，107 个工具会被注册两遍）；
 - ``plugin.yaml`` 里的 ``provides_tools`` 与实注册是否**逐名一致**
@@ -35,8 +35,10 @@ from pathlib import Path
 
 ROOT_DEFAULT = Path(__file__).resolve().parent.parent
 
-#: 期望总数（wpp 251 + wecom 7 + phoneerp 4）。与 plugin.yaml 注释里那句同年同日。
-EXPECTED_TOTAL = 262
+#: 期望总数（wpp 288 + wecom 7 + phoneerp 4 = 299）。
+#: 2026-10-18：补齐 TS 工具面缺口 33 个（wpp 250 → 283），详见
+#: `plugin/toolkit/policy.py:ADDED_GROUP` 与 `plugin/toolkit/parity.py`。
+EXPECTED_TOTAL = 299
 
 #: 只在 Hermes 运行时里存在的内部包 —— 空壳冒充成包，够 ``register()`` import 就行。
 _HERMES_INTERNAL = {

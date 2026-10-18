@@ -6,7 +6,9 @@
    :func:`plugin.inbound.media.extract_media_meta` 取到 ``media["vendor_transcript"]``。
    免费、即时、比第三方模型准 ⇒ **有就不下载、不转写**（TS ``voice.ts:100`` 同）。
 2. **插件自己转**（本模块）—— silk 二进制 → 解码成 PCM → 套 44 字节 WAV 头 →
-   POST SiliconFlow（SenseVoiceSmall）。要下载、要网络、要 key ⇒ 只在 ① 缺席时走。
+   发 STT 端点。两套后端：SiliconFlow（multipart，默认）与 Token Plan 原生
+   ASR（JSON + base64，``WPP_STT_BACKEND=dashscope``，模型
+   ``qwen-audio-3.0-asr-flash``）。要下载、要网络、要 key ⇒ 只在 ① 缺席时走。
 
 TS 的两处实现供对照：``src/storage/stt.ts``（本模块的蓝图，含重试与 WAV 头）、
 ``src/storage/silk.ts:37 decodeSilkToPcm``（shell 出去调解码器，10s 超时）。
@@ -43,6 +45,7 @@ STT key                      ``WECHATPRO_STT_API_KEY``                        **
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -58,6 +61,17 @@ SILK_DECODER_PATH = os.environ.get("WPP_SILK_DECODER_PATH", "/root/silk_decoder/
 #: SiliconFlow STT 端点与模型（与 TS ``stt.ts`` 的默认值逐字一致）。
 STT_URL = os.environ.get("SILICONFLOW_STT_URL", "https://api.siliconflow.cn/v1/audio/transcriptions")
 STT_MODEL = os.environ.get("SILICONFLOW_STT_MODEL", "FunAudioLLM/SenseVoiceSmall")
+
+#: Token Plan（阿里云百炼原生）STT：同一个 ``multimodal-generation`` 端点，
+#: 请求体是 JSON + ``input_audio.data``（URL 或 ``data:audio/wav;base64,...``）。
+#: ``WPP_STT_BACKEND`` 显式选路；不写时按 URL 里有没有 ``token-plan`` 自动判断，
+#: 其余一律走 SiliconFlow，保持旧部署行为不变。
+DASHSCOPE_STT_URL = os.environ.get(
+    "WPP_STT_URL",
+    "https://token-plan.cn-beijing.maas.aliyuncs.com"
+    "/api/v1/services/aigc/multimodal-generation/generation",
+)
+DASHSCOPE_STT_MODEL = os.environ.get("WPP_STT_MODEL", "qwen-audio-3.0-asr-flash")
 
 #: WAV 参数：24kHz / 单声道 / 16bit（TS ``stt.ts`` 的三个常量）。
 WAV_SAMPLE_RATE = 24_000
@@ -84,12 +98,41 @@ POST_TIMEOUT_S = 60.0
 # ------------------------------------------------------------------ key / 探测
 
 
+def stt_backend() -> str:
+    """当前 STT 后端：``dashscope``（Token Plan 原生）或 ``siliconflow``（默认）。"""
+    explicit = (os.environ.get("WPP_STT_BACKEND") or "").strip().lower()
+    if explicit in ("dashscope", "tokenplan", "token-plan", "bailian"):
+        return "dashscope"
+    if explicit in ("siliconflow", "sensevoice"):
+        return "siliconflow"
+    if "token-plan" in (os.environ.get("SILICONFLOW_STT_URL") or "").lower():
+        return "dashscope"
+    return "siliconflow"
+
+
 def siliconflow_api_key() -> str:
-    """STT key。``WECHATPRO_STT_API_KEY`` 优先（``plugin.yaml`` 声明的就是它），
+    """SiliconFlow STT key。``WECHATPRO_STT_API_KEY`` 优先（``plugin.yaml`` 声明的就是它），
     ``SILICONFLOW_API_KEY`` 兜底（TS 与旧 py 树用的是这个名字）。"""
-    return (os.environ.get("WECHATPRO_STT_API_KEY")
-            or os.environ.get("SILICONFLOW_API_KEY")
+    from ..core.env_compat import secret_env
+
+    return (secret_env("WECHATPRO_STT_API_KEY")
+            or secret_env("SILICONFLOW_API_KEY")
             or "").strip()
+
+
+def dashscope_api_key() -> str:
+    """Token Plan STT key：``WECHATPRO_STT_API_KEY`` 优先，百炼/网关 key 兜底。"""
+    from ..core.env_compat import secret_env
+
+    return (secret_env("WECHATPRO_STT_API_KEY")
+            or secret_env("JUDGE_API_KEY")
+            or secret_env("DASHSCOPE_API_KEY")
+            or "").strip()
+
+
+def stt_api_key() -> str:
+    """按后端选 key —— 不让 SiliconFlow 的 key 被发给 Token Plan，反之亦然。"""
+    return dashscope_api_key() if stt_backend() == "dashscope" else siliconflow_api_key()
 
 
 def unavailable_reason() -> Optional[str]:
@@ -101,7 +144,9 @@ def unavailable_reason() -> Optional[str]:
         return f"silk 解码器不存在: {SILK_DECODER_PATH}（装它，或配 WPP_SILK_DECODER_PATH）"
     if not os.access(SILK_DECODER_PATH, os.X_OK):
         return f"silk 解码器不可执行: {SILK_DECODER_PATH}"
-    if not siliconflow_api_key():
+    if not stt_api_key():
+        if stt_backend() == "dashscope":
+            return "未配 STT key（WECHATPRO_STT_API_KEY / JUDGE_API_KEY / DASHSCOPE_API_KEY）"
         return "未配 STT key（WECHATPRO_STT_API_KEY / SILICONFLOW_API_KEY）"
     return None
 
@@ -226,6 +271,42 @@ async def _post_wav(url: str, api_key: str, wav: bytes, timeout_s: float) -> tup
             return resp.status, await resp.text()
 
 
+def build_dashscope_payload(wav: bytes) -> dict:
+    """WAV → Token Plan 原生 ASR 请求体。
+
+    ``input_audio.data`` 收 URL 或 ``data:audio/<fmt>;base64,...``；语音来自
+    silk 解码，本地没有公网 URL，所以只能内联 base64。采样率必须与
+    :func:`build_wav_buffer` 写进 WAV 头的值一致（24kHz），否则识别成噪声。
+    """
+    encoded = base64.b64encode(wav).decode("ascii")
+    return {
+        "model": DASHSCOPE_STT_MODEL,
+        "input": {
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_audio",
+                    "input_audio": {"data": f"data:audio/wav;base64,{encoded}"},
+                }],
+            }],
+        },
+        "parameters": {"format": "wav", "sample_rate": str(WAV_SAMPLE_RATE)},
+    }
+
+
+async def _post_dashscope(url: str, api_key: str, wav: bytes, timeout_s: float) -> tuple[int, str]:
+    """POST **一次** JSON 到 Token Plan 原生 ASR 端点，返回 ``(status, body_text)``。"""
+    import aiohttp  # 延迟导入，同 _post_wav
+
+    async with aiohttp.ClientSession() as sess:
+        async with sess.post(
+            url, json=build_dashscope_payload(wav),
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+        ) as resp:
+            return resp.status, await resp.text()
+
+
 def _extract_text(body: str) -> str:
     """从响应体里取文本。TS 取 ``text || transcript``（SiliconFlow 两种都见过）。"""
     try:
@@ -239,8 +320,9 @@ def _extract_text(body: str) -> str:
 
 async def _attempt(url: str, api_key: str, wav: bytes) -> tuple[Optional[str], bool, str]:
     """一次尝试 → ``(文本, 是否值得重试, 失败描述)``。**不抛异常**（连超时也不抛）。"""
+    post = _post_dashscope if stt_backend() == "dashscope" else _post_wav
     try:
-        status, body = await _post_wav(url, api_key, wav, POST_TIMEOUT_S)
+        status, body = await post(url, api_key, wav, POST_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 —— 网络/超时都按"值得重试"处理（TS 同）
         return None, True, f"{type(exc).__name__}: {exc}"
 
@@ -259,19 +341,25 @@ async def transcribe_silk_buffer(silk: bytes, api_key: str = "") -> Optional[str
     ⚠️ 返回 ``None`` 与返回空串是**两件事**，本函数只返回 ``None``：
     空串会让调用方以为"转出来是空的"，从而在正文里写下一行空的 ``[转写]``。
     """
-    key = api_key.strip() or siliconflow_api_key()
+    backend = stt_backend()
+    key = api_key.strip() or stt_api_key()
     if not key:
-        log.warning("[STT] 未配 STT key（WECHATPRO_STT_API_KEY / SILICONFLOW_API_KEY）⇒ 跳过转写")
+        if backend == "dashscope":
+            log.warning("[STT] 未配 Token Plan STT key"
+                        "（WECHATPRO_STT_API_KEY / JUDGE_API_KEY / DASHSCOPE_API_KEY）⇒ 跳过转写")
+        else:
+            log.warning("[STT] 未配 STT key（WECHATPRO_STT_API_KEY / SILICONFLOW_API_KEY）⇒ 跳过转写")
         return None
 
     pcm = await decode_silk_to_pcm(silk)
     if not pcm:
         return None
     wav = build_wav_buffer(pcm)
+    url = DASHSCOPE_STT_URL if backend == "dashscope" else STT_URL
 
     detail = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        text, retryable, detail = await _attempt(STT_URL, key, wav)
+        text, retryable, detail = await _attempt(url, key, wav)
         if text:
             return text
         if not retryable or attempt == MAX_ATTEMPTS:
