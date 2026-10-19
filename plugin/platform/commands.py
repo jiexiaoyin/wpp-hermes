@@ -79,6 +79,15 @@ HELP_TEXT = """可用命令：
 /heartflow threshold|group|profile|why|layers|veto|report — 心流运维（见 /heartflow 空参数）
 /affection on|off|status — 好感度开关
 /jargon on|off|status — 黑话挖掘开关
+/style on|off|status — 说话风格学习开关
+/style list [群id] — 风格卡 / 版本列表（不带群id 列全部群）
+/style show <群id> — 查看当前风格卡内容
+/style rollback <群id> <版本> — 回滚到历史版本（版本号只增不减）
+/tts on|off|status — 语音合成 / 情绪路由开关
+/proactive on|off|status — 私聊主动关心开关
+/mute <群id> [分钟] — 临时禁言该群（默认 30 分钟，内存态）
+/mute off <群id> — 解除禁言
+/mute list — 查看禁言中的群
 /xiaowei on|off|status — 小微智能体工具开关（关着时相关工具直接拒绝执行）
 /user add|del|list [wxid...] — 私聊白名单
 /group add|del|list [群id...] — 群白名单
@@ -138,9 +147,17 @@ def handle_command(account_id: str, content: str, *, adapter: Any = None) -> str
 
         return hf_commands.handle(account_id, arg_list, adapter=adapter)
 
-    # 功能开关: /affection /jargon
-    if cmd in ("/affection", "/jargon"):
+    # 功能开关: /affection /jargon /tts /proactive（账号 JSON 里同名段）
+    if cmd in ("/affection", "/jargon", "/tts", "/proactive"):
         return _handle_feature_toggle(account_id, cmd.lstrip("/"), arg_list, adapter=adapter)
+
+    # 临时禁言（内存态，重启失效 —— 见 adapter._muted_groups）
+    if cmd == "/mute":
+        return _handle_mute_command(account_id, arg_list, adapter=adapter)
+
+    # 说话风格学习: /style on|off|status 走通用开关；list/show/rollback 走本模块。
+    if cmd == "/style":
+        return _handle_style_command(account_id, arg_list, adapter=adapter)
 
     # 白名单: /user /group /blacklist（三个域共用一套批量实现，见模块 docstring）
     if cmd.lstrip("/") in _ALLOWLIST_KEYS:
@@ -375,9 +392,93 @@ def _handle_feature_toggle(account_id: str, feature: str, args: list[str],
         err = write_back(account_id, feature, {**base, "enabled": want}, adapter=adapter)
         return err or f"/{feature} 已{'开启' if want else '关闭'} ✅（已写入账号配置，当次生效）"
     if action == "status":
-        extra = _affection_data_line(account_id) if feature == "affection" else ""
+        if feature == "affection":
+            extra = _affection_data_line(account_id)
+        elif feature == "style":
+            extra = _style_data_line(account_id)
+        elif feature == "tts":
+            extra = _tts_data_line(account_id)
+        elif feature == "proactive":
+            extra = _proactive_data_line(account_id)
+        else:
+            extra = ""
         return f"/{feature} 状态: {_state_word(current)}{extra}"
     return f"/{feature} 参数: on/off/status"
+
+
+def _tts_data_line(account_id: str) -> str:
+    """``/tts status`` 多报一行：provider / 自动语音概率（读不到就说读不到）。"""
+    cfg = _safe_cfg(account_id).get("tts")
+    if not isinstance(cfg, dict):
+        return "\n配置: (读取失败，见日志)"
+    provider = str(cfg.get("provider") or "").strip() or "Hermes 默认"
+    try:
+        auto = float(cfg.get("autoVoice") or 0)
+    except (TypeError, ValueError):
+        auto = 0.0
+    return f"\n配置: provider={provider} / autoVoice={auto:.0%}"
+
+
+def _proactive_data_line(account_id: str) -> str:
+    """``/proactive status`` 多报一行：名单人数 / 静默阈值 / 每日上限。"""
+    cfg = _safe_cfg(account_id).get("proactive")
+    if not isinstance(cfg, dict):
+        return "\n配置: (读取失败，见日志)"
+    allow = cfg.get("allowFrom")
+    n = len(allow) if isinstance(allow, (list, tuple)) else 0
+    return (f"\n配置: 名单 {n} 人 / 静默 {cfg.get('minIdleHours', 20)}h"
+            f" / 每日上限 {cfg.get('maxPerDay', 1)}")
+
+
+def _handle_mute_command(account_id: str, args: list[str], *,
+                         adapter: Any = None) -> str:
+    """``/mute`` 的运维面：临时禁言一个群（内存态，重启失效）。
+
+    为什么是**内存态**：这是"这个群现在太吵，先别回"的临时动作；写进账号文件后
+    重启仍然生效，过几天没人记得为什么这个群不理人。要长期静音请用 ``/blacklist``。
+    """
+    import time as _time
+
+    if adapter is None or not hasattr(adapter, "mute_group"):
+        return "❌ 当前环境不支持 /mute（缺少 adapter）"
+    if not args or args[0].lower() == "list":
+        try:
+            rows = adapter.muted_groups(account_id)
+        except Exception as exc:  # noqa: BLE001 —— 状态命令不许抛
+            log.debug("[WPP:%s] 读取禁言列表失败: %s", account_id, exc)
+            return "/mute 列表读取失败（见日志）"
+        if not rows:
+            return "当前没有禁言中的群"
+        lines = ["禁言中的群："]
+        for chatroom, until in rows:
+            lines.append(f"- {chatroom}（剩余 {max(0, int((until - _time.time()) // 60))} 分钟）")
+        return "\n".join(lines)
+
+    action = args[0].lower()
+    if action in ("off", "unmute"):
+        if len(args) < 2:
+            return "用法: /mute off <群id>"
+        try:
+            existed = adapter.unmute_group(account_id, args[1])
+        except Exception as exc:  # noqa: BLE001
+            return f"❌ 解除禁言失败: {exc}"
+        return (f"已解除 {args[1]} 的禁言 ✅" if existed
+                else f"{args[1]} 本来就不在禁言列表里")
+
+    chatroom = args[0]
+    minutes = 30
+    if len(args) > 1:
+        try:
+            minutes = int(args[1])
+        except ValueError:
+            return "用法: /mute <群id> [分钟数]"
+    try:
+        until = adapter.mute_group(account_id, chatroom, minutes)
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ 禁言失败: {exc}"
+    return (f"已禁言 {chatroom} {max(1, min(minutes, 7 * 24 * 60))} 分钟"
+            f"（至 {_time.strftime('%m-%d %H:%M', _time.localtime(until))}）✅\n"
+            "提示：内存态，网关重启即失效；长期静音请用 /blacklist。")
 
 
 def _affection_data_line(account_id: str) -> str:
@@ -402,6 +503,124 @@ def _affection_data_line(account_id: str) -> str:
     if not groups and not rows:
         return "\n数据: 暂无（好感度只在「过了触发判定④的群消息」上计分）"
     return f"\n数据: 有状态的群 {groups} 个 / 好感度行 {rows} 条"
+
+
+def _style_data_line(account_id: str) -> str:
+    """``/style status`` 多报的一行：库里真实存在的风格卡数（免登录观测点）。"""
+    try:
+        from ..data import repo_style
+
+        n = repo_style.count_cards(account_id)
+    except Exception as exc:  # noqa: BLE001 —— 状态查询失败不该让命令崩
+        log.debug("[WPP:%s] 风格卡计数读取失败: %s", account_id, exc)
+        return "\n数据: (读取失败，见日志)"
+    return f"\n数据: 风格卡 {n} 张"
+
+
+def _fmt_epoch(ts: Any) -> str:
+    from datetime import datetime
+
+    try:
+        return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "-"
+
+
+def _handle_style_command(account_id: str, args: list[str],
+                          *, adapter: Any = None) -> str:
+    """``/style`` 的运维面：开关走通用实现，list/show/rollback 读 ``repo_style``。"""
+    action = args[0].lower() if args else ""
+    if action == "list":
+        return _style_list(account_id, args[1] if len(args) > 1 else "")
+    if action == "show":
+        if len(args) < 2:
+            return "用法: /style show <群id>"
+        return _style_show(account_id, args[1])
+    if action == "rollback":
+        if len(args) < 3:
+            return "用法: /style rollback <群id> <版本>"
+        return _style_rollback(account_id, args[1], args[2])
+    return _handle_feature_toggle(account_id, "style", args, adapter=adapter)
+
+
+def _style_list(account_id: str, group_id: str) -> str:
+    from ..data import repo_style
+
+    try:
+        if group_id:
+            rows = repo_style.list_versions(account_id, group_id, limit=10)
+            if not rows:
+                return f"📋 风格卡版本 ({group_id}):\n(无)"
+            lines = [
+                f"- v{r['version']} {r.get('reason') or 'generated'} "
+                f"conf={float(r.get('confidence') or 0):.2f} "
+                f"samples={r.get('sample_msgs') or 0} "
+                f"{_fmt_epoch(r.get('generated_at'))}"
+                for r in rows
+            ]
+            return f"📋 风格卡版本 ({group_id}):\n" + "\n".join(lines)
+        rows = repo_style.list_cards(account_id)
+    except Exception as exc:  # noqa: BLE001 —— 状态页失败也要能回一条消息
+        log.warning("[WPP:%s] 风格卡列表读取失败: %s", account_id, exc, exc_info=True)
+        return "❌ 风格卡列表读取失败（详见日志）"
+    if not rows:
+        return "📋 风格卡 (0):\n(无)"
+    lines = [
+        f"- {r.get('group_id')}: v{r.get('version')} "
+        f"conf={float(r.get('confidence') or 0):.2f} "
+        f"samples={r.get('sample_msgs') or 0} "
+        f"senders={r.get('sender_count') or 0} "
+        f"{_fmt_epoch(r.get('generated_at'))}"
+        for r in rows
+    ]
+    return f"📋 风格卡 ({len(rows)}):\n" + "\n".join(lines)
+
+
+def _style_show(account_id: str, group_id: str) -> str:
+    from ..data import repo_style
+    from ..inbound import style_learn
+
+    try:
+        row = repo_style.get_card(account_id, group_id)
+        if row is None:
+            return f"❌ 没有群 {group_id} 的风格卡"
+        card = style_learn.parse_style_row(row)
+        if card is None:
+            return f"❌ 群 {group_id} 的风格卡 JSON 已损坏（v{row.get('version')}）"
+        cfg = style_learn.resolve_style_cfg(_safe_cfg(account_id).get("style"))
+        body = style_learn.render_style_card(card, cfg.max_prompt_chars)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[WPP:%s] 风格卡详情读取失败: %s", account_id, exc, exc_info=True)
+        return "❌ 风格卡读取失败（详见日志）"
+    return (f"📋 群 {group_id} 风格卡 v{row.get('version')} "
+            f"(conf={card.confidence:.2f}, samples={row.get('sample_msgs') or 0}, "
+            f"{_fmt_epoch(row.get('generated_at'))}):\n{body or '(空)'}")
+
+
+def _style_rollback(account_id: str, group_id: str, version_raw: str) -> str:
+    from ..data import repo_style
+    from ..inbound import style_learn
+
+    try:
+        version = int(version_raw)
+    except (TypeError, ValueError):
+        return f"❌ 版本号不是整数: {version_raw}"
+    try:
+        new_version = repo_style.rollback_card(account_id, group_id, version)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[WPP:%s] 风格卡回滚失败: %s", account_id, exc, exc_info=True)
+        return "❌ 回滚失败（详见日志）"
+    if new_version is None:
+        return f"❌ 找不到群 {group_id} 的 v{version}（/style list {group_id} 看历史）"
+    # 回滚落库后立即刷新本进程缓存；失败不改变"已落库"的事实，下一轮 sweep 会补上。
+    try:
+        cfg = style_learn.resolve_style_cfg(_safe_cfg(account_id).get("style"))
+        style_learn.load_style_cards(account_id, cfg.max_prompt_chars)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[WPP:%s] 回滚后缓存刷新失败（下轮 sweep 会补）: %s",
+                    account_id, exc)
+    return (f"✅ 已将 {group_id} 回滚到 v{version} 的内容，新版本 v{new_version}"
+            f"（已落库，当次生效；版本号只增不减）")
 
 
 def _handle_allowlist(account_id: str, kind: str, args: list[str],

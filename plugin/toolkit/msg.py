@@ -180,6 +180,58 @@ def _send_payload(resp, *, msg_id=None, **extra) -> dict:
     return payload
 
 
+def _voice_output_path(account_id: str) -> str:
+    import os as _os
+    import time as _time
+
+    return f"/tmp/wpp-voice-{account_id}-{_os.getpid()}-{int(_time.time() * 1000)}.mp3"
+
+
+async def _send_voice_file(client, account_id: str, to_wxid: str, out_path: str) -> dict:
+    """把已合成的音频作为**文件**发出去（微信语音是 SILK，MP3 走文件形式）。"""
+    import base64 as _b64
+    import os as _os
+    import time as _time
+
+    if not _os.path.isfile(out_path) or _os.path.getsize(out_path) <= 0:
+        return {"error": f"语音文件不存在或为空: {out_path}"}
+    with open(out_path, "rb") as f:
+        b64 = _b64.b64encode(f.read()).decode()
+    fname = f"语音_{int(_time.time())}.mp3"
+    resp = await client.send_file_via_app(to_wxid, fname, b64)
+    data = resp.get("Data") or {}
+    payload = _send_payload(resp, msg_id=data.get("Msgid"), voice_path=out_path)
+    if payload.get("ok"):
+        _persist_tool_outbound(account_id, to_wxid, f"[文件] {fname}", resp, msg_type="file")
+    return payload
+
+
+async def _maybe_auto_voice(adapter, account_id: str, client, to_wxid: str,
+                            text: str) -> None:
+    """``tts.autoVoice`` 概率命中时，给刚发出的文本补一条语音文件。
+
+    **默认关闭**（``autoVoice=0``）：微信里的 MP3 是文件不是语音气泡，重复发一份
+    只在用户显式要求时才值得。失败只 warn（文本已经发出去了，语音只是附加）。
+    """
+    try:
+        from ..inbound import tts_emotion
+
+        acct_cfg = adapter.account(account_id) if hasattr(adapter, "account") else None
+        cfg = tts_emotion.resolve_tts_cfg(getattr(acct_cfg, "tts", {}))
+        is_group = str(to_wxid).endswith("@chatroom")
+        if not tts_emotion.should_auto_voice(cfg, text, to_wxid, is_group=is_group):
+            return
+        clean = tts_emotion.clean_voice_text(text, cfg.max_chars)
+        mood = tts_emotion.get_chat_mood(account_id, to_wxid)
+        out_path = _voice_output_path(account_id)
+        await tts_emotion.synthesize_to_file_async(clean, out_path, cfg, mood=mood)
+        payload = await _send_voice_file(client, account_id, to_wxid, out_path)
+        if not payload.get("ok"):
+            log.warning("[WPP:%s] 自动语音发送失败: %s", account_id, payload.get("error"))
+    except Exception as exc:  # noqa: BLE001 —— 语音是附加，不许影响已发出的文本
+        log.warning("[WPP:%s] 自动语音合成/发送失败（文本已发出）: %s", account_id, exc)
+
+
 def register_msg_tools(ctx, adapter_getter) -> None:
     """注册 msg 域工具（迁移自 msg-meta.ts）。adapter_getter() 返回当前 adapter。"""
 
@@ -235,6 +287,9 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             # 部分投递必须显式上浮：模型看到 ok:false 时不能把已发出的前几片再发一遍。
             if sent:
                 payload["partial"] = True
+        # 自动语音（可选）：文本完整送达后才补一条语音，失败只记日志，不影响文本结果
+        if sent == len(chunks) and payload.get("ok"):
+            await _maybe_auto_voice(adapter, aid, client, to_wxid, str(content))
         return payload
 
     # sendImage: 发送图片（UploadImg 上传即发送）
@@ -291,49 +346,39 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             _persist_tool_outbound(aid, to_wxid, "[图片]", resp, msg_type="image")
         return payload
 
-    # Phase 5.1: AI 语音合成 + 自动发送（mmx TTS → 发文件，微信语音走 SILK 专有格式）
+    # AI 语音合成 + 自动发送（Hermes TTS provider / 阿里 Token Plan → 情绪路由）
     async def send_ai_voice(**params):
-        import subprocess as _sp
-        import time as _time
         adapter = adapter_getter()
         to_wxid = params["toWxid"]
         text = params["text"]
-        voice = params.get("voice", "")
         aid, client = acct(adapter, params)
         if client is None:
             return {"error": f"账号 {aid} 未连接"}
-        # 1. mmx 合成语音到 MP3
-        out_path = f"/tmp/mmx-voice-{aid}-{int(_time.time())}.mp3"
-        cmd = ["mmx", "speech", "synthesize", "--text", text, "--out", out_path, "--quiet"]
-        if voice:
-            cmd += ["--voice", voice]
+        from ..inbound import tts_emotion
+
         try:
-            proc = _sp.run(cmd, capture_output=True, text=True, timeout=120)
-            if proc.returncode != 0:
-                return {"error": f"mmx 语音合成失败: {(proc.stderr or proc.stdout).strip()[:300]}"}
-        except FileNotFoundError:
-            return {"error": "mmx CLI 不可用（未安装 /usr/bin/mmx）"}
-        except _sp.TimeoutExpired:
-            return {"error": "mmx 语音合成超时（120s）"}
-        except Exception as e:  # noqa: BLE001
-            return {"error": f"mmx 语音合成异常: {e}"}
-        # 2. 发文件（微信语音消息是 SILK，MP3 走文件形式，用户点开系统播放器听）
-        #    对齐 SOUL.md「音频走文件形式」约定
-        import base64 as _b64
-        import os as _os
-        if not _os.path.isfile(out_path):
-            return {"error": f"mmx 语音文件不存在: {out_path}"}
-        with open(out_path, "rb") as f:
-            b64 = _b64.b64encode(f.read()).decode()
-        fname = f"语音_{int(_time.time())}.mp3"
-        # 文件消息走 UploadFile + ShareLink Type=6（旧 /Msg/UploadFile 端点不存在）
-        resp = await client.send_file_via_app(to_wxid, fname, b64)
-        data = resp.get("Data") or {}
-        data.get("BaseResponse") or {}
-        payload = _send_payload(resp, msg_id=data.get("Msgid"), voice_path=out_path)
-        if payload.get("ok"):
-            _persist_tool_outbound(aid, to_wxid, f"[文件] {fname}", resp, msg_type="file")
-        return payload
+            acct_cfg = adapter.account(aid) if hasattr(adapter, "account") else None
+        except Exception:  # noqa: BLE001 —— 取不到账号配置按默认（未启用）处理
+            acct_cfg = None
+        cfg = tts_emotion.resolve_tts_cfg(getattr(acct_cfg, "tts", {}))
+        if not cfg.enabled:
+            return {"error": "语音功能未启用（账号配置 tts.enabled=false）"}
+        clean = tts_emotion.clean_voice_text(text, cfg.max_chars)
+        if not clean:
+            return {"error": "文本为空"}
+        # 情绪路由：显式 emotion 参数优先，否则读当前会话情绪
+        mood = tts_emotion.normalize_mood(params.get("emotion")) \
+            if params.get("emotion") else tts_emotion.get_chat_mood(aid, to_wxid)
+        out_path = _voice_output_path(aid)
+        try:
+            await tts_emotion.synthesize_to_file_async(
+                clean, out_path, cfg, mood=mood,
+                voice=params.get("voice") or None,
+                speed=params.get("speed"),
+            )
+        except Exception as e:  # noqa: BLE001 —— 合成失败必须让模型看见（别发空文件）
+            return {"error": f"语音合成失败: {e}"}
+        return await _send_voice_file(client, aid, to_wxid, out_path)
 
     # sendLocation: 发送定位卡片（/Msg/ShareLocation, Type 48）
     # 对齐原 wpp sendLocation: X=纬度, Y=经度, Label/Poiname/Scale/Infourl
@@ -985,12 +1030,14 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             },
             "required": ["toWxid", "prompt"],
         }, send_ai_image),
-        ("wpp_send_ai_voice", "AI 合成语音并自动发送到微信（mmx TTS → 自动发文件）。微信语音是 SILK，MP3 以文件形式发送", {
+        ("wpp_send_ai_voice", "AI 合成语音并自动发送到微信（Hermes TTS / 阿里 Token Plan，按当前会话情绪自动选择语气）。微信语音是 SILK，MP3 以文件形式发送", {
             "type": "object",
             "properties": {
                 "toWxid": {"type": "string", "description": "接收者 wxid"},
                 "text": {"type": "string", "description": "要合成的文本"},
-                "voice": {"type": "string", "description": "音色（可选）"},
+                "voice": {"type": "string", "description": "音色（可选，默认按情绪/账号配置）"},
+                "emotion": {"type": "string", "description": "情绪（可选，默认读当前会话情绪）：happy/sad/excited/calm/angry/anxious/playful/serious/nostalgic/curious"},
+                "speed": {"type": "number", "description": "语速 0.5–2.0（可选，默认按情绪）"},
                 "account_id": {"type": "string", "description": "账号ID（默认 default）"},
             },
             "required": ["toWxid", "text"],

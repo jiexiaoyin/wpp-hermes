@@ -164,6 +164,16 @@ class Account:
     heartflow: dict[str, Any]
     affection: dict[str, Any]
     jargon: dict[str, Any]
+    #: 说话风格学习（2026-10-19，独立于心流；``enabled`` 默认 false）
+    style: dict[str, Any]
+    #: TTS 情绪路由（2026-10-19；``enabled`` 默认 false，走 Hermes TTS provider）
+    tts: dict[str, Any]
+    #: 私聊主动关心（2026-10-19；``enabled`` 默认 false）
+    proactive: dict[str, Any]
+    #: 到达层合并发送（2026-10-19；``enabled`` 默认 false）
+    debounce_merge: dict[str, Any]
+    #: SpectreCore 轻量项（引用提示等；默认全关）
+    spectre: dict[str, Any]
     llm_intent_enabled: bool
     mcp_enabled: bool
     group_context_enabled: bool
@@ -463,6 +473,11 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         heartflow=_with_ai_defaults(_as_dict(cfg.get("heartflow"))),
         affection=_with_ai_defaults(_as_dict(cfg.get("affection"))),
         jargon=_with_ai_defaults(_as_dict(cfg.get("jargon"))),
+        style=_with_ai_defaults(_as_dict(cfg.get("style"))),
+        tts=_as_dict(cfg.get("tts")),
+        proactive=_as_dict(cfg.get("proactive")),
+        debounce_merge=_as_dict(cfg.get("debounceMerge")),
+        spectre=_as_dict(cfg.get("spectre")),
         llm_intent_enabled=_as_bool(cfg.get("llmIntentEnabled"), False),
         # TS ``mcp-meta.ts:mcpEnabledForCurrentAccount`` 是 ``!== false`` —— 缺省**开**，
         # 只有显式 false 才关。旧 py2 解析成默认 false 且没人消费（死键），

@@ -49,6 +49,13 @@ TS 的 flush 产出一"批"交给 ``onFlush``，而那个回调里是**批量富
 * **直通消息会先"带上"同 key 已缓冲的那批**（合并成一次 flush，顺序仍是先来先派发）。
   TS 是并发跑（直通那条可能反超缓冲批）。py2 取"保序"一侧 —— 见 INVARIANT 第 2 条。
 
+## 可选的批内合并（2026-10-19，默认关）
+
+账号 JSON 的 ``debounceMerge.enabled`` 打开后，flush 前把同 key 的**纯文本**连续消息
+合成一条（``merge_text_batch``）：私聊总是可合；群里**只在一批里有人 @/引用机器人时**
+才合（其余群聊保持逐条，免得把互不相干的群友发言拼成一段）。非文本消息一律不合。
+这不改变本模块"到达层聚合"的定位 —— 只是把"一整段话被拆成三条"的情况收成一条。
+
 ## 没做的一截（如实记下）
 
 * **``clear()`` / ``size()``** 只服务测试与观测，适配器不用它们。
@@ -62,9 +69,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
-from .parser import MT_REVOKE, MT_SYSTEM, MT_VOICE, WppMessage
+from .parser import MT_REVOKE, MT_SYSTEM, MT_TEXT, MT_VOICE, WppMessage
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +92,61 @@ __all__ = [
     "PASSTHROUGH_TYPES",
     "InboundDebouncer",
     "debounce_key",
+    "merge_text_batch",
 ]
+
+#: 句末标点：上一段以这些结尾 ⇒ 合并时换行（是两句完整的话）；
+#: 否则视为被拆断的一句话，直接拼接（"我明天" + "下午三点去" → "我明天下午三点去"）。
+_TERMINAL_PUNCT: tuple[str, ...] = ("。", "！", "？", "…", "!", "?", ".", "~", "～")
+
+
+def _ends_sentence(text: str) -> bool:
+    return text.rstrip().endswith(_TERMINAL_PUNCT)
+
+
+def merge_text_batch(batch: list[WppMessage], *, max_chars: int = 2000) -> list[WppMessage]:
+    """把同 key 的一批**纯文本**消息合并成一条合成消息（轻量合并）。
+
+    调用方（:class:`InboundDebouncer`）已经用注入的谓词判过"该不该合"（私聊 /
+    群里 @ 了机器人），这里只做**纯文本拼接**：
+
+    * 批里只要有一条非文本（图片/语音/引用/文件）⇒ 整批**不合并**（媒体各自有
+      富化与落库路径，混进来会丢掉附件）；
+    * 以句末标点分段：完整句子之间换行，被拆断的半句直接拼接；
+    * 合并后超过 ``max_chars`` ⇒ 不合并（宁可多派发一次，也不截断用户的话）；
+    * 合成消息取**最后一条**的元数据（msg_id / 时间 / 引用），原文进
+      ``raw["_merged"]`` 便于排查。原消息对象**不改**（``replace`` 造新对象）。
+
+    返回长度为 1（合并）或原样 ``list(batch)``（不合并）。
+    """
+    if len(batch) < 2:
+        return list(batch)
+    texts: list[str] = []
+    for msg in batch:
+        if msg.msg_type != MT_TEXT or msg.media or msg.reply_to:
+            return list(batch)
+        text = (msg.content or "").strip()
+        if not text:
+            return list(batch)
+        texts.append(text)
+
+    merged = texts[0]
+    for text in texts[1:]:
+        merged += ("\n" if _ends_sentence(merged) else "") + text
+    try:
+        limit = max(1, int(max_chars))
+    except (TypeError, ValueError):
+        limit = 2000
+    if len(merged) > limit:
+        return list(batch)
+
+    last = batch[-1]
+    raw = dict(last.raw)
+    raw["_merged"] = [
+        {"msgId": m.msg_id, "content": m.content, "timestamp": m.timestamp}
+        for m in batch
+    ]
+    return [replace(last, content=merged, raw=raw)]
 
 
 def debounce_key(msg: WppMessage) -> str:
@@ -114,6 +176,9 @@ class InboundDebouncer:
         interval_ms: int = DEFAULT_DEBOUNCE_MS,
         is_control_command: Callable[[WppMessage], bool] | None = None,
         on_error: ErrorFn | None = None,
+        merge: bool = False,
+        merge_allowed: Callable[[list[WppMessage]], bool] | None = None,
+        merge_max_chars: int = 2000,
     ) -> None:
         self.account_id = account_id
         self.on_flush = on_flush
@@ -122,6 +187,14 @@ class InboundDebouncer:
         self.interval_ms = max(0, int(interval_ms))
         self.is_control_command = is_control_command
         self.on_error = on_error
+        #: 批次合并（2026-10-19）：默认关；``merge_allowed`` 由适配器按账号配置 +
+        #: 会话类型（私聊 / 群里 @ 了机器人）判定，本模块只做文本拼接。
+        self.merge = bool(merge)
+        self.merge_allowed = merge_allowed
+        try:
+            self.merge_max_chars = max(1, int(merge_max_chars))
+        except (TypeError, ValueError):
+            self.merge_max_chars = 2000
         self._buffers: dict[str, list[WppMessage]] = {}
         self._timers: dict[str, asyncio.TimerHandle] = {}
         self._chains: dict[str, asyncio.Task[None]] = {}
@@ -230,10 +303,18 @@ class InboundDebouncer:
         await self._flush_batch(batch)
 
     async def _flush_batch(self, batch: list[WppMessage]) -> None:
-        """真的把一批交出去。**只 warn 不抛**（INVARIANT 第 4 条）。"""
+        """真的把一批交出去。**只 warn 不抛**（INVARIANT 第 4 条）。
+
+        合并（可选，默认关）在这里做：``_flush_inbound`` 仍然逐条派发，只是批里
+        可能只剩一条合成消息 —— 逐条派发的形状不变（见 ``test_debounce_wiring``）。
+        """
         if not batch:
             return
         try:
+            if self.merge and len(batch) > 1 and (
+                self.merge_allowed is None or self.merge_allowed(batch)
+            ):
+                batch = merge_text_batch(batch, max_chars=self.merge_max_chars)
             await self.on_flush(batch)
         except asyncio.CancelledError:
             raise

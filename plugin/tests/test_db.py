@@ -13,7 +13,7 @@
 
 ## 本文件守的六件事（每条都对应一次真实事故）
 
-1. ``schema.sql`` 是**唯一真源**：17 张表、167 列、33 个索引，且台账三个热索引在文件里
+1. ``schema.sql`` 是**唯一真源**：20 张表、198 列、37 个索引，且台账三个热索引在文件里
    （TS 把它们只写在 ``mysql.ts`` 的 ensureIndex、**没进 schema.sql** —— 双写陷阱实证）。
 2. **行尾注释里的逗号**不许把列定义切碎（2026-10-01：``new_msg_id`` 没被认成列 ⇒
    ``ensure_schema_complete`` 去重复 ADD ⇒ ``ERROR 1060``）。
@@ -43,9 +43,9 @@ SCHEMA_TEXT = M.SCHEMA_FILE.read_text(encoding="utf-8")
 
 #: 从文件里数出来的期望值（**改 schema 时必须跟着改** —— 这正是它的作用：
 #: 让"顺手加一列"这件事在 diff 里显形，而不是悄悄漂进线上）。
-EXPECTED_TABLES = 18
-EXPECTED_COLUMNS = 176
-EXPECTED_INDEXES = 34
+EXPECTED_TABLES = 20
+EXPECTED_COLUMNS = 198
+EXPECTED_INDEXES = 37
 
 
 # ==================================================== 1. schema.sql 是唯一真源
@@ -1168,7 +1168,7 @@ def test_a_broken_drift_check_is_loud_not_silent(monkeypatch):
 
 
 def test_the_real_schema_reports_no_drift_on_a_freshly_applied_database():
-    """★ 用**真** schema.sql（17 表 167 列）跑一遍体检 —— 每一列的归一化一次验完。
+    """★ 用**真** schema.sql（20 表 198 列）跑一遍体检 —— 每一列的归一化一次验完。
 
     假警报的代价不是"多看一眼"：体检一旦每次都报几十条，人就再也不看它了。
     """

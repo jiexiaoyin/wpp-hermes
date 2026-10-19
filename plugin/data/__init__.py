@@ -2,7 +2,7 @@
 
 分层（严格单向，禁止反向 import）：
 
-    schema.sql          ← 唯一 DDL 真源（17 张表）
+    schema.sql          ← 唯一 DDL 真源（20 张表）
         ↑ 反向推导
     migrations.py       ← 建表 / ensure_column / ensure_index / checksum
         ↑

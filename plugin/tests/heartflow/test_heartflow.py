@@ -2089,12 +2089,20 @@ def test_adapter_preheats_before_it_starts_the_sweep():
     仍可能撞上冷缓存（那正是预热要消掉的东西）。
     """
     fn = _fn_node(_adapter_tree(), "_start_sweeps")
-    pre = _call_lines(fn, "preheat_account")
-    task = _call_lines(fn, "create_task")
-    assert pre, "_start_sweeps 必须先做启动预热"
-    assert task, "sweep 任务还得照起"
-    assert pre[-1] < task[0], "预热必须排在起 sweep 之前"
-    assert "sweep_loop" in ast.unparse(fn), "预热不许把 sweep 挤掉"
+    # 2026-10-19 起同一函数里还有风格学习的 preheat/create_task：这里只挑心流那一对，
+    # 否则"风格预热排在心流 create_task 之后"会被误判成心流预热顺序错了。
+    pre = sorted(n.lineno for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "preheat_account"
+                 and ast.unparse(n.func.value) == "hf_runtime")
+    task = sorted(n.lineno for n in ast.walk(fn)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                  and n.func.attr == "create_task"
+                  and "hf_runtime.sweep_loop" in ast.unparse(n))
+    assert pre, "_start_sweeps 必须先做心流启动预热"
+    assert task, "心流 sweep 任务还得照起"
+    assert pre[-1] < task[0], "心流预热必须排在起心流 sweep 之前"
+    assert "hf_runtime.sweep_loop" in ast.unparse(fn), "预热不许把 sweep 挤掉"
 
 
 def test_adapter_preheat_is_wrapped_so_it_cannot_kill_the_sweep():

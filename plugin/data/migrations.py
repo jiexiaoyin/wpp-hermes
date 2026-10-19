@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_FILE = Path(__file__).resolve().parent / "schema.sql"
 
-#: 框架自有的版本表 —— **不属于** schema.sql 的 17 张表
+#: 框架自有的版本表 —— **不属于** schema.sql 的 20 张表
 MIGRATION_TABLE = "wpp_schema_migrations"
 
 #: 用 version=0 这一行存 ``schema.sql`` 自身的校验和（不是一次 migration）

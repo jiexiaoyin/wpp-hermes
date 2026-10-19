@@ -108,6 +108,61 @@
     "maxCandidatesPerGroup": 50
   },
 
+  "style": {
+    "enabled": false,
+    "_style_note": "说话风格学习 (2026-10-19). 从群聊入站文本里归纳句长/语气词/口头禅/表情/称呼/标点, 作为临时 system prompt 注入回复侧; 只学摘要不存原文, 样本匿名, 命中隐私/提示词注入/辱骂的条目直接丢弃. enabled 默认 false (fail-closed); model 缺失 ⇒ 不生成并告警. 每群 refreshHours 小时重生成一次, 单轮最多 maxPerRun 个群, 样本不足/调用失败有退避. 运维: /style status|list|show|rollback.",
+    "model": "deepseek-v4-flash",
+    "lookbackDays": 14,
+    "minMsgs": 80,
+    "minSenders": 3,
+    "sampleMsgs": 120,
+    "refreshHours": 72,
+    "maxPerRun": 2,
+    "maxTokens": 700,
+    "timeoutMs": 20000,
+    "maxPromptChars": 300,
+    "minConfidence": 0.62,
+    "whitelistGroups": []
+  },
+
+  "tts": {
+    "enabled": false,
+    "_tts_note": "TTS 情绪路由 (2026-10-19). provider 走 Hermes 已注册的 TTS 后端 (阿里 Token Plan = tokenplan, 模型 qwen-audio-3.0-tts-plus), 不再 fork mmx. 当前会话情绪由好感度模块给出, 映射成 input.instruction + parameters.rate. enabled 默认 false; autoVoice=0 表示不自动发语音 (只保留 wpp_send_ai_voice 工具). autoVoice>0 时按概率把回复转语音, 仅限 [autoVoiceMinChars, autoVoiceMaxChars] 且白名单内. fallbackMmx 默认 false, 只有 provider 挂了才考虑.",
+    "provider": "tokenplan",
+    "voice": "",
+    "maxChars": 300,
+    "autoVoice": 0,
+    "autoVoiceMinChars": 4,
+    "autoVoiceMaxChars": 120,
+    "whitelistGroups": [],
+    "whitelistUsers": [],
+    "fallbackMmx": false
+  },
+
+  "debounceMerge": {
+    "enabled": false,
+    "_debounceMerge_note": "消息防抖合并 (2026-10-19, 默认 false). 只合并**私聊**和『@了机器人 / 引用机器人』的群消息, 且批内全部是纯文本 (无媒体/无 reply_to); 超过 maxChars 不截断, 原样逐条处理. 合并没有取消语义 —— 已入队的历史消息不会撤回.",
+    "maxChars": 2000
+  },
+
+  "proactive": {
+    "enabled": false,
+    "_proactive_note": "私聊主动关心 (2026-10-19, 默认 false, fail-closed). allowFrom 为空 = 永不发送. 仅在对方最后说话且已静默 minIdleHours 小时、当天出站数 < maxPerDay、且不在 quietHours 时, 才让模型写一句 (≤maxChars) 发过去. model 缺失时回落到 ai.judgeModel.",
+    "allowFrom": [],
+    "maxPerDay": 1,
+    "minIdleHours": 20,
+    "quietHours": [23, 8],
+    "model": "",
+    "maxChars": 120,
+    "historyLimit": 20,
+    "timeoutMs": 8000
+  },
+
+  "spectre": {
+    "quoteHint": false,
+    "_spectre_note": "SpectreCore 轻量项 (2026-10-19). quoteHint=true 时, 若触发消息引用了别条消息, 在 system prompt 里补一句『用户在引用…』并建议 wpp_quote_reply 引用回复. /mute 临时禁言是运行时命令, 不需要这里配置."
+  },
+
   "llmIntentEnabled": true,
   "llmIntentModel": "deepseek-v4-flash",
   "llmIntentTimeoutMs": 5000,

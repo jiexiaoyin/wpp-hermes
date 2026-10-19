@@ -12,7 +12,7 @@
 -- `migrations.py` 的 `ensure_column` / `ensure_index` 全部**从本文件反推**，
 -- 不手写第二份 DDL。
 --
--- ## 表数（18）
+-- ## 表数（20）
 --
 --   8  legacy       : wpp_accounts / wpp_messages / wpp_contacts / wpp_chatrooms /
 --                     wpp_session_state / wpp_api_calls / wpp_chatroom_members /
@@ -20,9 +20,11 @@
 --   6  心流          : wpp_hf_ledger / wpp_hf_group_state / wpp_hf_threshold_audit /
 --                     wpp_hf_group_profile / wpp_hf_layer_stat / wpp_hf_image_caption
 --   2  辅助          : wpp_svrid_mapping / wpp_sync_state
---   2  Python 独有   : wpp_redpackets   （TS 无对应；从旧树 db.py:357 record_redpacket 反推）
+--   4  Python 独有   : wpp_redpackets   （TS 无对应；从旧树 db.py:357 record_redpacket 反推）
 --                     wpp_affection    （TS 无对应；TS 把好感度/情绪放在进程内 Map，重启清零 ——
 --                                        老板 2026-10-02 拍板落库，见文件末尾那张表的注释）
+--                     wpp_style_cards  （TS 无对应；2026-10-19 自主学习「说话风格」当前版本）
+--                     wpp_style_card_versions（同上；每次生成/回滚留一版，供回滚审计）
 --
 -- ⚠️ 计划里写的「14 张表 / 9 张 legacy」是错的 —— 亲数 TS DDL（v1.16.0）为
 --    **16 个 CREATE TABLE，其中 legacy 8 个**。以本文件为准。
@@ -371,3 +373,46 @@ CREATE TABLE IF NOT EXISTS wpp_affection (
 --   · 本群全量/总量/人数 → PK 前缀 (account_id, group_id)
 --   · 该账号有状态的群数 → PK 前缀 (account_id)
 -- 主键总长 64+128+128 = 320 字符，与既有 uk_account_msg 同宽（真库已验证可用）。
+
+
+-- ============================================================ 说话风格学习 (2, Python 独有)
+
+-- 群说话风格卡（2026-10-19 老板拍板：学群友的说话风格，用到 bot 自己身上）
+-- 与心流群画像的分工：画像是「群是什么、bot 该不该说」，风格卡是「话怎么说」
+-- （句长 / 语气词 / 口头禅 / 表情 / 称呼 / 标点）。存摘要，**不存原文**。
+-- 注入回复侧走 Hermes channel_prompt（临时 system prompt，不进 transcript）。
+CREATE TABLE IF NOT EXISTS wpp_style_cards (
+  account_id VARCHAR(64) NOT NULL,
+  group_id VARCHAR(128) NOT NULL,
+  style_json TEXT NULL,                        -- 结构化风格卡 JSON（解析失败即视为无卡）
+  sample_msgs INT UNSIGNED NOT NULL DEFAULT 0, -- 参与生成的清洗后样本数
+  sender_count INT UNSIGNED NOT NULL DEFAULT 0,-- 参与样本的匿名说话人数
+  confidence DECIMAL(4,3) NOT NULL DEFAULT 0,  -- 0..1（低于 style.minConfidence 不注入）
+  model VARCHAR(64) NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 1,     -- 每次生成/回滚 +1（只增不减）
+  generated_at INT UNSIGNED NULL,              -- 绝对 epoch 秒
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (account_id, group_id),
+  KEY idx_style_gen (account_id, generated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 风格卡版本历史（生成/回滚各留一版；回滚 = 把旧版复制成新版本，版本号仍只增）
+-- 为什么不把旧版塞进主表 JSON：主表要的是"当前生效版"，历史要能逐版查看/回滚且
+-- 不被一次坏写入连带覆盖。样本数/置信度/模型一起留，回滚后审计口径不变。
+CREATE TABLE IF NOT EXISTS wpp_style_card_versions (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  account_id VARCHAR(64) NOT NULL,
+  group_id VARCHAR(128) NOT NULL,
+  version INT UNSIGNED NOT NULL,
+  style_json TEXT NULL,
+  sample_msgs INT UNSIGNED NOT NULL DEFAULT 0,
+  sender_count INT UNSIGNED NOT NULL DEFAULT 0,
+  confidence DECIMAL(4,3) NOT NULL DEFAULT 0,
+  model VARCHAR(64) NULL,
+  reason VARCHAR(16) NOT NULL DEFAULT 'generated',  -- generated | rollback
+  generated_at INT UNSIGNED NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_style_version (account_id, group_id, version),
+  KEY idx_style_versions (account_id, group_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

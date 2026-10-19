@@ -325,6 +325,10 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         self._jargon_loaded: set[tuple[str, str]] = set()
         #: 昵称缓存（引用回复用），{wxid: (name, at)}
         self._name_cache: dict[str, tuple[str, float]] = {}
+        #: 临时禁言（SpectreCore 的 ``/mute`` 轻量版）：``(account_id, chatroom_id)``
+        #: → 到期时间（epoch 秒）。**内存态**，重启即失效 —— 主动静音是临时运维动作，
+        #: 不该因为一次重启变成"这个群永远不理人"。过期条目在读取时顺手清掉。
+        self._muted_groups: dict[tuple[str, str], float] = {}
 
         # ★ 坑③：去重器**必须**是 MessageDeduplicator 且挂命名属性 —— runner 靠
         #   isinstance 找它并在重连时 carry_inbound_dedup 重灌。自己写 set 会在重连后变空。
@@ -431,6 +435,9 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         db = self._debounce.get(account_id)
         if db is not None:
             db.interval_ms = max(0, int(acct.debounce_ms))
+            # 合并开关同样热生效（``merge_allowed`` 本来就读现账号；这里同步标志位）
+            db.merge = bool(acct.debounce_merge.get("enabled"))
+            db.merge_max_chars = acct.debounce_merge.get("maxChars") or 2000
         log.info("[WPP:%s] 账号配置已重载（enabled=%s, 群白名单=%d, 黑名单=%d）",
                  account_id, acct.enabled, len(acct.group_allow_from), len(acct.blacklist_groups))
         return True
@@ -443,6 +450,43 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             raise ValueError(
                 f"[WPP] 账号 {aid!r} 不存在（已加载：{sorted(self._accounts)}）")
         return acct
+
+    # ------------------------------------------------ /mute（临时禁言，内存态）
+
+    def mute_group(self, account_id: str, chatroom_id: str, minutes: int = 30) -> float:
+        """禁言一个群 ``minutes`` 分钟（默认 30，上限 7 天）。返回到期 epoch 秒。"""
+        minutes = max(1, min(int(minutes), 7 * 24 * 60))
+        until = time.time() + minutes * 60
+        self._muted_groups[(account_id, str(chatroom_id).strip())] = until
+        return until
+
+    def unmute_group(self, account_id: str, chatroom_id: str) -> bool:
+        """解除禁言；返回是否本来就在禁言列表里。"""
+        return self._muted_groups.pop((account_id, str(chatroom_id).strip()), None) is not None
+
+    def group_muted(self, account_id: str, chatroom_id: str) -> bool:
+        """该群现在是否被禁言（过期条目顺手清掉）。"""
+        key = (account_id, str(chatroom_id).strip())
+        until = self._muted_groups.get(key)
+        if until is None:
+            return False
+        if until <= time.time():
+            self._muted_groups.pop(key, None)
+            return False
+        return True
+
+    def muted_groups(self, account_id: str) -> list[tuple[str, float]]:
+        """列出该账号仍在禁言的群（群 id, 到期 epoch），顺带清过期项。"""
+        now = time.time()
+        out: list[tuple[str, float]] = []
+        for (aid, chatroom), until in list(self._muted_groups.items()):
+            if aid != account_id:
+                continue
+            if until <= now:
+                self._muted_groups.pop((aid, chatroom), None)
+                continue
+            out.append((chatroom, until))
+        return sorted(out)
 
     # ------------------------------------------------ 准入策略上报（Hermes 授权面）
     #
@@ -577,11 +621,15 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                 # 「与 TS 有意不齐」一节）。
                 # ⚠️ 这里**不**做重复 connect 的守卫（不像 ``_start_ws`` 那个兜底）：
                 #    本类的契约就是 connect() 前先 disconnect()，而 disconnect 会清 ``_debounce``。
+                _merge_cfg = acct.debounce_merge
                 self._debounce[acct.id] = InboundDebouncer(
                     acct.id,
                     lambda batch, a=acct.id: self._flush_inbound(a, batch),
                     interval_ms=acct.debounce_ms,
                     is_control_command=is_filehelper_session,
+                    merge=bool(_merge_cfg.get("enabled")),
+                    merge_allowed=lambda batch, a=acct.id: self._merge_allowed(a, batch),
+                    merge_max_chars=_merge_cfg.get("maxChars") or 2000,
                 )
 
             if not self._start_webhook(connectable):
@@ -954,36 +1002,75 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         return self._webhook.start()
 
     def _start_sweeps(self, connectable: list[accounts_mod.Account]) -> None:
-        """账号启动：**先预热三条缓存，再**起 300s 心流 sweep（每账号一个 task）。
+        """账号启动：预热内存缓存，再起 300s sweep（心流 + 风格学习各一个 task）。
 
         ⚠️ 心流九模块是计划第 6 步的产物 —— 未就位时**静默跳过**（记 debug），
-        绝不让它成为接入的阻塞点。
+        绝不让它成为接入的阻塞点。风格学习是独立开关（2026-10-19），**不依赖心流
+        模块是否可用**：即使 ``heartflow`` import 失败，风格 sweep 也要照常起。
 
-        预热为什么不是 sweep 的内部事：judge 热路径零 DB IO（V7），读的全是内存缓存；
-        而 sweep 是"先睡 300s 再跑"（对齐 TS ``setInterval``）—— 不预热的话，重启后
-        头 5 分钟里阈值回落账号级、预算从 0 起算、分层统计全无（TS 在 ``startAccount``
-        里同样补这三条）。顺序：**先预热再起任务**，否则首条消息仍可能撞上冷缓存。
+        预热为什么不是 sweep 的内部事：judge / 回复侧热路径零 DB IO（V7），读的全是
+        内存缓存；而 sweep 是"先睡 300s 再跑"（对齐 TS ``setInterval``）—— 不预热的话，
+        重启后头 5 分钟里阈值回落账号级、预算从 0 起算、风格卡缺失。顺序：**先预热
+        再起任务**，否则首条消息仍可能撞上冷缓存。
         """
         try:
             from ..inbound.heartflow import runtime as hf_runtime
         except Exception:  # noqa: BLE001 —— 第 6 步之前必然 import 失败
-            log.debug("[WPP] 心流模块未就位，sweep 未启动")
-            return
+            hf_runtime = None
+            log.debug("[WPP] 心流模块未就位，心流 sweep 未启动")
+
+        try:
+            from ..inbound import style_learn as style_mod
+        except Exception:  # noqa: BLE001 —— 风格模块未就位不该影响接入
+            style_mod = None
+            log.debug("[WPP] 风格学习模块未就位，风格 sweep 未启动")
+
+        try:
+            from ..inbound import proactive as proactive_mod
+        except Exception:  # noqa: BLE001 —— 主动关心是独立增强，不该影响接入
+            proactive_mod = None
+            log.debug("[WPP] 主动关心模块未就位，proactive sweep 未启动")
 
         for acct in connectable:
-            # 第二道网：``preheat_account`` 自己保证不抛，但这里若被它带崩，下面那条
-            # sweep 任务就**一起没了** —— 心流静默停摆，比预热失败严重得多。
-            try:
-                hf_runtime.preheat_account(acct.id)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)
-            try:
-                task = asyncio.create_task(
-                    hf_runtime.sweep_loop(self, acct.id, interval=300),
-                    name=f"wpp-hf-sweep-{acct.id}")
-                self._sweep_timers.append(task)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("[WPP:%s] sweep 启动失败: %s", acct.id, exc)
+            if hf_runtime is not None:
+                # 第二道网：``preheat_account`` 自己保证不抛，但这里若被它带崩，下面那条
+                # sweep 任务就**一起没了** —— 心流静默停摆，比预热失败严重得多。
+                try:
+                    hf_runtime.preheat_account(acct.id)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)
+                try:
+                    task = asyncio.create_task(
+                        hf_runtime.sweep_loop(self, acct.id, interval=300),
+                        name=f"wpp-hf-sweep-{acct.id}")
+                    self._sweep_timers.append(task)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[WPP:%s] 心流 sweep 启动失败: %s", acct.id, exc)
+
+            if style_mod is not None:
+                try:
+                    style_mod.preheat_account(acct.id)
+                except Exception as exc:  # noqa: BLE001 —— preheat 自己也不抛，双保险
+                    log.warning("[WPP:%s] 风格卡启动预热失败（不影响接入）: %s",
+                                acct.id, exc)
+                try:
+                    task = asyncio.create_task(
+                        style_mod.sweep_loop(acct.id, interval=300),
+                        name=f"wpp-style-sweep-{acct.id}")
+                    self._sweep_timers.append(task)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[WPP:%s] 风格 sweep 启动失败: %s", acct.id, exc)
+
+            # 无条件起（每轮 tick 现读账号配置）：这样 ``/proactive on`` 写回后
+            # **不需要重启**，下一轮 sweep 就生效。关着时 tick 只是一次 dict 读。
+            if proactive_mod is not None:
+                try:
+                    task = asyncio.create_task(
+                        proactive_mod.sweep_loop(self, acct.id),
+                        name=f"wpp-proactive-sweep-{acct.id}")
+                    self._sweep_timers.append(task)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[WPP:%s] 主动关心 sweep 启动失败: %s", acct.id, exc)
 
     def _start_name_sync(self, connectable: list[accounts_mod.Account]) -> None:
         """每账号起一个群名同步任务（``/Group/List`` → ``wpp_chatrooms``）。
@@ -1048,6 +1135,34 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             metrics.inc_handler_onerror()
             log.warning("[WPP:%s] 处理消息 %s 失败: %s", acct.id, msg.msg_id, exc, exc_info=True)
 
+    def _merge_allowed(self, account_id: str, batch: list[WppMessage]) -> bool:
+        """这一批该不该合并（``debounceMerge``；默认关）。
+
+        范围**刻意收窄**：私聊可合；群里只在批内有消息 **@ 或引用机器人**时才合。
+        群里其余消息保持逐条 —— 否则会把几个群友互不相干的话拼成一段，心流/好感度
+        的"谁说了什么"口径当场被破坏。
+        """
+        from ..inbound.parser import MT_TEXT
+
+        acct = self._accounts.get(account_id)
+        if acct is None or not acct.debounce_merge.get("enabled"):
+            return False
+        if len(batch) < 2:
+            return False
+        # 媒体/引用消息各自有富化路径，混进来会丢附件 ⇒ 整批不合并
+        if any(m.msg_type != MT_TEXT or m.media or m.reply_to for m in batch):
+            return False
+        first = batch[0]
+        if not first.is_group:
+            return True
+        self_wxid = acct.self_wxid or ""
+        for msg in batch:
+            if is_quoting_bot(msg, self_wxid):
+                return True
+            if is_bot_mentioned_by_text(msg.content or "", self_wxid, acct.nickname):
+                return True
+        return False
+
     async def _flush_inbound(self, account_id: str, batch: list[WppMessage]) -> None:
         """W7-6 聚合器的回调：一批同 key 消息，**逐条**走现有 ``_handle_one``。
 
@@ -1098,6 +1213,14 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         #     于是 ``/heartflow on`` 会被构造成事件喂给 LLM，机器人开始"回答"一条命令。
         #     判定与处置必须贴着走 —— 判据在 ``inbound.triggers.is_filehelper_session``。
         if await self._maybe_command(acct, msg):
+            return
+
+        # ③c 临时禁言（``/mute``，内存态）：到点自动恢复。整条丢弃 —— 包括 @机器人，
+        #     否则"禁言期间别人一 @ 就破防"，这个开关就没有意义。filehelper 命令在
+        #     ③b 已经走掉，不受影响。
+        if msg.is_group and self.group_muted(acct.id, msg.chatroom_id):
+            log.debug("[WPP:%s] 群 %s 临时禁言中，丢弃 %s",
+                      acct.id, msg.chatroom_id, msg.msg_id)
             return
 
         # ④ 触发判定（硬门 + 四路 OR，见 inbound.triggers）
@@ -1639,11 +1762,34 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             log.debug("[WPP:%s] 黑话注入失败（照常回复）: %s", acct.id, exc)
             return None
 
+    def _style_channel_prompt(self, acct: accounts_mod.Account,
+                              msg: WppMessage) -> str | None:
+        """本群已学说话风格 → 临时 system prompt（回复侧）。
+
+        只读 ``style_learn`` 进程内缓存，**热路径零 DB**。三道闸都在缓存读之前：
+        非群消息 / ``style.enabled`` 关着 / 缓存里没有该群或置信度不够 ⇒ ``None``。
+        """
+        if not getattr(msg, "is_group", False):
+            return None
+        try:
+            from ..inbound import style_learn as style_mod
+
+            cfg = style_mod.resolve_style_cfg(acct.style)
+            if not cfg.enabled:
+                return None
+            group_id = msg.chatroom_id or msg.peer_id
+            return style_mod.build_style_channel_prompt(
+                acct.id, group_id, min_confidence=cfg.min_confidence)
+        except Exception as exc:  # noqa: BLE001 —— 注入失败不阻塞消息
+            log.debug("[WPP:%s] 风格注入失败（照常回复）: %s", acct.id, exc)
+            return None
+
     def _channel_prompt(self, acct: accounts_mod.Account,
                         msg: WppMessage) -> str | None:
-        """情绪 + 本群画像 + 已知黑话 → **一个** ``channel_prompt``（Hermes 这条缝只收一个字符串）。
+        """情绪 + 本群画像 + 已知黑话 + 说话风格 → **一个** ``channel_prompt``。
 
-        所有段都为空 ⇒ ``None``：保持"没开这些功能时请求体逐字节相同"的既有判据。
+        Hermes 这条缝只收一个字符串。所有段都为空 ⇒ ``None``：保持"没开这些功能时
+        请求体逐字节相同"的既有判据。
         """
         parts: list[str] = []
         mood = self._mood_channel_prompt(acct, msg)
@@ -1655,7 +1801,39 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         jargon = self._jargon_channel_prompt(acct, msg)
         if jargon:
             parts.append(jargon)
+        style = self._style_channel_prompt(acct, msg)
+        if style:
+            parts.append(style)
+        quote = self._quote_channel_prompt(acct, msg)
+        if quote:
+            parts.append(quote)
         return "\n\n".join(parts) if parts else None
+
+    def _quote_channel_prompt(self, acct: accounts_mod.Account,
+                              msg: WppMessage) -> str | None:
+        """引用提示（SpectreCore「模型自主引用」的轻量版，``spectre.quoteHint``，默认关）。
+
+        能力本来就有（``wpp_quote_reply`` 工具 + Hermes 的 ``reply_to_text``），缺的只是
+        **让模型知道它可以自己决定引用**。默认关：多一段 prompt 就是多一次行为漂移，
+        老板要开才开。引用内容只取前 60 字，且压成一行（防止 prompt 注入式换行）。
+        """
+        if not bool(acct.spectre.get("quoteHint")):
+            return None
+        quoted = msg.reply_to or {}
+        if not quoted:
+            return None
+        text = str(quoted.get("quote_content") or "").strip().replace("\n", " ")[:60]
+        if not text:
+            return None
+        who = str(quoted.get("display_name") or "").strip()
+        if acct.self_wxid and quoted.get("from_wxid") == acct.self_wxid:
+            hint = f"对方引用了你说过的话「{text}」。你可以直接回应，也可以用 wpp_quote_reply 引用回复。"
+        else:
+            hint = (
+                f"本条消息引用了{' ' + who if who else '另一条消息'}的内容「{text}」。"
+                "需要时可用 wpp_quote_reply 引用回复，不必每条都引用。"
+            )
+        return hint
 
     def _intent_llm_cfg(self, acct: accounts_mod.Account) -> IntentLlmConfig | None:
         """账号 → LLM 意图那一半的配置；``llm_intent_enabled`` 关着 ⇒ ``None``。

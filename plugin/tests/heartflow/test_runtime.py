@@ -216,12 +216,16 @@ def test_preheat_steps_are_imported_inside_the_function():
     assert "from . import profile as hf_profile" in _fn_code("_preload_steps")
 
 
-# ===== 5. 缓存登记表（七处）=====
+# ===== 5. 缓存登记表（八处）=====
 
-#: 当前登记的七处。**名字是账本**：conftest 的 ``reset_all`` 按名字清，
+#: 当前登记的八处。**名字是账本**：conftest 的 ``reset_all`` 按名字清，
 #: 漏登记一处的表现是跨用例污染（上一个用例的阈值漂到下一个用例里），
 #: 那种失败看起来像业务 bug，所以宁可在这里被挡下。
-KNOWN_CACHES = {"budget", "dedupe", "heartflow", "layer", "learn", "observe", "profile"}
+#:
+#: ``style`` 是 2026-10-19 加的：说话风格学习的缓存独立于七域，但同样登记到
+#: 这张表，好让测试/运维的"全部清缓存"不会漏掉它（功能开关仍然各自独立）。
+KNOWN_CACHES = {"budget", "dedupe", "heartflow", "layer", "learn", "observe",
+                "profile", "style"}
 
 
 def test_the_cache_registry_holds_exactly_the_known_caches():
@@ -234,10 +238,13 @@ def test_the_cache_registry_holds_exactly_the_known_caches():
     ``resolve().heartflow``），2026-10-01 随单例一起删掉。**这就是"少一处"的正当前提**，
     所以名单改动必须同时改这里与各 docstring 里的「N 处」。
     """
-    # import 即登记（各模块底部的 CACHE_REGISTRY.register），所以先把七域都拉起来
+    # import 即登记（各模块底部的 CACHE_REGISTRY.register），所以先把八处都拉起来。
+    # ``style`` 不进 heartflow 包，但同样在模块底部登记 —— 必须在这里显式 import，
+    # 否则"登记表逐名相等"会随测试文件的执行顺序时绿时红。
     from plugin.inbound.heartflow import (  # noqa: F401
         budget, dedupe, heartflow, observe, profile,
     )
+    from plugin.inbound import style_learn  # noqa: F401
     names = R.CACHE_REGISTRY.names()
     assert len(names) == len(set(names)), f"登记表里有重名: {names}"
     assert set(names) == KNOWN_CACHES, (

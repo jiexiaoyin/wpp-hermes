@@ -523,7 +523,9 @@ DECLARED_AST_DIFFS: dict[str, dict[str, str]] = {
             "``outbound.chunk_text`` 分片（微信个人号 >2000 字会被静默截断），"
             "``quote_reply`` 在引用气泡装不下（>500 字）时改发普通文本而不是截断；"
             "③ 2026-10-19 群发收口：``toIds`` 在 handler 内去重并限制 64 个目标"
-            "（schema 的 maxItems 只是提示，不能当运行期约束）。"
+            "（schema 的 maxItems 只是提示，不能当运行期约束）；④ 2026-10-19 TTS："
+            "``send_ai_voice`` 从 ``mmx`` 改为 Hermes ``tts`` 注册表 + 情绪路由，"
+            "``send_text`` 末尾可选补发一条自动语音（``tts.autoVoice``，默认 0）。"
         ),
         "send_group_mass_text": (
             "2026-10-19 安全加固：群发一次请求打 N 个群且撤不回，旧实现把模型给的"
@@ -596,6 +598,12 @@ DECLARED_REGISTRATION_DIFFS: dict[str, dict[str, str]] = {
         "wpp_group_mass_text": (
             "2026-10-19 安全加固：``toIds`` 新增 ``maxItems: 64``（与 handler 内"
             "硬性上限一致）。schema 只是给模型的提示，真正的闸在 handler。"
+        ),
+        "wpp_send_ai_voice": (
+            "2026-10-19 TTS 后端从 ``mmx`` CLI 改为 Hermes ``tts`` 注册表（当前阿里 "
+            "Token Plan ``qwen-audio-3.0-tts-plus``），并按当前会话情绪自动选择语气；"
+            "schema 新增可选 ``emotion`` / ``speed``，``voice`` 描述改为按情绪/账号配置"
+            "取值。toolset 未变。"
         ),
     },
     "jargon": {
