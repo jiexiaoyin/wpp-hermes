@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
+import hmac
 import io
 import logging
 import threading
@@ -170,9 +172,10 @@ class _FakeConn:
         self._handler = handler
         return self
 
-    def _authorized(self, path: str, secret: str, path_token: str) -> bool:
+    def _authorized(self, path: str, secret: str, path_token: str,
+                    raw_body: bytes = b"") -> bool:
         assert self._handler is not None, "conn 没 bind handler"
-        return self._handler._authorized(self, path, secret, path_token)
+        return self._handler._authorized(self, path, secret, path_token, raw_body)
 
     def _read_chunked(self) -> bytes:
         assert self._handler is not None, "conn 没 bind handler"
@@ -196,10 +199,11 @@ def _conn(path: str, headers: dict | None = None, body: bytes = b"{}") -> _FakeC
 
 
 def _authorized(path: str, secret: str = "", token: str = "",
-                headers: dict | None = None, query: str = "") -> bool:
+                headers: dict | None = None, query: str = "",
+                raw_body: bytes = b"") -> bool:
     handler = WppWebhookServer()._make_handler()
-    conn = _conn(path + query, headers)
-    return handler._authorized(conn, path, secret, token)
+    conn = _conn(path + query, headers, body=raw_body or b"{}")
+    return handler._authorized(conn, path, secret, token, raw_body)
 
 
 def test_no_credential_at_all_is_rejected():
@@ -235,6 +239,91 @@ def test_secret_from_query_string():
 def test_empty_secret_header_value_never_passes():
     """空串头不能等于"没配 secret 就放行"（``hmac.compare_digest("", "")`` 是 True）。"""
     assert _authorized("/p", "s3cret", "", {"X-Webhook-Secret": ""}) is False
+
+
+# ===== 2b. v2 HMAC（wechatpadpromax，2026-10-19） =====
+
+
+def _signed_headers(secret: str, body: bytes, *, ts_ms: int | None = None,
+                    delivery: str = "delivery-1", version: str = "v2") -> dict:
+    ts = str(int(time.time() * 1000) if ts_ms is None else ts_ms)
+    base = f"{ts}.{delivery}.".encode() + body
+    sig = hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
+    return {
+        "X-Webhook-Signature": sig,
+        "X-Webhook-Timestamp-Ms": ts,
+        "X-Webhook-Delivery": delivery,
+        "X-Webhook-Signature-Version": version,
+    }
+
+
+_BODY = b'{"MessageType": "sync_message", "Wxid": "wxid_x"}'
+
+
+def test_v2_signature_over_raw_body_passes_without_plain_secret_header():
+    """vendor 配 secret 后只发签名头 —— 必须用 raw body 验，而不是只认明文头。"""
+    assert _authorized("/p", "s3cret", "", _signed_headers("s3cret", _BODY),
+                       raw_body=_BODY) is True
+
+
+def test_v2_signature_rejects_tampered_body_and_wrong_secret():
+    headers = _signed_headers("s3cret", _BODY)
+    assert _authorized("/p", "s3cret", "", headers,
+                       raw_body=_BODY + b" ") is False, "体变了签名必须失效"
+    assert _authorized("/p", "other-secret", "", headers, raw_body=_BODY) is False
+    # 签名按原始 JSON 字节算；用"解析后再序列化"的等价 JSON 不应通过
+    canonical = b'{"MessageType":"sync_message","Wxid":"wxid_x"}'
+    assert _authorized("/p", "s3cret", "", headers, raw_body=canonical) is False
+
+
+def test_v2_signature_requires_fresh_timestamp(monkeypatch):
+    monkeypatch.setenv("WPP_WEBHOOK_MAX_SKEW_SEC", "60")
+    stale = int(time.time() * 1000) - 61_000
+    headers = _signed_headers("s3cret", _BODY, ts_ms=stale)
+    assert _authorized("/p", "s3cret", "", headers, raw_body=_BODY) is False
+
+
+def test_v2_signature_rejects_unknown_version_and_missing_headers():
+    headers = {
+        "X-Webhook-Signature": "00" * 32,
+        "X-Webhook-Timestamp-Ms": str(int(time.time() * 1000)),
+        "X-Webhook-Delivery": "d",
+        "X-Webhook-Signature-Version": "v3",
+    }
+    assert _authorized("/p", "s3cret", "", headers, raw_body=_BODY) is False
+    assert _authorized("/p", "s3cret", "", {
+        "X-Webhook-Signature": "00" * 32}, raw_body=_BODY) is False
+
+
+def test_v2_signed_request_reaches_the_handler_with_raw_body():
+    """端到端（仍不涉网）：签名有效的请求必须真的调度，且 payload 是同一份体。"""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        server, handler, seen = _handler_with_routes(secret="s3cret")
+        server.loop = loop
+        handler = server._make_handler()
+        conn = _conn("/p", _signed_headers("s3cret", _BODY), body=_BODY)
+        handler._handle(conn.bind(handler))
+        assert conn.code == 200
+        deadline = time.time() + 2
+        while not seen and time.time() < deadline:
+            time.sleep(0.01)
+        assert seen == [{"MessageType": "sync_message", "Wxid": "wxid_x"}]
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+
+
+def test_v2_signed_request_with_wrong_signature_is_403_before_parsing():
+    _, handler, seen = _handler_with_routes(secret="s3cret")
+    headers = _signed_headers("wrong", _BODY)
+    conn = _conn("/p", headers, body=_BODY)
+    handler._handle(conn.bind(handler))
+    assert conn.code == 403
+    assert seen == []
 
 
 def test_both_credentials_must_hold_when_both_are_configured():

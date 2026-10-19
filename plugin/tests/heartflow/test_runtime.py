@@ -216,6 +216,22 @@ def test_preheat_steps_are_imported_inside_the_function():
     assert "from . import profile as hf_profile" in _fn_code("_preload_steps")
 
 
+def test_preheat_account_itself_does_no_importing():
+    """预热在启动路径上同步执行：函数体内 import 会把循环依赖炸在接入点上。
+
+    单测大多把 ``_preload_steps`` 换掉了，在 ``preheat_account`` 体内偷偷加
+    import 依然全绿 —— 只有源级 AST 能看见。
+    """
+    tree = ast.parse(RUNTIME_SRC)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "preheat_account":
+            bad = [n for n in ast.walk(node)
+                   if isinstance(n, (ast.Import, ast.ImportFrom))]
+            assert not bad, "preheat_account 不许在函数体内 import"
+            return
+    raise AssertionError("runtime.py 里没有 preheat_account")
+
+
 # ===== 5. 缓存登记表（八处）=====
 
 #: 当前登记的八处。**名字是账本**：conftest 的 ``reset_all`` 按名字清，

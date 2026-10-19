@@ -33,7 +33,8 @@ HF = ROOT / "plugin" / "inbound" / "heartflow"
 ADAPTER = ROOT / "plugin" / "platform" / "adapter.py"
 PARSER = ROOT / "plugin" / "inbound" / "parser.py"
 RELAY = ROOT / "plugin" / "inbound" / "relay.py"
-MEDIA_OSS = ROOT / "plugin" / "inbound" / "media_oss.py"
+MEDIA_OSS = ROOT / "plugin" / "neutral" / "media_oss.py"
+ADAPTER_MEDIA = ROOT / "plugin" / "platform" / "adapter_media.py"
 
 #: 不变量守卫的测试文件（下面 ``inv-*`` 六套共用它当"唯一裁判"）。
 INVARIANTS_TEST = "plugin/tests/invariants/test_invariants.py"
@@ -475,7 +476,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("截断预算翻倍（半句话也能挤进去）",
          "        if used + add > cap:", "        if used + add > cap * 2:"),
         ("渲染标签改名（下游按标签找字段的会全空）",
-         '        lines.append(f"说话基调: {p.summary}")', '        lines.append(f"总结: {p.summary}")'),
+         '        lines.append(f"说话基调: {_line(p.summary)}")', '        lines.append(f"总结: {_line(p.summary)}")'),
         ("max_prompt_chars 脏值改兜底成无限（注入上限失效）",
          "    cap = max(0, int(max_chars)) if _is_num(max_chars) else 0",
          "    cap = max(0, int(max_chars)) if _is_num(max_chars) else 9999"),
@@ -940,8 +941,9 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("没有画像也注入画像段", 'if inp.group_profile else ""', 'if True else ""'),
         ("昵称空也当有（「我是 ，一个助手」）", 'if inp.bot_nickname else "默认角色：智能助手"',
          'if True else "默认角色：智能助手"'),
-        ("上次回复缺失时留空（prompt 里出现空行）", 'inp.last_bot_reply or "暂无上次回复记录"',
-         "inp.last_bot_reply"),
+        ("上次回复缺失时留空（prompt 里出现空行）",
+         'last_reply_str = _clip(inp.last_bot_reply, 500) or "暂无上次回复记录"',
+         'last_reply_str = _clip(inp.last_bot_reply, 500) or ""'),
         ("从未回复被判成 0 分钟前", "if inp.seconds_since_last_reply > 0 else \"从未回复\"",
          "if inp.seconds_since_last_reply >= 0 else \"从未回复\""),
         ("精力展示取整（0.9 与 1.0 看不出差别）", "{inp.energy:.1f}/1.0", "{inp.energy:.0f}/1.0"),
@@ -1001,7 +1003,8 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("judge 没出结果就不记频率（坏 JSON 群被打爆）", "mark_heartflow_judged(group_id, now_ms)",
          "if result is not None: mark_heartflow_judged(group_id, now_ms)"),
         ("异常不吞（心流坏了整条消息失败）",
-         "except Exception as exc:  # noqa: BLE001 —— 心流坏了不该让这条消息整体失败", "except SystemExit:"),
+         '    except Exception as exc:\n        log.warning("[WPP HF] judge error (skip): account=%s group=%s: %s",',
+         '    except SystemExit as exc:\n        log.warning("[WPP HF] judge error (skip): account=%s group=%s: %s",'),
         ("content_head 截到 64 字（台账看不出说的啥）",
          're.sub(r"\\s+", " ", content).strip()[:256]', 're.sub(r"\\s+", " ", content).strip()[:64]'),
         ("昵称不进 prompt", "bot_nickname=nickname,", 'bot_nickname="",'),
@@ -1018,10 +1021,11 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
 
         # ---- 生效预算 ----
         ("生效预算不并画像（画像收紧失效）",
-         "        profile.get_hf_profile_budget(account_id, group_id),", "        None,"),
+         "    suggestion = profile.get_hf_profile_budget(account_id, group_id)",
+         "    suggestion = None"),
         ("画像静默段无视开关（默认静默生效）",
-         "apply_quiet_hours=profile.resolve_hf_profile_cfg(hf_cfg).apply_quiet_hours,",
-         "apply_quiet_hours=True,"),
+         "    apply_quiet = profile.resolve_hf_profile_cfg(hf_cfg).apply_quiet_hours",
+         "    apply_quiet = True"),
         ("占比外环不并入（外环收紧失效）",
          "budget.tighten_budget(base, share.as_dict()) if share is not None else base", "base"),
 
@@ -1212,34 +1216,34 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '        if should_drop(ok, ""):'),
         # 启动预热三条（见 runtime.py 的 preheat_account）：实现了却没接线的那种静默失效。
         ("启动预热被摘掉（重启后 300s 内缓存全是冷的）",
-         "            try:\n                hf_runtime.preheat_account(acct.id)\n"
-         '            except Exception as exc:  # noqa: BLE001\n'
-         '                log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)\n',
-         "            pass\n"),
+         "                try:\n                    hf_runtime.preheat_account(acct.id)\n"
+         '                except Exception as exc:  # noqa: BLE001\n'
+         '                    log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)\n',
+         "                pass\n"),
         ("预热没有第二道网（它一抛，sweep 任务就一起没了）",
-         "            try:\n                hf_runtime.preheat_account(acct.id)\n"
-         '            except Exception as exc:  # noqa: BLE001\n'
-         '                log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)',
-         "            hf_runtime.preheat_account(acct.id)"),
+         "                try:\n                    hf_runtime.preheat_account(acct.id)\n"
+         '                except Exception as exc:  # noqa: BLE001\n'
+         '                    log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)',
+         "                hf_runtime.preheat_account(acct.id)"),
         ("预热挪到起 sweep 之后（首条消息仍可能撞上冷缓存）",
-         "            try:\n                hf_runtime.preheat_account(acct.id)\n"
-         '            except Exception as exc:  # noqa: BLE001\n'
-         '                log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)\n'
-         "            try:\n                task = asyncio.create_task(\n"
-         "                    hf_runtime.sweep_loop(self, acct.id, interval=300),\n"
-         '                    name=f"wpp-hf-sweep-{acct.id}")\n'
-         "                self._sweep_timers.append(task)\n"
-         '            except Exception as exc:  # noqa: BLE001\n'
-         '                log.warning("[WPP:%s] sweep 启动失败: %s", acct.id, exc)',
-         "            try:\n                task = asyncio.create_task(\n"
-         "                    hf_runtime.sweep_loop(self, acct.id, interval=300),\n"
-         '                    name=f"wpp-hf-sweep-{acct.id}")\n'
-         "                self._sweep_timers.append(task)\n"
-         '            except Exception as exc:  # noqa: BLE001\n'
-         '                log.warning("[WPP:%s] sweep 启动失败: %s", acct.id, exc)\n'
-         "            try:\n                hf_runtime.preheat_account(acct.id)\n"
-         '            except Exception as exc:  # noqa: BLE001\n'
-         '                log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)'),
+         "                try:\n                    hf_runtime.preheat_account(acct.id)\n"
+         '                except Exception as exc:  # noqa: BLE001\n'
+         '                    log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)\n'
+         "                try:\n                    task = asyncio.create_task(\n"
+         "                        hf_runtime.sweep_loop(self, acct.id, interval=300),\n"
+         '                        name=f"wpp-hf-sweep-{acct.id}")\n'
+         "                    self._sweep_timers.append(task)\n"
+         '                except Exception as exc:  # noqa: BLE001\n'
+         '                    log.warning("[WPP:%s] 心流 sweep 启动失败: %s", acct.id, exc)',
+         "                try:\n                    task = asyncio.create_task(\n"
+         "                        hf_runtime.sweep_loop(self, acct.id, interval=300),\n"
+         '                        name=f"wpp-hf-sweep-{acct.id}")\n'
+         "                    self._sweep_timers.append(task)\n"
+         '                except Exception as exc:  # noqa: BLE001\n'
+         '                    log.warning("[WPP:%s] 心流 sweep 启动失败: %s", acct.id, exc)\n'
+         "                try:\n                    hf_runtime.preheat_account(acct.id)\n"
+         '                except Exception as exc:  # noqa: BLE001\n'
+         '                    log.warning("[WPP:%s] 心流启动预热失败（不影响接入）: %s", acct.id, exc)'),
     ]),
 
     # ------------------------------------------------- 准入策略上报（Hermes 授权面）
@@ -1317,8 +1321,8 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '    lst = data.get("List")\n    if isinstance(lst, (list, tuple)) and lst:',
          '    lst = None\n    if False:'),
         ("有 List 时仍去看 BaseResponse（两条判据互相打架 = 等于没有判据）",
-         '        return True\n    br = data.get("BaseResponse")',
-         '        pass\n    br = data.get("BaseResponse")'),
+         '        if saw_ret:\n            return True',
+         '        if False:\n            return True'),
         ("不看 List[0]（v1.3.57 的原样故障：id 只在 List 里 ⇒ 恒取不到）",
          'head = lst[0] if isinstance(lst, (list, tuple)) and lst and isinstance(lst[0], dict) else {}',
          'head = {}'),
@@ -1336,13 +1340,15 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
 
     "adapter-outbound-ids": (ADAPTER, "plugin/tests/platform/test_outbound_send_result.py", [
         ("退回只取单值的 extract_msg_id（new_msg_id 永远丢）",
-         'ids = outbound.extract_outbound_msg_ids(resp)',
-         'ids = outbound.OutboundMsgIds(outbound.extract_msg_id(resp), None, None)'),
+         '        ids = outbound.extract_outbound_msg_ids(resp)\n'
+         '        await self._persist_outbound(acct, peer_id, chunk, ids)',
+         '        ids = outbound.OutboundMsgIds(outbound.extract_msg_id(resp), None, None)\n'
+         '        await self._persist_outbound(acct, peer_id, chunk, ids)'),
         ("message_id 改成报 new_msg_id（心流台账 bot_msg_id 的取值口径变了）",
          'return SendResult(success=True, message_id=ids.msg_id, raw_response=resp)',
          'return SendResult(success=True, message_id=ids.new_msg_id, raw_response=resp)'),
         ("落库不写 new_msg_id（群友引用 bot 消息的关联断掉）",
-         '                new_msg_id=ids.new_msg_id,\n', ''),
+         '            new_msg_id=ids.new_msg_id,\n', ''),
         ("落库的 msg_id 改成客户端 id 优先（蓝本是 newMsgId ?? msgId）",
          'msg_id=ids.new_msg_id or ids.msg_id or None,', 'msg_id=ids.msg_id or None,'),
         ("只把 msg_id 传给落库（new_msg_id 丢在门外）",
@@ -1523,8 +1529,10 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          "    if isinstance(v, (dict, list)):",
          "    if False:"),
         ("_safe_str 不解包装（旧格式的 FromUserName 变成 dict 字面量 ⇒ 整条静默消失）",
-         "    v = _unwrap(v)",
-         "    v = v"),
+         '    v = _unwrap(v)\n    if isinstance(v, (dict, list)):\n'
+         '        # 解包后还不是标量',
+         '    if isinstance(v, (dict, list)):\n'
+         '        # 解包后还不是标量'),
         ("群 id 不看 @chatroom 后缀（A2 回归：v1 群消息当私聊，群策略整条绕开）",
          '            if cand.endswith("@chatroom"):',
          "            if False:"),
@@ -1779,12 +1787,12 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          "            log.error(\"[WPP] DB migration 未完成（不影响收信，**心流/审计降级**；\"",
          "            log.warning(\"[WPP] DB migration 未完成（不影响收信，**心流/审计降级**；\""),
         ("异常吞成 pass（连日志都没有）",
-         "        except Exception as exc:  # noqa: BLE001 —— 不阻断接入，但要留下不会消失的痕迹\n"
+         "        except Exception as exc:\n"
          "            metrics.inc_db_migration_failure()\n"
          "            metrics.set_db_gauge(0)\n"
          "            log.error(\"[WPP] DB migration 未完成（不影响收信，**心流/审计降级**；\"\n"
          "                      \"schema 可能是**半套**）: %s\", exc, exc_info=True)",
-         "        except Exception as exc:  # noqa: BLE001\n            pass"),
+         "        except Exception as exc:\n            pass"),
         ("漂移不报（有漂移也当一切正常）",
          "            if result.get(\"drifted\"):",
          "            if False:"),
@@ -1970,10 +1978,19 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          " and hmac.compare_digest(val, secret):",
          "                    if False:"),
         ("handler 不再复核鉴权（路由注册侧一旦漏了就是裸奔 / 第二道网失效）",
-         "                if not self._authorized(path, secret, path_token):",
+         "                if not self._authorized(path, secret, path_token, raw_body):",
          "                if False:"),
         ("403 之后不 return（被拒的载荷照样进回调）",
-         '                    self._reply(403, b\'{"error":"forbidden"}\')\n                    return',
+         "                if not self._authorized(path, secret, path_token, raw_body):\n"
+         "                    metrics.inc_webhook_rejected_secret()\n"
+         '                    log.warning("[WPP webhook] 鉴权失败 path=%s from=%s",\n'
+         "                                redact(path), _client_ip(self))\n"
+         '                    self._reply(403, b\'{"error":"forbidden"}\')\n'
+         "                    return",
+         "                if not self._authorized(path, secret, path_token, raw_body):\n"
+         "                    metrics.inc_webhook_rejected_secret()\n"
+         '                    log.warning("[WPP webhook] 鉴权失败 path=%s from=%s",\n'
+         "                                redact(path), _client_ip(self))\n"
          '                    self._reply(403, b\'{"error":"forbidden"}\')'),
         ("拿不到主循环时回 200（旧行为：静默丢消息，vendor 不重试）",
          '                    self._reply(503, b\'{"error":"loop unavailable"}\')',
@@ -2027,16 +2044,17 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("只读端点不再豁免（调试期心跳/同步全被自己拒掉 ⇒ 闸没人敢开）",
          "    if is_read_only(endpoint):\n        return", "    if False:\n        return"),
         ("取不到目标也放行（说不清发给谁的写操作直接过 / fail-open）",
-         "    if not targets:\n        raise netguard.GuardError(",
-         "    if False:\n        raise netguard.GuardError("),
+         "    if not targets:\n", "    if False:\n"),
         ("只核对第一个目标（多目标里混一个白名单外的就漏）",
-         "    for target in targets:\n        netguard.check_outbound_allowed(target, account_id)",
-         "    for target in targets[:1]:\n        netguard.check_outbound_allowed(target, account_id)"),
+         "    for target in targets:\n"
+         "        netguard.check_outbound_allowed(target, account_id, allowed=allowed)",
+         "    for target in targets[:1]:\n"
+         "        netguard.check_outbound_allowed(target, account_id, allowed=allowed)"),
         ("未设白名单不再是 no-op（生产期全部发送被拒 = 生产事故）",
-         "    if not netguard.send_allowlist():\n        return", "    if False:\n        return"),
+         "    if not allowed:\n        return", "    if False:\n        return"),
         ("非目标键下的裸标量也当目标（blackList「不给谁看」被当成收件人 ⇒ 判反）",
-         "            if _norm_key(key) in _NORMALIZED_TARGET_KEYS:\n                _add_value(val, out)",
-         "            if True:\n                _add_value(val, out)"),
+         "            if _norm_key(key) in _NORMALIZED_TARGET_KEYS:\n                _add_value(val, out, state)",
+         "            if True:\n                _add_value(val, out, state)"),
         ("多目标键改名（ToIds 系端点取不到目标 ⇒ 一律被拒或漏判）",
          '    "ToIds", "toIds",', '    "ToIdz", "toIdz",'),
         ("群目标键改名（QID 系端点取不到目标）",
@@ -2053,15 +2071,27 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
     "client-outbound-guard": (ROOT / "plugin" / "core" / "api_client.py",
                               "plugin/tests/test_outbound_guard.py", [
         ("_raw_url 上不再调判据（收口被摘 ⇒ 工具面全在闸外 / C1）",
-         "        outbound_guard.guard(endpoint, body, self.account_id)", "        pass"),
+         "        outbound_guard.guard(endpoint, body, self.account_id,\n"
+         "                             allowed=self.send_allowlist,\n"
+         "                             path_targets=path_targets)",
+         "        pass"),
         ("判据收不到请求体（写端点全部变成「没有目标⇒拒绝」）",
-         "        outbound_guard.guard(endpoint, body, self.account_id)",
-         "        outbound_guard.guard(endpoint, None, self.account_id)"),
+         "        outbound_guard.guard(endpoint, body, self.account_id,\n"
+         "                             allowed=self.send_allowlist,\n"
+         "                             path_targets=path_targets)",
+         "        outbound_guard.guard(endpoint, None, self.account_id,\n"
+         "                             allowed=self.send_allowlist,\n"
+         "                             path_targets=path_targets)"),
         ("判据收不到 account_id（`acct:peer` 形式的白名单永远对不上）",
-         "        outbound_guard.guard(endpoint, body, self.account_id)",
-         '        outbound_guard.guard(endpoint, body, "")'),
+         "        outbound_guard.guard(endpoint, body, self.account_id,\n"
+         "                             allowed=self.send_allowlist,\n"
+         "                             path_targets=path_targets)",
+         '        outbound_guard.guard(endpoint, body, "",\n'
+         "                             allowed=self.send_allowlist,\n"
+         "                             path_targets=path_targets)"),
         ("主请求 helper 不把 body 传下去（最常用的那条路取不到目标）",
-         "        url = self._raw_url(endpoint, body)", "        url = self._raw_url(endpoint)"),
+         "        url = self._raw_url(endpoint, body, path_targets)",
+         "        url = self._raw_url(endpoint, None, path_targets)"),
         ("字节下载 helper 不把 body 传下去（媒体下载走的那条路）",
          "                self._raw_url(endpoint, body), json=body,\n"
          "                headers=self._headers(token_key=True),\n"
@@ -2087,8 +2117,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          "                if resp.status != 200:\n"
          '                    log.warning("[WPP] %s HTTP %s", endpoint, resp.status)\n'
          "                    return None\n"
-         "                try:\n"
-         "                    data = json.loads(await resp.text())",
+         "                raw = await _read_capped(resp, _MAX_B64_JSON_BYTES)",
          "                self._raw_url(endpoint), json=body,\n"
          "                headers=self._headers(token_key=True),\n"
          "                timeout=aiohttp.ClientTimeout(total=timeout),\n"
@@ -2096,8 +2125,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          "                if resp.status != 200:\n"
          '                    log.warning("[WPP] %s HTTP %s", endpoint, resp.status)\n'
          "                    return None\n"
-         "                try:\n"
-         "                    data = json.loads(await resp.text())"),
+         "                raw = await _read_capped(resp, _MAX_B64_JSON_BYTES)"),
     ]),
     # ★ 2026-10-18 审阅修：写端点不重试。失效形态是"偶发超时 ⇒ 给真实联系人
     #   发了第二条"（微信撤不回）。判据在 call() 收口；typed 方法自己也传 0，
@@ -2280,17 +2308,17 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
     "voice-inject": (ROOT / "plugin" / "inbound" / "parser.py",
                      "plugin/tests/test_voice.py", [
         ("★ 转写没接进正文（算出来了却没人写 ⇒ 模型只看到 ``[语音]``，等于没说话）",
-         "if transcript:\n            text = f\"{text}\\n[转写] {transcript}\"",
-         "if False:\n            text = f\"{text}\\n[转写] {transcript}\""),
+         '        if line and line not in text:\n            text = f"{text}\\n{line}"',
+         '        if False:\n            text = f"{text}\\n{line}"'),
         ("``[转写]`` 记号改字（技能/提示词按 ``\\n[转写] `` 认，改了等于换协议）",
-         'text = f"{text}\\n[转写] {transcript}"',
-         'text = f"{text}\\n[语音转写] {transcript}"'),
+         '            text = f"{text}\\n{line}"',
+         '            text = f"{text}\\n[语音转写] {line}"'),
         ("没转写也写这一行（``[转写] `` 后面空着 ⇒ 模型以为「语音内容是空的」）",
-         "if transcript:\n            text = f\"{text}\\n[转写] {transcript}\"",
-         "if True:\n            text = f\"{text}\\n[转写] {transcript}\""),
+         '        line = f"[转写] {transcript}" if transcript else ""',
+         '        line = f"[转写] {transcript}"'),
     ]),
 
-    "adapter-voice": (ADAPTER, "plugin/tests/test_voice.py", [
+    "adapter-voice": (ADAPTER_MEDIA, "plugin/tests/test_voice.py", [
         ("★ 语音分支不接转写（下载照做、音频照落 ⇒ 只有模型看到的是 [语音] 一行）",
          "                    await self._fill_voice_transcript(acct.id, msg.media, data)\n", ""),
         ("转写结果不写回 media（白转：正文读的是 media）",
@@ -2307,6 +2335,9 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         #    新的载体是"⑤ 自己取媒体且排在 ``prepare_text`` 之后"——同一条 ``str.replace``
         #    就能表达，且被 ``test_voice.py`` 的"``_build_event`` 里不许出现 ``_fetch_media``"
         #    与 W7-1 装配面的顺序判据一起杀掉。
+    ]),
+    "adapter-voice-order": (ADAPTER, "plugin/tests/test_voice.py", [
+        # 载体在 adapter.py 的 `_build_event`（正文/注入口），媒体方法本身在 MediaMixin。
         ("★ 先算正文再取媒体（语音转写永远赶不上正文这班车）",
          "        media_urls, media_types = media\n        text = pipeline.prepare_text(msg)\n",
          "        text = pipeline.prepare_text(msg)\n"
@@ -2528,10 +2559,12 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("★ 恢复 adapter_getter 参数阴影（外层 getter 被自己的默认值挡住 ⇒ "
          "219 个工具全部回「adapter 未就绪」，一条厂商请求都不发，且不抛异常）",
          "        async def _handler(endpoint=endpoint, method=method,\n"
-         "                           transform=td.get(\"transform\"), **params):",
+         "                           transform=td.get(\"transform\"),\n"
+         "                           allowed_keys=allowed_keys, tool_name=td[\"name\"], **params):",
          "        async def _handler(adapter_getter=noop_adapter_getter,\n"
          "                           endpoint=endpoint, method=method,\n"
-         "                           transform=td.get(\"transform\"), **params):"),
+         "                           transform=td.get(\"transform\"),\n"
+         "                           allowed_keys=allowed_keys, tool_name=td[\"name\"], **params):"),
         ("account_id 不 pop（路由键被当成厂商参数原样发出去 —— 模型照 schema 填的 "
          "那个键会跟着请求体一起发给厂商）",
          '            account_id = resolve_account_id(adapter, params.pop("account_id", "default"))',
@@ -2596,16 +2629,17 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
     "adapter-inbound-persist": (ADAPTER, "plugin/tests/test_inbound_persist.py", [
         ("★ 入站落库整条拆掉（心流缓冲/judge/LLM 上下文又只剩 bot 自己说的话，"
          "而「注册面全绿」那种观感一模一样）",
-         "        await asyncio.to_thread(persist_inbound, acct, msg)",
+         "        if await asyncio.to_thread(persist_inbound, acct, msg):\n"
+         "            metrics.inc_messages_saved_db()",
          "        pass"),
         ("★ 出站 peer_kind 绕过映射（私聊出站写 dm ⇒ ENUM 拒收 ⇒ 出站记录静默丢，"
          "与入站那半重新分叉）",
-         '                peer_kind=db_peer_kind("group" if is_group else "dm"),',
-         '                peer_kind="group" if is_group else "dm",'),
+         '            peer_kind=db_peer_kind("group" if is_group else "dm"),',
+         '            peer_kind="group" if is_group else "dm",'),
         ("★ 出站 chat_id 退回编码串（accountId:peerId ⇒ 按群查历史两个分支都不命中 ⇒ "
          "出站群消息整个隐形，正是 W1 修掉的那个真 bug）",
-         "                chat_id=db_chat_id(peer_id, is_group=is_group),",
-         "                chat_id=self._chat_id(acct.id, peer_id),"),
+         "            chat_id=db_chat_id(peer_id, is_group=is_group),",
+         "            chat_id=self._chat_id(acct.id, peer_id),"),
     ]),
 
     # 账号写回（W6）：落盘口。失效形态全是"回了 ✅ 而实际没生效 / 实际改坏了"，
@@ -2620,8 +2654,8 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '        raise AccountWriteError(f"账号文件不存在：{path}（写回会凭空造一份残缺配置）")',
          "        return {}"),
         ("★ 从零拼一份写回（只留本次改的那个键 ⇒ 本树不建模的键 + 凭证**静默全删**）",
-         "        data[k] = value\n        _atomic_write(path, data)",
-         "        data = {k: value}\n        _atomic_write(path, data)"),
+         "        data.update(cleaned)\n        _atomic_write(path, data)",
+         "        data = dict(cleaned)\n        _atomic_write(path, data)"),
         ("★ 写完不清同键覆盖（③ 层压在 ① 层上 ⇒ 文件改了、链路读到的还是旧值）",
          "        _clear_shadow_override(account_id, k)",
          "        pass"),
@@ -2659,14 +2693,14 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
     "account-writeback-adapter": (ADAPTER, "plugin/tests/test_account_store.py", [
         ("★ 入站不取最新 Account（WS/webhook 闭包绑的是 connect() 时的旧快照 ⇒ "
          "命令改的白名单/群策略永远走不到唯一活着的入站路径上）",
-         "        acct = self._accounts.get(acct.id, acct)",
-         "        acct = acct"),
+         "        acct = self._accounts.get(acct.id, acct)\n\n        pipeline = self._pipelines.get(acct.id)",
+         "        acct = acct\n\n        pipeline = self._pipelines.get(acct.id)"),
         ("★ 重载不刷管线 cfg（准入判据读的是 connect() 时那份快照 ⇒ 白名单改了不生效）",
          "            pipeline.cfg = self._pipeline_cfg(acct)",
          "            pass"),
         ("★ 命令调用点不传 adapter（写回变成「落盘但不当次生效」）",
-         "commands.handle_command(acct.id, content, adapter=self)",
-         "commands.handle_command(acct.id, content)"),
+         "await commands.handle_command_async(acct.id, content, adapter=self)",
+         "await commands.handle_command_async(acct.id, content)"),
     ]),
 
     # 好感度算法（W2）。失效形态**全是"数字变得不像话"而不是崩溃**：多扣一分、
@@ -2743,9 +2777,11 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          "            self._affection_note_group(acct, msg)",
          "            await self._affection_note_group(acct, msg)"),
         ("★ 打分挪到落库之前、群分支之外（DM 与未过闸的消息也开始计分；顺序判据 H3 当场红）",
-         "        await asyncio.to_thread(persist_inbound, acct, msg)",
+         "        if await asyncio.to_thread(persist_inbound, acct, msg):\n"
+         "            metrics.inc_messages_saved_db()",
          "        self._affection_note_group(acct, msg)\n"
-         "        await asyncio.to_thread(persist_inbound, acct, msg)"),
+         "        if await asyncio.to_thread(persist_inbound, acct, msg):\n"
+         "            metrics.inc_messages_saved_db()"),
         ("★ 任务句柄不存（asyncio 只持弱引用 ⇒ 任务跑到一半被 GC，静默丢账）",
          "        self._affection_tasks.add(task)",
          "        pass"),
@@ -2757,7 +2793,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          "        self._affection_tasks.discard(task)",
          "        pass"),
         ("★ 情绪注入不接 channel_prompt（情绪状态机照常跑、库照常写，回复语气一点不变）",
-         "            channel_prompt=self._mood_channel_prompt(acct, msg),",
+         "            channel_prompt=self._channel_prompt(acct, msg),",
          "            channel_prompt=None,"),
         ("★ 系统通知守卫拆掉（10000 系统消息被当成「有人在说话」计分）",
          "        if msg.msg_type == MT_SYSTEM:                    # 系统通知不算人说话\n"
@@ -2775,10 +2811,14 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
                          "plugin/tests/platform/test_affection_wiring.py", [
         ("★ 每次都去数好感度（`/jargon status` 也查好感度表 ⇒ 两个功能的状态页被绑在一起，"
          "好感度表没建时黑话开关的状态页也报「读取失败」）",
-         '_affection_data_line(account_id) if feature == "affection" else ""',
-         "_affection_data_line(account_id)"),
+         '        if feature == "affection":\n            extra = _affection_data_line(account_id)',
+         '        if True:\n            extra = _affection_data_line(account_id)'),
         ("★ 读库失败直接抛（状态页在库坏掉那一刻最有用，却在那时崩掉）",
+         '    except Exception as exc:  # noqa: BLE001 —— 状态查询失败不该让命令崩\n'
+         '        log.debug("[WPP:%s] 好感度计数读取失败: %s", account_id, exc)\n'
          '        return "\\n数据: (读取失败，见日志)"',
+         "    except Exception as exc:  # noqa: BLE001 —— 状态查询失败不该让命令崩\n"
+         '        log.debug("[WPP:%s] 好感度计数读取失败: %s", account_id, exc)\n'
          "        raise"),
         ("群数与行数对调（两个数各自都是真的，拼起来是假的）",
          'f"\\n数据: 有状态的群 {groups} 个 / 好感度行 {rows} 条"',
@@ -3045,7 +3085,9 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '        if False:\n            return'),
         ("★ 连上不置 connected（心跳永不发 ⇒ vendor idle 超时断连）",
          '                    self.connected = True\n'
+         '                    self._metric("set_ws_connected", True)\n'
          '                    log.info("[WPP:%s WS] 已连接", self.account_id)',
+         '                    self._metric("set_ws_connected", True)\n'
          '                    log.info("[WPP:%s WS] 已连接", self.account_id)'),
         ("★ 断开不置 connected（断线后照样发心跳；且这里只在 finally 里才覆盖得到）",
          '                    finally:\n                        self.connected = False',
@@ -3079,7 +3121,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '                is_connected=lambda w=ws: bool(w is not None and w.connected),',
          '                is_connected=lambda: bool(ws is not None and ws.connected),'),
         ("★ 拉回来的条目没接回统一入口（拉了个寂寞）",
-         '                on_message=lambda item, a=acct: self._on_raw(a, item),',
+         '                on_message=lambda item, a=acct: self._on_sync_raw(a, item),',
          '                on_message=lambda item, a=acct: asyncio.sleep(0),'),
         ("★ 兜底建了不 start（定时器一个都没起，看着一切正常）",
          '            sync.start()\n            self._sync[acct.id] = sync',
@@ -3219,7 +3261,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '        if True:'),
     ]),
 
-    "app-card-adapter": (ADAPTER, "plugin/tests/platform/test_app_card_wiring.py", [
+    "app-card-adapter": (ADAPTER_MEDIA, "plugin/tests/platform/test_app_card_wiring.py", [
         ("★ 分支排到 `if not msg.media` 那道闸之后（整类卡片走不到它，现象是「卡片没图」）",
          '        if mtype == MT_APP and is_mini_program_card(msg.raw):',
          '        if not msg.media:\n            return [], []\n'
@@ -3278,21 +3320,26 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("★ 抑制的键拿错（写成小程序封面那个 `mp_asset_url`）",
          '    msg.media["oss_url"] = url',
          '    msg.media["mp_asset_url"] = url'),
-        ("★ `if not url` 这道降级闸拆掉（没凭据也往正文写 `[图片] None`）",
-         '        if not url:\n            return',
-         '        if False:\n            return'),
-        ("★ 上传不带账号（多账号共用一个 OSS 目录 ⇒ 串号）",
-         '        url = await upload_media_bytes(data, filename, account_id=acct.id, kind=kind)',
-         '        url = await upload_media_bytes(data, filename, account_id="default", kind=kind)'),
-        ("★ 文件行的大小写死成 0（下载截断时那句「多大」成了谎话）",
-         '        _inject_media_enrich_line(msg, kind, url, filename=filename, size=len(data))',
-         '        _inject_media_enrich_line(msg, kind, url, filename=filename, size=0)'),
         # ⚠️ 这条第一版写成 `"images": "图片"` —— 而 `KIND_IMAGES` 的值**就是**
         #    `"images"` ⇒ 那个变异**语义等价**（第一轮 SURVIVED 是应该的）。换成一个
         #    真会缺目录的写法：图片那一项被视频顶掉。
         ("★ 标记表缺一个目录、且被别的目录顶掉（上传成功那一刻 KeyError）",
          '    KIND_IMAGES: "图片",',
          '    KIND_VIDEOS: "图片",'),
+    ]),
+    # 上传/注入那半住在 adapter_media.MediaMixin（2026-10-19 拆文件）；与上面纯函数分开两套。
+    "media-enrich-publish": (ADAPTER_MEDIA, "plugin/tests/test_media_enrich.py", [
+        ("★ `if not url` 这道降级闸拆掉（没凭据也往正文写 `[图片] None`）",
+         '        url = await upload_media_bytes(data, filename, account_id=acct.id, kind=kind)\n'
+         '        if not url:\n            metrics.inc_enrich_save_failed()\n            return',
+         '        url = await upload_media_bytes(data, filename, account_id=acct.id, kind=kind)\n'
+         '        if False:\n            metrics.inc_enrich_save_failed()\n            return'),
+        ("★ 上传不带账号（多账号共用一个 OSS 目录 ⇒ 串号）",
+         '        url = await upload_media_bytes(data, filename, account_id=acct.id, kind=kind)',
+         '        url = await upload_media_bytes(data, filename, account_id="default", kind=kind)'),
+        ("★ 文件行的大小写死成 0（下载截断时那句「多大」成了谎话）",
+         '        _inject_media_enrich_line(msg, kind, url, filename=filename, size=len(data))',
+         '        _inject_media_enrich_line(msg, kind, url, filename=filename, size=0)'),
     ]),
     "media-enrich-tag": (PARSER, "plugin/tests/test_media_enrich.py", [
         ("★ 抑制拆掉（URL 那行已在正文里，前缀标记又打一遍 ⇒ 两个 `[图片]`）",
@@ -3308,7 +3355,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '        if msg.media.get("oss_url"):',
          '        if msg.msg_type == MT_APP and msg.media.get("oss_url"):'),
     ]),
-    "media-enrich-adapter": (ADAPTER, "plugin/tests/platform/test_media_enrich_wiring.py", [
+    "media-enrich-adapter": (ADAPTER_MEDIA, "plugin/tests/platform/test_media_enrich_wiring.py", [
         ("★ 图片分支不富化（整类消息回到「正文里没有 URL」）",
          '                    await self._publish_media(acct, msg, kind=KIND_IMAGES,\n'
          '                                              filename=f"{msg.msg_id or \'image\'}.jpg",\n'
@@ -3324,20 +3371,26 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '                    await self._publish_media(acct, msg, kind=KIND_VIDEOS,',
          '                    await self._publish_media(acct, msg, kind=KIND_IMAGES,'),
         ("★ 文件传错目录",
-         '                    await self._publish_media(acct, msg, kind=KIND_FILES,',
+         '                await self._publish_media(acct, msg, kind=KIND_FILES,',
          '                    await self._publish_media(acct, msg, kind=KIND_IMAGES,'),
         ("★ 文件用另一个名字上传（模型看到的文件名与附件里的分家）",
-         '                                              filename=fname, data=data)',
+         '                                          filename=fname, data=data)',
          '                                              filename="file.bin", data=data)'),
+    ]),
+    # `_handle_one` / `_build_event` 的接线仍在 adapter.py —— 与 MediaMixin 分开一套。
+    "media-enrich-wiring": (ADAPTER, "plugin/tests/platform/test_media_enrich_wiring.py", [
         ("★ 取媒体的位置退回 ⑤（④z/④a 都排在它之前 ⇒ judge 与 DB 拿不到 URL）",
-         '        media_urls, media_types = media\n',
-         '        media_urls, media_types = await self._fetch_media(acct, msg)\n'),
+         '        media_urls, media_types = media\n        text = pipeline.prepare_text(msg)',
+         '        media_urls, media_types = await self._fetch_media(acct, msg)\n'
+         '        text = pipeline.prepare_text(msg)'),
         ("★ 取到的媒体不交给 `_build_event`（附件悄悄丢，正文里的 URL 还在）",
-         '        event = await self._build_event(acct, msg, pipeline, media=media)',
-         '        event = await self._build_event(acct, msg, pipeline, media=([], []))'),
+         '        event = await self._build_event(\n            acct, msg, pipeline, media=media,\n'
+         '            reply_expected=False if hf_engaged else None)',
+         '        event = await self._build_event(\n            acct, msg, pipeline, media=([], []),\n'
+         '            reply_expected=False if hf_engaged else None)'),
         ("★ 解包写死空表（同上；这条把「到底有没有解包」也钉住）",
-         '        media_urls, media_types = media\n',
-         '        media_urls, media_types = [], []\n'),
+         '        media_urls, media_types = media\n        text = pipeline.prepare_text(msg)',
+         '        media_urls, media_types = [], []\n        text = pipeline.prepare_text(msg)'),
     ]),
     # ── W7-3（2026-10-02）：接龙解析 —— 识别对了，但喂给模型的是原样那坨 ──────
     # 这一族的失效形态是"识别没错、日志干净、模型还是得自己从那坨里数人"，所以判据
@@ -3422,7 +3475,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
     # ``jargon-mine`` 编排与 LLM 三步（现象 = 挖到了但没存/含义是空）、
     # ``jargon-store`` **store 契约**（现象 = 已确认的词每轮重新计费 + 词频被灌水，
     # 全链路无异常、无日志 —— 这一套是本项抓到真 bug 的那一处）。
-    "jargon-core": (ROOT / "plugin" / "inbound" / "jargon.py", "plugin/tests/test_jargon.py", [
+    "jargon-core": (ROOT / "plugin" / "neutral" / "jargon.py", "plugin/tests/test_jargon.py", [
         ("★ JS 的 Math.round 换成 Python 的 round（银行家舍入 ⇒ 分数在 .5 上分叉）",
          '    return math.floor(x + 0.5)', '    return round(x)'),
         ("候选词频闸 5 → 4（没在用的词也进池 ⇒ 白花 LLM 钱）",
@@ -3435,9 +3488,9 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
         ("★ 输出截断 5 → 10（送 LLM 的上下文条数翻倍 ⇒ 白花 token）",
          '            context_examples=list(_stats.term_contexts.get(group_id, {}).get(term) or [])[:5],',
          '            context_examples=list(_stats.term_contexts.get(group_id, {}).get(term) or [])[:10],'),
-        ("★ 硬过滤不再拉黑中文（中文候选涌进 LLM ⇒ 与 TS 分叉、且账单立刻变大）",
-         'HARD_BLOCK_RE = re.compile(rf"[@{_CJK}]|[\\[\\]]|https?://|[\\s　]")',
-         'HARD_BLOCK_RE = re.compile(rf"[@]|[\\[\\]]|https?://|[\\s　]")'),
+        ("★ 硬过滤又把中文拉黑（中文候选到不了 LLM ⇒ 行业词永远学不出来）",
+         'HARD_BLOCK_RE = re.compile(r"[@\\[\\]]|https?://|[\\s　]")',
+         'HARD_BLOCK_RE = re.compile(r"[@\\[\\]一-鿿]|https?://|[\\s　]")'),
         ("候选长度下界 2 → 1（单字候选进池，TS 明确挡掉）",
          '    if len(term) < 2 or len(term) > 8:', '    if len(term) < 1 or len(term) > 8:'),
         ("★ 裁剪只删词频表、不动三张副表（user_freq/first_seen/contexts 与词频表失同步）",
@@ -3533,11 +3586,19 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '        result = await jargon_mine.mine_jargon_for_group(group_id, cfg, None, store)',
          '        result = await jargon_mine.mine_jargon_for_group(group_id, cfg, None, None)'),
         ("★ 群 id 只取 peer_id（统计与挖掘落在两个桶里：词库永远差那一群）",
+         '        cfg = jargon_mine.resolve_jargon_cfg(acct.jargon)\n'
+         '        if not cfg.enabled:\n            return\n'
          '        group_id = msg.chatroom_id or msg.peer_id',
+         '        cfg = jargon_mine.resolve_jargon_cfg(acct.jargon)\n'
+         '        if not cfg.enabled:\n            return\n'
          '        group_id = msg.peer_id'),
         ("★ 配置不从账号文件取（开关/节流全走默认 ⇒ 账号文件里写的一律不算数）",
-         '        cfg = jargon_mine.resolve_jargon_cfg(acct.jargon)',
-         '        cfg = jargon_mine.resolve_jargon_cfg({})'),
+         '        cfg = jargon_mine.resolve_jargon_cfg(acct.jargon)\n'
+         '        if not cfg.enabled:\n            return\n'
+         '        group_id = msg.chatroom_id or msg.peer_id',
+         '        cfg = jargon_mine.resolve_jargon_cfg({})\n'
+         '        if not cfg.enabled:\n            return\n'
+         '        group_id = msg.chatroom_id or msg.peer_id'),
         ("★ 采集面不再排除系统通知（通知也进词频表，与 TS 第一个循环不符）",
          '        if msg.msg_type != MT_SYSTEM and content.strip():',
          '        if content.strip():'),
@@ -3545,8 +3606,9 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '        self._jargon_tasks.add(task)                     # 强引用，见 __init__',
          '        self._jargon_tasks.discard(task)                 # 强引用，见 __init__'),
         ("★ 不挂 done 回调（fire-and-forget 的异常只留一句「never retrieved」，没有群没有原因）",
-         '        task.add_done_callback(self._jargon_done)\n',
-         '        pass\n'),
+         '        self._jargon_tasks.add(task)                     # 强引用，见 __init__\n'
+         '        task.add_done_callback(self._jargon_done)',
+         '        self._jargon_tasks.add(task)'),
         # ⚠️ 锚点必须带上下一行的 ``self._jargon_mine_run(``：光写 ``task = asyncio.create_task(``
         #    在本文件里命中 3 次（好感度、WS 兜底、黑话各一处），脚本自曝"锚点命中 3 次"。
         ("★ 不用 create_task（换 ensure_future：形状判据与语义都变，取消/命名都没了）",
@@ -3838,15 +3900,16 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '                self._debounce[acct.id] = InboundDebouncer(\n',
          '                self._debounce["shared"] = InboundDebouncer(\n'),
         ("★★ flush 只看最后一条（触发语义被偷偷换成「批式」—— 本项明确不做的那一截）",
-         '        for msg in batch:\n',
-         '        for msg in batch[-1:]:\n'),
+         '        for msg in batch:\n            await self._dispatch_one(acct, msg, pipeline)\n',
+         '        for msg in batch[-1:]:\n            await self._dispatch_one(acct, msg, pipeline)\n'),
         ("★ 无处派发时不出声（安静地丢掉一整批 = 这条链上最坏的失效形态）",
          '            log.warning("[WPP:%s] 聚合的一批 %d 条无处派发（未连接/已停机），丢弃: %s",\n',
          '            log.debug("[WPP:%s] 聚合的一批 %d 条无处派发（未连接/已停机），丢弃: %s",\n'),
         ("★ 单条不保护（一条坏消息把整批带崩 —— 那几条本来能正常回的）",
          '        try:\n'
          '            await self._handle_one(acct, msg, pipeline)\n'
-         '        except Exception as exc:  # noqa: BLE001\n'
+         '        except Exception as exc:\n'
+         '            metrics.inc_handler_onerror()\n'
          '            log.warning("[WPP:%s] 处理消息 %s 失败: %s", acct.id, msg.msg_id, exc, exc_info=True)\n',
          '        await self._handle_one(acct, msg, pipeline)\n'),
         ("★ 停机不 flush 聚合器（缓冲区里那批随进程消失）",
@@ -3865,7 +3928,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
     # ------------------------------------------- W-Q2 被回复人身份（纯逻辑）
     # 老板 2026-10-03 报的「群里 @ 机器人时回复了，但不会 @ 被回复的人」那一项。
     # 这条链的失效形态是**统一**的：不报错、日志干净、消息照样发出去（只是少一个 @）。
-    "quote-ref": (ROOT / "plugin" / "inbound" / "quote_ref.py",
+    "quote-ref": (ROOT / "plugin" / "neutral" / "quote_ref.py",
                   "plugin/tests/test_quote_ref.py", [
         ("★★ 群 id 不是人 这道闸拆掉（`111@chatroom` 会被当成被回复人 ⇒ @ 一个群）",
          '    if not val or val.endswith(GROUP_SUFFIX):\n        return ""\n',
@@ -3918,13 +3981,17 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
     # 行为判据钉"取到的东西对" —— 两者都不能少（这一项的失效形态全都长得一样）。
     "quote-adapter": (ADAPTER, "plugin/tests/platform/test_quote_identity_wiring.py", [
         ("★★ 不回查 DB（身份恒空 ⇒ 整条 @ 链的输入又死回去，正是老板报的那个 bug）",
-         '            row = repo_messages.get_message_by_id_or_new_id(acct.id, msg_id=svrid,\n'
-         '                                                           new_msg_id=svrid)\n',
-         '            row = None\n'),
+         '            row = await asyncio.to_thread(\n'
+         '                repo_messages.get_message_by_id_or_new_id,\n'
+         '                acct.id, msg_id=svrid, new_msg_id=svrid)',
+         '            row = None'),
         ("★★ 只用 msg_id 查（锚点其实是服务端 new_msg_id 的那一半永远匹配不上）",
-         '            row = repo_messages.get_message_by_id_or_new_id(acct.id, msg_id=svrid,\n'
-         '                                                           new_msg_id=svrid)\n',
-         '            row = repo_messages.get_message_by_id_or_new_id(acct.id, msg_id=svrid)\n'),
+         '            row = await asyncio.to_thread(\n'
+         '                repo_messages.get_message_by_id_or_new_id,\n'
+         '                acct.id, msg_id=svrid, new_msg_id=svrid)',
+         '            row = await asyncio.to_thread(\n'
+         '                repo_messages.get_message_by_id_or_new_id,\n'
+         '                acct.id, msg_id=svrid)'),
         ("★ metadata 与 DB 身份的优先级反过来（参数优先是 TS 的 params.fromWxid 那一档）",
          "(metadata or {}).get(\"quote_from_wxid\") or ident.fromusr\n",
          "ident.fromusr or (metadata or {}).get(\"quote_from_wxid\")\n"),
@@ -3932,8 +3999,8 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '                                              db_name=ident.display_name)\n',
          '                                              db_name="")\n'),
         ("★★ 前缀不并进 XML（算了一路，发出去的还是没 @ 的那一句）",
-         '                reply_content=f"{prefix}{chunk}".strip(), svrid=svrid, fromusr=fromusr)\n',
-         '                reply_content=chunk, svrid=svrid, fromusr=fromusr)\n'),
+         '            quote_text = f"{prefix}{chunk}".strip()',
+         '            quote_text = chunk.strip()'),
         ("★ 记账记的是带前缀的文本（库里每条群回复都多一个 @名字，复读判据与引用回填跟着错位）",
          '        await self._persist_outbound(acct, peer_id, chunk, ids)\n',
          '        await self._persist_outbound(acct, peer_id, f"{prefix}{chunk}", ids)\n'),
@@ -3941,8 +4008,8 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '        if not outbound.is_group_peer(peer_id) or not fromusr:\n            return ""\n',
          '        if not fromusr:\n            return ""\n'),
         ("★ 联系人表那一级跳过（少一个来源 ⇒ 未同步通讯录的账号只剩 wxid 兜底）",
-         '            name = self._contact_name(acct.id, fromusr)\n',
-         '            pass  # 变异：跳过联系人表\n'),
+         '            name = await asyncio.to_thread(self._contact_name, acct.id, fromusr)',
+         '            name = ""'),
         ("★★ 厂商回包只认扁平键（多一层 ContactList ⇒ 永远取不到，旧写法就是这样）",
          '        if isinstance(contact_list, list) and contact_list:\n',
          '        if False and contact_list:\n'),
@@ -3957,7 +4024,7 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
     # 2026-10-03「两个机器人互相 @ 死循环」的止血闸。这一项的失效形态**全都是安静的**：
     # 没有回路时它本来就不吭声，所以"闸没生效"与"闸正常工作"在日志里长得一模一样
     # （只在真出回路那天才分得出来）⇒ 每个坏法都必须由用例**当场**钉住。
-    "rate-limit-core": (ROOT / "plugin" / "inbound" / "rate_limit.py",
+    "rate-limit-core": (ROOT / "plugin" / "neutral" / "rate_limit.py",
                         "plugin/tests/test_rate_limit.py", [
         ("★★ 上限判反（`>=` 改 `>`：要多刷一次才掐 —— 边界差一次，回路多活一轮）",
          "        if len(bucket.hits) >= self.max_triggers:\n",
@@ -4049,10 +4116,12 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          "        if not _limit.allowed:\n",
          '        if reason in ("group_mention", "group_solitaire") and not _limit.allowed:\n'),
         ("★ 下游又判一次（第二个判定点 ⇒ 判定语义按最后一处为准）",
-         "        await asyncio.to_thread(persist_inbound, acct, msg)\n",
+         "        if await asyncio.to_thread(persist_inbound, acct, msg):\n"
+         "            metrics.inc_messages_saved_db()",
          "        self._trigger_limiter.guard(acct.id, msg.chatroom_id or msg.peer_id,\n"
          "                                    msg.from_wxid, reason)\n"
-         "        await asyncio.to_thread(persist_inbound, acct, msg)\n"),
+         "        if await asyncio.to_thread(persist_inbound, acct, msg):\n"
+         "            metrics.inc_messages_saved_db()"),
     ]),
     # ------------------------------------------- OSS 上传（R2 补的第 1 套门，2026-10-03）
     # ★ 这一套是 R2 落的**补课**：``media_oss.py`` 是 W7-1 的产物，而它此前**没有任何变异套件**
@@ -4080,8 +4149,8 @@ SUITES: dict[str, tuple[Path, str, list[tuple[str, str, str]]]] = {
          '_UNSAFE_NAME_RE = re.compile(r"[^\\w.\\-]", re.ASCII)',
          '_UNSAFE_NAME_RE = re.compile(r"[^\\w.\\-]")'),
         ("★ 缓存永不命中（TTL 写反 ⇒ 媒体热路径每条消息都读一次盘）",
-         "    _CACHE[p] = (t + CRED_TTL_S, cfg)\n",
-         "    _CACHE[p] = (t - 1.0, cfg)\n"),
+         "    _CACHE[path] = (t + CRED_TTL_S, cfg)\n",
+         "    _CACHE[path] = (t - 1.0, cfg)\n"),
         ("★ 缺 endpoint 时不回默认值（TS 同款兜底拆掉 ⇒ 半份凭据静默变「没有凭据」）",
          '                    endpoint if isinstance(endpoint, str) and endpoint else DEFAULT_ENDPOINT)',
          '                    endpoint if isinstance(endpoint, str) and endpoint else "")'),

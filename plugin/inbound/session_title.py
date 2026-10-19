@@ -84,6 +84,37 @@ def clear_name_cache() -> None:
     _NAME_CACHE.clear()
 
 
+#: 本 profile 的 Hermes home（适配器 connect 时登记）。
+#: ``_open_session_db`` 的兜底**只允许**读这个目录 —— 见该函数的注释。
+_PROFILE_HOME: Path | None = None
+
+
+def set_profile_home(home: Any) -> None:
+    """登记当前 profile home（``None`` 清空）。
+
+    hook 本身拿不到可靠的 profile scope 时靠它兜底；传空值要把登记**清掉**，
+    否则同一进程里切换 profile 后还会去读上一个 profile 的库。
+    """
+    global _PROFILE_HOME
+    try:
+        _PROFILE_HOME = Path(str(home)).expanduser().resolve() if home else None
+    except (OSError, RuntimeError, ValueError):
+        _PROFILE_HOME = None
+
+
+def _hook_profile_home() -> Path | None:
+    """优先取 hook 调用时的 profile scope，其次取适配器登记的 home。"""
+    try:
+        from agent.secret_scope import current_secret_scope_home
+
+        current = current_secret_scope_home()
+        if current:
+            return Path(str(current)).expanduser().resolve()
+    except Exception:  # noqa: BLE001 —— 插件在 Hermes 进程外/旧版本
+        pass
+    return _PROFILE_HOME
+
+
 def _repo():
     from ..data import repo_messages
     return repo_messages
@@ -236,7 +267,18 @@ def write_title(db, session_id: str, base: str) -> str:
 # ------------------------------------------------------------------ Hermes hook
 
 def _open_session_db(session_id: str):
-    """找到包含该 session 的 Hermes state.db（多 profile 时逐个探）。"""
+    """打开**本 profile** 的 Hermes state.db（含该 session 时）。
+
+    2026-10-19 审阅修复：旧实现兜底扫 ``profiles/*/state.db`` —— 一个 profile 的
+    hook 会去打开**别的 profile** 的库（跨 profile 读会话属于越权，且多了一份
+    不该有的攻击面）。现在只试两处，且第二处必须是登记过的本 profile home：
+
+    1. ``SessionDB()`` —— hook 在 profile context 里被调时就是当前 profile；
+    2. ``<本 profile home>/state.db`` —— context 没绑上时的兜底。
+
+    没有登记 home 且默认库不含该 session ⇒ 直接返回 ``None``（宁可不写标题，
+    也不跨 profile 猜）。
+    """
     try:
         from hermes_state import SessionDB
     except Exception as exc:  # noqa: BLE001 —— 极早期/探针环境
@@ -249,7 +291,7 @@ def _open_session_db(session_id: str):
         except Exception:  # noqa: BLE001
             return False
 
-    # 当前 profile 的默认库（gateway 在 profile context 里调 hook）。
+    # ① 当前 profile 的默认库（gateway 在 profile context 里调 hook）。
     try:
         db = SessionDB()
         if _matches(db):
@@ -258,30 +300,22 @@ def _open_session_db(session_id: str):
     except Exception as exc:  # noqa: BLE001
         log.debug("[WPP] 默认 state.db 打开失败: %s", exc)
 
-    # 多路复用下 context 可能没绑到本 profile：扫 profiles/*/state.db。
-    try:
-        from hermes_constants import get_hermes_home
-        home = Path(get_hermes_home())
-        paths = [home / "state.db", *sorted((home / "profiles").glob("*/state.db"))]
-    except Exception:  # noqa: BLE001
+    # ② 仅本 profile 登记过的 home —— 不扫其他 profile。
+    home = _hook_profile_home()
+    if home is None:
+        log.debug("[WPP] 会话库兜底跳过：未登记 profile home（不跨 profile 猜）")
         return None
-    seen: set[Path] = set()
-    for path in paths:
-        try:
-            resolved = path.resolve()
-        except OSError:
-            continue
-        if resolved in seen or not resolved.exists():
-            continue
-        seen.add(resolved)
-        try:
-            probe = SessionDB(resolved, read_only=True)
-            found = _matches(probe)
-            probe.close()
-            if found:
-                return SessionDB(resolved)
-        except Exception:  # noqa: BLE001
-            continue
+    path = home / "state.db"
+    try:
+        if not path.exists():
+            return None
+        probe = SessionDB(path, read_only=True)
+        found = _matches(probe)
+        probe.close()
+        if found:
+            return SessionDB(path)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[WPP] 打开本 profile state.db 失败 %s: %s", path, exc)
     return None
 
 

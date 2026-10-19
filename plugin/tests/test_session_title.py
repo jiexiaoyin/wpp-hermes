@@ -18,6 +18,9 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
+from pathlib import Path
 
 import pytest
 
@@ -181,3 +184,65 @@ def test_a_db_failure_never_reaches_the_caller(monkeypatch):
 
     monkeypatch.setattr(T, "_open_session_db", boom)
     T.on_pre_llm_call(session_id="s1", platform="wechatpadpro", is_first_turn=True)
+
+
+# ============================================================ 跨 profile 隔离
+
+class _FakeSessionDB:
+    """只记录打开过的路径；``target`` 上的库才"包含"该 session。"""
+
+    opened: list[tuple[Path | None, bool]] = []
+    target: Path | None = Path("/__no_such_db__")
+
+    def __init__(self, path=None, read_only=False):
+        self.path = Path(path).resolve() if path is not None else None
+        type(self).opened.append((self.path, read_only))
+
+    def get_session(self, session_id):
+        return {"session_id": session_id} if self.path == self.target else None
+
+    def close(self):
+        return None
+
+
+def _install_fake_hermes_state(monkeypatch):
+    _FakeSessionDB.opened = []
+    monkeypatch.setitem(sys.modules, "hermes_state",
+                        types.SimpleNamespace(SessionDB=_FakeSessionDB))
+
+
+def test_open_session_db_only_probes_the_registered_profile_home(monkeypatch, tmp_path):
+    """兜底只许读本 profile 的 state.db —— 不再扫 ``profiles/*/state.db``。"""
+    home = tmp_path / "profiles" / "wpp-wechat"
+    home.mkdir(parents=True)
+    (home / "state.db").write_bytes(b"")
+    other = tmp_path / "profiles" / "other"
+    other.mkdir(parents=True)
+    (other / "state.db").write_bytes(b"")
+    _FakeSessionDB.target = (home / "state.db").resolve()
+    _install_fake_hermes_state(monkeypatch)
+    monkeypatch.setattr(T, "_hook_profile_home", lambda: home)
+
+    db = T._open_session_db("s1")
+    assert db is not None
+    assert all(path is None or path.parent == home.resolve()
+               for path, _ro in _FakeSessionDB.opened), \
+        "不许打开别的 profile 的 state.db"
+    assert (other / "state.db").resolve() not in [p for p, _ in _FakeSessionDB.opened]
+
+
+def test_open_session_db_does_not_guess_when_no_profile_home_is_registered(
+        monkeypatch, tmp_path):
+    _FakeSessionDB.target = Path("/__no_such_db__")
+    _install_fake_hermes_state(monkeypatch)
+    monkeypatch.setattr(T, "_hook_profile_home", lambda: None)
+    assert T._open_session_db("s1") is None
+    assert _FakeSessionDB.opened == [(None, False)], \
+        "只试默认库；没有登记 home 就停手"
+
+
+def test_set_profile_home_can_be_cleared():
+    T.set_profile_home("/tmp/example-profile")
+    assert T._PROFILE_HOME == Path("/tmp/example-profile").resolve()
+    T.set_profile_home(None)
+    assert T._PROFILE_HOME is None

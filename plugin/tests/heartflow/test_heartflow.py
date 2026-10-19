@@ -2128,7 +2128,15 @@ def test_adapter_preheat_is_wrapped_so_it_cannot_kill_the_sweep():
     防的是"以后有人往预热里加一句会抛的代码"。
     """
     fn = _fn_node(_adapter_tree(), "_start_sweeps")
-    line = _call_lines(fn, "preheat_account")[-1]
+    # ⚠️ 不能取 ``_call_lines(...)[-1]``：同一函数里还有**风格学习**的
+    #    ``style_mod.preheat_account``，它排在后面 —— 取最后一条等于在检查风格那条，
+    #    把心流这道网拆掉测试照样绿（2026-10-19 变异体实测存活）。
+    hf_pre = [n for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+              and n.func.attr == "preheat_account"
+              and ast.unparse(n.func.value) == "hf_runtime"]
+    assert hf_pre, "心流启动预热不见了"
+    line = max(n.lineno for n in hf_pre)
     guarded = [n for n in ast.walk(fn) if isinstance(n, ast.Try)
                and n.lineno < line <= (n.end_lineno or n.lineno)]
     assert guarded, "``preheat_account`` 必须被 try 包住"

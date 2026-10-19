@@ -6,7 +6,7 @@
 发给他；在 ``groupAllowFrom`` 里的群同理。公司员工都在「全员群」里，所以把该群
 成员同步进 ``allowFrom`` 就同时解决了「员工能私聊」和「机器人能发给员工」。
 
-## 两个键
+## 三个键
 
 * ``allowFrom`` —— **真正生效**的私聊白名单（收发共用）。
 * ``employeeAllowFrom`` —— 自动同步的台账。下一次同步时用它区分：
@@ -14,8 +14,13 @@
   - 手工加的人（``allowFrom - employeeAllowFrom``）**永不自动移除**；
   - 上次自动加、这次已退群的人才会被移除。
 
-  两个键在**同一次**原子写里落盘（:func:`account_store.write_account_keys`），
-  不会出现「名单变了台账没变」的中间态。
+* ``employeeDenyList`` —— **永不自动加入**的 wxid 列表。用于「老板手工把人移出
+  白名单后，30 天后又被全员群同步加回来」：把人写进这里，同步会跳过；若此人
+  已在自动台账里，本轮会一并移除。⚠️ 它只约束**自动同步**：手工写进 ``allowFrom``
+  的人仍然保留（手工意图优先），要彻底禁止请把人从两个名单里都拿掉。
+
+  ``allowFrom`` / ``employeeAllowFrom`` 在**同一次**原子写里落盘
+  （:func:`account_store.write_account_keys`），不会出现「名单变了台账没变」的中间态。
 
 ## 失败处理
 
@@ -26,9 +31,11 @@
 
 账号 JSON 里写::
 
-    "employeeGroupIds": ["44971342037@chatroom"]
+    "employeeGroupIds": ["44971342037@chatroom"],
+    "employeeDenyList": ["wxid_never_add"]
 
-可配多个群（并集）。没配 ⇒ 不跑同步，行为与之前完全一致。
+可配多个群（并集）。``employeeDenyList`` 可选（字符串或列表）。没配群 ⇒ 不跑同步，
+行为与之前完全一致。
 """
 
 from __future__ import annotations
@@ -96,19 +103,24 @@ def plan_sync(
     current_allow: Iterable[str],
     previous_auto: Iterable[str],
     members: Iterable[str],
+    deny: Iterable[str] = (),
 ) -> tuple[list[str], list[str]]:
     """算出新的 ``(allowFrom, employeeAllowFrom)``。
 
     * 手工项 = 当前 ``allowFrom`` − 上次自动项（保序）；
-    * 新自动项 = 本次群成员 − 手工项（避免把手工项"吞"进自动台账，
-      否则该员工退群时会把老板手工加的人一起删掉）；
+    * 新自动项 = 本次群成员 − 手工项 − ``deny``（避免把手工项"吞"进自动台账，
+      也避免被手工移除的人下一轮又被加回来）；
     * ``allowFrom`` = 手工项 + 新自动项。
+
+    ``deny`` 只约束自动同步：同时出现在手工项里的人仍然保留（手工意图优先）。
     """
     current = list(dict.fromkeys(_clean(current_allow)))
     prev = set(_clean(previous_auto))
     manual = [x for x in current if x not in prev]
     manual_set = set(manual)
-    new_auto = [x for x in dict.fromkeys(_clean(members)) if x not in manual_set]
+    denied = set(_clean(deny))
+    new_auto = [x for x in dict.fromkeys(_clean(members))
+                if x not in manual_set and x not in denied]
     return [*manual, *new_auto], new_auto
 
 
@@ -121,18 +133,29 @@ def _clean(items: Iterable[str]) -> list[str]:
     return out
 
 
-def group_ids_from_raw(raw: Mapping[str, Any]) -> list[str]:
-    """读 ``employeeGroupIds``（复数优先，兼容单数 ``employeeGroupId``）。"""
-    out: list[str] = []
-    vals = raw.get("employeeGroupIds")
+def _string_list(raw: Mapping[str, Any], key: str) -> list[str]:
+    """读字符串或字符串列表（去空、去重、保序）。"""
+    vals = raw.get(key)
     if isinstance(vals, str):
         vals = [vals]
-    if isinstance(vals, (list, tuple)):
-        out.extend(str(x).strip() for x in vals if str(x).strip())
+    if not isinstance(vals, (list, tuple)):
+        return []
+    return list(dict.fromkeys(
+        str(x).strip() for x in vals if str(x).strip()))
+
+
+def group_ids_from_raw(raw: Mapping[str, Any]) -> list[str]:
+    """读 ``employeeGroupIds``（复数优先，兼容单数 ``employeeGroupId``）。"""
+    out = _string_list(raw, "employeeGroupIds")
     single = str(raw.get("employeeGroupId") or "").strip()
     if single and single not in out:
         out.append(single)
     return list(dict.fromkeys(out))
+
+
+def deny_list_from_raw(raw: Mapping[str, Any]) -> list[str]:
+    """读 ``employeeDenyList``（字符串或列表）—— 永不自动加入的 wxid。"""
+    return _string_list(raw, "employeeDenyList")
 
 
 async def sync_once(
@@ -141,9 +164,11 @@ async def sync_once(
     group_ids: Iterable[str] | None = None,
     *,
     adapter: Any = None,
+    deny_list: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """拉取全员群成员并写回 ``allowFrom`` / ``employeeAllowFrom``。
 
+    ``deny_list`` 不传时现读账号配置 ``employeeDenyList``。
     返回 ``{ok, groups, members, added, removed, changed, error}``。
     **任一 group 失败 ⇒ 不写**（见模块 docstring）。
     """
@@ -152,6 +177,8 @@ async def sync_once(
     raw = account_store.read_account_json(account_id)
     groups = [str(g).strip() for g in (group_ids if group_ids is not None
                                        else group_ids_from_raw(raw)) if str(g).strip()]
+    deny = (list(deny_list) if deny_list is not None
+            else deny_list_from_raw(raw))
     if not groups:
         return {"ok": False, "error": "未配置 employeeGroupIds", "groups": [],
                 "members": 0, "added": 0, "removed": 0, "changed": False}
@@ -185,7 +212,7 @@ async def sync_once(
 
     current = [str(x) for x in (raw.get("allowFrom") or [])]
     previous_auto = [str(x) for x in (raw.get("employeeAllowFrom") or [])]
-    new_allow, new_auto = plan_sync(current, previous_auto, found)
+    new_allow, new_auto = plan_sync(current, previous_auto, found, deny)
     changed = new_allow != current or new_auto != previous_auto
     added = [x for x in new_allow if x not in current]
     removed = [x for x in previous_auto if x not in new_allow]

@@ -109,6 +109,39 @@ def test_plan_sync_first_run_treats_every_existing_entry_as_manual():
     assert auto == ["staff"]
 
 
+def test_plan_sync_deny_list_blocks_re_adding_and_drops_stale_auto_entries():
+    """手工移除的人写进 employeeDenyList ⇒ 下一轮不许再被自动加回来。"""
+    allow, auto = employee_sync.plan_sync(
+        current_allow=["boss", "a"],
+        previous_auto=["a", "gone"],
+        members=["a", "gone", "staff"],
+        deny=["gone"],
+    )
+    assert allow == ["boss", "a", "staff"]
+    assert auto == ["a", "staff"]
+
+
+def test_plan_sync_deny_list_does_not_override_a_manual_entry():
+    """deny 只约束自动同步 —— 老板手工加进来的人仍然保留（手工意图优先）。"""
+    allow, auto = employee_sync.plan_sync(
+        current_allow=["boss", "manual_denied"],
+        previous_auto=[],
+        members=["manual_denied", "staff"],
+        deny=["manual_denied"],
+    )
+    assert allow == ["boss", "manual_denied", "staff"]
+    assert auto == ["staff"]
+
+
+def test_deny_list_accepts_string_or_list():
+    assert employee_sync.deny_list_from_raw(
+        {"employeeDenyList": "wxid_one"}) == ["wxid_one"]
+    assert employee_sync.deny_list_from_raw(
+        {"employeeDenyList": ["wxid_one", " wxid_two ", ""]}) == [
+            "wxid_one", "wxid_two"]
+    assert employee_sync.deny_list_from_raw({}) == []
+
+
 # ============================================================ sync_once
 
 PAYLOAD = {"Code": 0, "Data": {"NewChatroomData": {"ChatRoomMember": [
@@ -173,6 +206,25 @@ async def test_sync_once_writes_both_keys_atomically_and_reloads(monkeypatch):
         "employeeAllowFrom": ["wxid_staff"],
     })]
     assert adapter.reloaded == ["acct"]
+
+
+@_sync
+async def test_sync_once_reads_the_account_deny_list(monkeypatch):
+    """配置里的 employeeDenyList 真的进了 plan_sync（而不是只解析没人消费）。"""
+    raw = {"selfWxid": "wxid_bot", "allowFrom": ["boss"],
+           "employeeAllowFrom": ["wxid_staff"],
+           "employeeDenyList": ["wxid_staff"]}
+    writes = _patch_account_store(monkeypatch, raw)
+    res = await employee_sync.sync_once(
+        _FakeClient(), "acct", ["44971342037@chatroom"],
+        adapter=_FakeAdapter(raw))
+
+    assert res["ok"] is True
+    assert res["removed"] == 1
+    assert writes == [("acct", {
+        "allowFrom": ["boss", "jsnjzhou"],
+        "employeeAllowFrom": ["jsnjzhou"],
+    })]
 
 
 @_sync
@@ -243,3 +295,56 @@ def test_employee_sync_interval_is_30_days():
     启动时仍会立即跑第一轮；要立刻刷新用 ``/user sync``。
     """
     assert employee_sync.SYNC_INTERVAL_SEC == 30 * 24 * 3600
+
+
+# ============================================================ 按账号隔离（出站）
+
+class _Client:
+    def __init__(self):
+        self.send_allowlist = ()
+
+
+def _bare_adapter(accounts):
+    from plugin.platform.adapter import WppAdapter
+
+    ad = WppAdapter.__new__(WppAdapter)
+    for aid, acct in accounts.items():
+        acct.id = aid
+    ad._accounts = dict(accounts)
+    ad._clients = {aid: _Client() for aid in accounts}
+    ad._profile_home = None
+    ad._send_allowlist = ()
+    ad._send_allowlists = {}
+    return ad
+
+
+def test_refresh_outbound_allowlist_injects_each_accounts_own_list(monkeypatch, stubbed):
+    """A 账号的 allowFrom 不能替 B 账号开门（以前全局并集注入每个 client）。"""
+    accounts = {"a": _Acct(allow=("a1",)), "b": _Acct(allow=("b1",))}
+    ad = _bare_adapter(accounts)
+    monkeypatch.setattr(
+        netguard, "unified_allowlist",
+        lambda **kw: tuple(f"u:{a.id}" for a in kw["accounts"]))
+
+    union = ad.refresh_outbound_allowlist()
+
+    assert ad._send_allowlists == {"a": ("u:a",), "b": ("u:b",)}
+    assert ad._clients["a"].send_allowlist == ("u:a",)
+    assert ad._clients["b"].send_allowlist == ("u:b",)
+    assert union == ("u:a", "u:b"), "返回值保留并集（日志/兼容调用方）"
+
+
+def test_allowlist_for_never_falls_back_to_the_global_union(monkeypatch, stubbed):
+    """缓存缺失时按本账号现算；拿全局并集兜底等于把隔离又拆了。"""
+    accounts = {"a": _Acct(allow=("a1",)), "b": _Acct(allow=("b1",))}
+    ad = _bare_adapter(accounts)
+    ad._send_allowlist = ("a1", "b1")
+    seen = []
+
+    def _fake(**kw):
+        seen.extend(a.id for a in kw["accounts"])
+        return tuple(f"u:{a.id}" for a in kw["accounts"])
+
+    monkeypatch.setattr(netguard, "unified_allowlist", _fake)
+    assert ad._allowlist_for(accounts["b"]) == ("u:b",)
+    assert seen == ["b"], "只允许按该账号现算"

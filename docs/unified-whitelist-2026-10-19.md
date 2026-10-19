@@ -28,9 +28,13 @@ allowFrom = 手工名单（/user add|del）
 账号 JSON 配置：
 
 ```json
-"employeeGroupIds": ["44971342037@chatroom"]
+"employeeGroupIds": ["44971342037@chatroom"],
+"employeeDenyList": ["wxid_never_add"]
 ```
 
+- `employeeDenyList`（可选，字符串或列表）：**永不自动加入**的 wxid。用于手工把人
+  移出白名单后防止 30 天后又被同步加回来；若此人已在 `employeeAllowFrom` 台账里，
+  下一轮会一并移除。它只约束自动同步——手工写进 `allowFrom` 的人仍保留。
 - 生产当前：`44971342037@chatroom` =「✊🏻益融数码全员群」，36 人（含机器人）。
 - 拉取端点：`/Group/GetChatRoomMemberDetail`（只读）。
 - 排除：机器人自己（`selfWxid`）、群 id、公众号 `gh_*`、系统号。

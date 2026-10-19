@@ -283,7 +283,11 @@ CREATE TABLE IF NOT EXISTS wpp_hf_layer_stat (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 心流图片配文 (v1.16.0 2026-10-16 新增: 群画像样本"看得见图")
--- PK=url_hash (sha1(OSS URL) 全局唯一 —— 同一张图跨群只配一次)。
+-- PK=url_hash。⚠️ 2026-10-19 审阅决策：**不改主键**。跨账号隔离改由
+-- `platform/inbound/heartflow/caption.py::hf_caption_hash` 把 account_id 编进 hash
+-- （长度前缀，避免拼接歧义）实现；旧行（纯 URL hash）读取时按 legacy hash 回退。
+-- 理由：改 PK 需要在线 ALTER + 一次性回填，且会与 TS v1.16.0 的表结构分叉；
+-- 当前方案零迁移、跨账号互不可见，同时保留历史配文。
 -- caption NULL 且 fail_count<上限 = 可重试; 从不删行 (止损靠 fail_count, 重启/新 sweep 幂等)。
 -- ⚠️ 逐字搬自 TS `src/storage/db/mysql.ts` v1.16.0 (TS 的 db/schema.sql 尚未同步)。
 CREATE TABLE IF NOT EXISTS wpp_hf_image_caption (

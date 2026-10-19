@@ -350,7 +350,11 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         #: 出站白名单**在 connect 时捕获**（那时仍在 profile scope 内）。发送任务
         #: （cron / 后台协程）稍后可能已经掉出 scope；若那时重新读 ambient env，
         #: 会回落到根 ``.env`` —— 2026-10-19 07:36 私聊回复被拒两次的根因。
+        #: 这是所有账号的**并集**（日志/兼容兜底）；真正注入各 client 的是下面那份。
         self._send_allowlist: tuple[str, ...] = ()
+        #: **按账号**捕获的出站白名单：A 账号的 allowFrom 不能替 B 账号开门
+        #: （2026-10-19 审阅修复；之前全局并集，多账号下互相放行）。
+        self._send_allowlists: dict[str, tuple[str, ...]] = {}
 
     # ================================================================== 属性
 
@@ -457,21 +461,46 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                  len(acct.group_allow_from), len(acct.blacklist_groups))
         return True
 
+    def _allowlist_for(self, acct: accounts_mod.Account) -> tuple[str, ...]:
+        """取某账号的出站白名单（未捕获时按**该账号**现算，绝不用全局并集兜底）。"""
+        cached = getattr(self, "_send_allowlists", {}).get(acct.id)
+        if cached is not None:
+            return cached
+        return outbound.netguard.unified_allowlist(
+            profile_home=getattr(self, "_profile_home", None), accounts=(acct,))
+
     def refresh_outbound_allowlist(self) -> tuple[str, ...]:
-        """重算统一白名单并推给所有已连接 client。
+        """重算**每账号**统一白名单并推给对应 client。
 
         只算**已连接**账号（``_clients`` 里的）：未连接的账号不该替一个不存在的
         连接开门。没有任何已连接账号时退回全部账号（单测/工具态）。
+
+        2026-10-19 审阅修复：以前这里算的是所有账号的并集再注入每个 client ⇒
+        A 账号的 allowFrom 能替 B 账号放行（多账号下越权）。现在按账号各算一份；
+        返回值仍是并集（日志/兼容调用方）。
         """
         clients = getattr(self, "_clients", {}) or {}
         accounts = getattr(self, "_accounts", {}) or {}
         live = [a for aid, a in accounts.items() if aid in clients]
-        self._send_allowlist = outbound.netguard.unified_allowlist(
-            profile_home=getattr(self, "_profile_home", None),
-            accounts=live or list(accounts.values()))
-        for client in clients.values():
-            client.send_allowlist = self._send_allowlist
-        log.info("[WPP] 统一白名单已刷新: %d 条", len(self._send_allowlist))
+        targets = live or list(accounts.values())
+        per_account = {
+            a.id: outbound.netguard.unified_allowlist(
+                profile_home=getattr(self, "_profile_home", None), accounts=(a,))
+            for a in targets
+        }
+        self._send_allowlists = per_account
+        union: list[str] = []
+        for entries in per_account.values():
+            for item in entries:
+                if item not in union:
+                    union.append(item)
+        self._send_allowlist = tuple(union)
+        for aid, client in clients.items():
+            client.send_allowlist = per_account.get(aid, ())
+        log.info("[WPP] 统一白名单已刷新: %d 个账号，并集 %d 条%s",
+                 len(per_account), len(self._send_allowlist),
+                 "（" + ", ".join(f"{aid}={len(v)}" for aid, v in per_account.items())
+                 + "）" if per_account else "")
         return self._send_allowlist
 
     def account(self, account_id: str = "") -> accounts_mod.Account:
@@ -603,6 +632,12 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                 except Exception:  # noqa: BLE001
                     profile_home = None
             self._profile_home = str(profile_home) if profile_home else None
+            # 会话标题 hook 的兜底只许读本 profile 的 state.db（跨 profile 读库 = 越权）。
+            try:
+                from ..inbound import session_title as _session_titles
+                _session_titles.set_profile_home(self._profile_home)
+            except Exception as exc:  # noqa: BLE001 —— 标题只是展示层
+                log.debug("[WPP] 登记 profile home（会话标题）失败: %s", exc)
 
             # 红线先炸，再谈"跳过"。两者都由 ``refusal_reason`` 返回字符串，但后果
             # 差着量级：未启用 / 无凭据是"这个账号先不连"（正常态，跳过就好），
@@ -622,10 +657,22 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             #   入站那份（allowFrom / groupAllowFrom / adminUsers）∪ env 额外项。
             #   只算**可连接**的账号：被红线/未启用拒掉的账号不该替一个不存在的
             #   连接开门（同 access_policy.reportable 的口径）。
-            self._send_allowlist = outbound.netguard.unified_allowlist(
-                profile_home=self._profile_home, accounts=connectable)
-            log.info("[WPP] 统一白名单已绑定: %d 条 (profile=%s)",
-                     len(self._send_allowlist), self._profile_home or "-")
+            #   ⚠️ **按账号各算一份**：多账号下并集会互相放行（审阅修复）。
+            self._send_allowlists = {
+                a.id: outbound.netguard.unified_allowlist(
+                    profile_home=self._profile_home, accounts=(a,))
+                for a in connectable
+            }
+            union: list[str] = []
+            for entries in self._send_allowlists.values():
+                for item in entries:
+                    if item not in union:
+                        union.append(item)
+            self._send_allowlist = tuple(union)
+            log.info("[WPP] 统一白名单已绑定: %s 条 (profile=%s)",
+                     ", ".join(f"{aid}={len(v)}"
+                               for aid, v in self._send_allowlists.items()) or "0",
+                     self._profile_home or "-")
 
             if not connectable:
                 refused = {a.id: accounts_mod.refusal_reason(a) for a in self._accounts.values()}
@@ -649,7 +696,7 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                 self._clients[acct.id] = WppClient(
                     base_url=acct.api_base_url, authcode=acct.authcode,
                     account_id=acct.id, timeout=30,
-                    send_allowlist=self._send_allowlist,
+                    send_allowlist=self._allowlist_for(acct),
                 )
                 self._pipelines[acct.id] = InboundPipeline(acct.id, self._pipeline_cfg(acct))
                 # W7-6：每账号一个到达层聚合器。窗口来自账号文件 ``debounceMs``
@@ -960,7 +1007,7 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                 try:
                     result = await client.setup_webhook(
                         acct.webhook_public_url, acct.webhook_path,
-                        acct.webhook_path_token,
+                        acct.webhook_path_token, secret=acct.webhook_secret,
                     )
                 except Exception as exc:  # noqa: BLE001 —— 绝不让注册任务把适配器带崩
                     result = {"set_error": str(exc), "business_error": str(exc)}
@@ -1050,7 +1097,8 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             self._webhook_accounts.add(acct.id)
             if not acct.webhook_secret:
                 log.warning("[WPP:%s] 未配 webhookSecret —— 仅靠路径 token 鉴权；"
-                            "nginx 反代后公网可达，建议补上", acct.id)
+                            "nginx 反代后公网可达，建议补上（支持 vendor v2 HMAC）",
+                            acct.id)
         if registered == 0:
             log.error("[WPP] 没有账号能注册 webhook 路由 ⇒ 不起监听（见上面各账号的原因）")
             self._webhook = None
@@ -2190,10 +2238,10 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                 return SendResult(success=False, error=f"账号 {acct.id} 未连接",
                                   error_kind="transient")
 
-            # 出站白名单闸（未设 env 时是 no-op）；用 connect 时捕获的那份，
-            # 不在发送任务里重新读 ambient env（见 __init__ 的 _send_allowlist）。
+            # 出站白名单闸（未设 env 时是 no-op）；用 connect 时捕获的**本账号**那份，
+            # 不在发送任务里重新读 ambient env（见 __init__ 的 _send_allowlists）。
             outbound.assert_outbound_allowed(peer_id, acct.id,
-                                             allowed=self._send_allowlist)
+                                             allowed=self._allowlist_for(acct))
 
             # 心流交付缝（**前置**）：只有"刚判定通过、正在等这一条回复"的群才有登记，
             # 其余（含所有私聊、所有非心流群消息）是一次内存查表后返回 None。
@@ -2933,7 +2981,7 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
         # adminUsers ∪ env 额外项。不能只读 env，否则 standalone 又会退化成
         # 「周州能私聊、cron 却发不出去」。
         send_allowlist = outbound.netguard.unified_allowlist(
-            profile_home=profile_home, accounts=all_accounts.values())
+            profile_home=profile_home, accounts=(acct,))
         outbound.assert_outbound_allowed(peer_id, acct.id, allowed=send_allowlist)
         async with WppClient(base_url=acct.api_base_url, authcode=acct.authcode,
                              account_id=acct.id, timeout=30,

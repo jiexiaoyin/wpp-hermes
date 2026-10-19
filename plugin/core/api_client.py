@@ -985,20 +985,27 @@ class WppClient:
 
     # ============================================================== webhook
 
-    async def set_webhook(self, url: str) -> dict:
+    async def set_webhook(self, url: str, secret: str = "") -> dict:
         """``/Webhook/Set`` —— 只设这一条**不够**（vendor 只推空 Data 的 sync_message）。
 
         ⚠️ 字段必须与 TS ``webhook.ts::set`` 一致：漏 ``enabled:true`` 时 Go bool
         零值 = false，webhook **设了等于没设**（v1.1.17 P0-E 事故）。
+
+        ``secret`` 非空时一并下发：wechatpadpromax 会对每条回调加
+        ``X-Webhook-Signature`` v2 HMAC（见 ``platform.inbound_webhook``）。
+        空串不下发该字段（避免把 vendor 已有的 secret 清掉）。
         """
-        return await self.call("/Webhook/Set", {
+        body: dict[str, Any] = {
             "url": url,
             "authcode": self.authcode or "",
             "enabled": True,
             "retryCount": 3,
             "timeout": 10,
             "messageTypes": ["all"],
-        })
+        }
+        if secret:
+            body["secret"] = secret
+        return await self.call("/Webhook/Set", body)
 
     async def set_business_webhook(self, sync_url: str, logout_url: str) -> dict:
         return await self.call("/Webhook/Business/Set",
@@ -1008,19 +1015,23 @@ class WppClient:
         """``/Msg/StartAutoSync`` —— 启动完整消息推送到 business webhook。"""
         return await self.call("/Msg/StartAutoSync", {"TargetURL": target_url})
 
-    async def setup_webhook(self, public_url: str, webhook_path: str, token: str) -> dict:
+    async def setup_webhook(self, public_url: str, webhook_path: str, token: str,
+                            secret: str = "") -> dict:
         """三段式 webhook 设置（**必须三段都做**，见 ``derive_business_url`` 注释）。
 
         ⚠️ 2026-10-02（C2）：``/Webhook/Set`` 这里过去推的是**不带 token** 的
         ``webhook_path``，而 business 那条走的是带 token 的路径 —— 同一个账号两条
         回调地址形状不一致，且前者正是"可猜的那个"。现在两条都走
         :func:`core.webhook_paths.derive_webhook_paths`（适配器监听侧同源）。
+
+        ``secret`` 透传给 ``/Webhook/Set``，vendor 侧据此对回调做 v2 HMAC 签名。
         """
         paths = derive_webhook_paths(webhook_path, token)
         sync_url, logout_url = derive_business_url(public_url, webhook_path, token)
         out = {"sync_url": sync_url, "logout_url": logout_url, "webhook_path": paths.webhook}
         try:
-            out["set"] = await self.set_webhook(f"{public_url.rstrip('/')}{paths.webhook}")
+            out["set"] = await self.set_webhook(
+                f"{public_url.rstrip('/')}{paths.webhook}", secret=secret)
         except Exception as exc:  # noqa: BLE001
             from .redact import redact_webhook_path_any
 

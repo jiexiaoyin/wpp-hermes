@@ -21,7 +21,20 @@ vendor 推 ``MessageType=sync_message`` 通知（**不带消息体**）⇒ 收�
 - **路径 token**（``webhookPathToken``）：路由**本身就是**带 token 的路径，
   注册侧由 :func:`core.webhook_paths.derive_webhook_paths` 派生（与推给 vendor 的
   URL **同源**），请求侧再核一遍"token 真的在路径里"；
-- **``webhookSecret``**：配了就强制比对（``hmac.compare_digest`` 防时序侧信道）。
+- **``webhookSecret``**：配了就强制校验 —— 先认明文 secret 头/query（兼容老
+  vendor），再认 wechatpadpromax 的 **v2 HMAC**（2026-10-19 起，见下）。
+
+### ③ v2 HMAC（wechatpadpromax，2026-10-19 实抓）
+
+vendor 配 ``secret`` 后**不发明文 secret 头**，而是通过
+``X-Webhook-Signature`` / ``X-Webhook-Timestamp-Ms`` / ``X-Webhook-Delivery`` /
+``X-Webhook-Signature-Version: v2`` 发送签名：
+
+    hex(HMAC-SHA256(secret, f"{TimestampMs}.{DeliveryID}." + raw_body))
+
+所以签名校验必须在**读完原始请求体之后**做（且要用原始字节，不能用解析后的
+JSON）。同时校验时间戳偏差（默认 ±300s，``WPP_WEBHOOK_MAX_SKEW_SEC`` 可调，
+0 = 关闭）防重放。旧版 vendor 的明文 secret 头仍然接受。
 
 ⚠️ **2026-10-02（C2）改 fail-closed**：旧实现在这里写的是
 ``if not secret: return True`` —— **未配 secret 即放行**，而当时路径里**根本没带
@@ -33,11 +46,13 @@ token**（``webhookPathToken`` 这个字段谁都没消费）⇒ 等于把"可�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -62,14 +77,64 @@ _CHUNK_LINE_LIMIT = 64 * 1024
 class _BodyTooLarge(Exception):
     """chunked 读入超限（不能事先拿 Content-Length 判，只能边读边数）。"""
 
-#: 校验 secret 时的候选头（不同 vendor 版本用的名字不一样，全试）
+#: 明文 secret 的候选头（不同 vendor 版本用的名字不一样，全试）。
 #:
-#: ⚠️ **wechatpadpromax（本项目在用的 vendor）不在此列**：它配 secret 后发的是
+#: ⚠️ **wechatpadpromax（本项目在用的 vendor）不发明文 secret 头**：它配 secret 后发的是
 #: ``X-Webhook-Signature``（64 位 hex）+ ``X-Webhook-Timestamp`` / ``-Timestamp-Ms``
-#: / ``-Delivery`` / ``-Signature-Version: v2`` 的 **HMAC 签名**，没有发明文 secret
-#: 头（2026-10-19 实抓确认）。所以给这个 vendor 配 ``webhookSecret`` 会让**每一条**
-#: 入站回调 403 —— 配之前先确认签名算法，否则宁可只靠路径 token。
+#: / ``-Delivery`` / ``-Signature-Version: v2`` 的 **v2 HMAC 签名**（2026-10-19 实抓，
+#: 见 :func:`_verify_v2_signature`）。明文头保留给别的 vendor 版本。
 _SECRET_HEADERS = ("X-Webhook-Secret", "X-WPP-Secret", "X-Access-Token")
+
+#: 允许的签名时间戳偏差（秒）。默认 300s：vendor ``retryCount=3`` 的重试窗口远小于它；
+#: 设 0 关闭时间戳检查（只在排查时钟问题时用）。
+_DEFAULT_MAX_SKEW_S = 300
+
+
+def _max_skew_seconds() -> int:
+    """读 ``WPP_WEBHOOK_MAX_SKEW_SEC``（``0`` = 关闭时间戳检查，非法值回落默认）。"""
+    raw = os.environ.get("WPP_WEBHOOK_MAX_SKEW_SEC", "").strip()
+    if not raw:
+        try:
+            from ..core.env_compat import gate_env
+
+            raw = gate_env("WPP_WEBHOOK_MAX_SKEW_SEC").strip()
+        except Exception:  # noqa: BLE001 —— 取不到配置就走默认
+            raw = ""
+    try:
+        return max(0, int(raw)) if raw else _DEFAULT_MAX_SKEW_S
+    except ValueError:
+        return _DEFAULT_MAX_SKEW_S
+
+
+def _verify_v2_signature(headers: Any, raw_body: bytes, secret: str) -> bool:
+    """校验 wechatpadpromax 的 v2 回调签名。
+
+    算法（vendor ``/Webhook/Set`` 文档 + 二进制
+    ``wechatdll/srv/webhook.ComputePayloadSignatureV2`` 一致）::
+
+        sig = hex(HMAC-SHA256(secret, f"{TimestampMs}.{DeliveryID}." + raw_body))
+
+    要求 ``X-Webhook-Signature-Version`` 为空或 ``v2``（为将来的 v3 留出拒绝路径）；
+    时间戳必须是毫秒且落在 ±``WPP_WEBHOOK_MAX_SKEW_SEC`` 内。
+    """
+    got = str(headers.get("X-Webhook-Signature") or "").strip()
+    ts_raw = str(headers.get("X-Webhook-Timestamp-Ms") or "").strip()
+    delivery = str(headers.get("X-Webhook-Delivery") or "").strip()
+    version = str(headers.get("X-Webhook-Signature-Version") or "").strip().lower()
+    if not got or not ts_raw or not delivery:
+        return False
+    if version and version != "v2":
+        return False
+    try:
+        ts_ms = int(ts_raw)
+    except ValueError:
+        return False
+    skew = _max_skew_seconds()
+    if skew and abs(int(time.time() * 1000) - ts_ms) > skew * 1000:
+        return False
+    base = f"{ts_raw}.{delivery}.".encode("utf-8") + raw_body
+    expect = hmac.new(secret.encode("utf-8"), base, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(got.lower(), expect)
 
 #: 诊断开关：``WPP_WEBHOOK_DEBUG=1`` 时把回调的鉴权头原样打出来。
 #: **只在排查时开**（签名值会进日志），默认关。
@@ -233,7 +298,8 @@ class WppWebhookServer:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _authorized(self, path: str, secret: str, path_token: str) -> bool:
+            def _authorized(self, path: str, secret: str, path_token: str,
+                            raw_body: bytes = b"") -> bool:
                 """凭据判定：**路径 token**（配了就必须真在路径里）+ **secret**（配了就必须匹配）。
 
                 fail-closed（C2，2026-10-02）：两样**都没有** ⇒ 直接 ``False``。
@@ -241,6 +307,9 @@ class WppWebhookServer:
                 路径里不带 token ⇒ 回调口完全裸奔。路由注册侧已经拒绝注册这种账号
                 （见 ``adapter._start_webhook``），这里是**第二道网**：即便有人手工
                 ``add_path``，也开不出一个无凭据的回调口。
+
+                secret 支持两种口径（2026-10-19）：老 vendor 的明文 secret 头/query；
+                wechatpadpromax 的 v2 HMAC（``raw_body`` 必须是原始请求体字节）。
                 """
                 if not secret and not path_token:
                     return False
@@ -258,7 +327,7 @@ class WppWebhookServer:
                     key, _, val = pair.partition("=")
                     if key in ("secret", "token") and val and hmac.compare_digest(val, secret):
                         return True
-                return False
+                return _verify_v2_signature(self.headers, raw_body, secret)
 
             # ---------------------------------------------------------- 处理
 
@@ -320,9 +389,16 @@ class WppWebhookServer:
                 on_message, secret, path_token = route
                 if _debug_headers_enabled():
                     _dump_headers(self)
-                if not self._authorized(path, secret, path_token):
+                # 便宜的凭据先挡在读体之前（v2 签名必须等原始体读完才能校验）。
+                if not secret and not path_token:
                     metrics.inc_webhook_rejected_secret()
-                    log.warning("[WPP webhook] 鉴权失败 path=%s from=%s",
+                    log.warning("[WPP webhook] 路由无任何凭据 path=%s from=%s",
+                                redact(path), _client_ip(self))
+                    self._reply(403, b'{"error":"forbidden"}')
+                    return
+                if path_token and not token_is_in_path(path, path_token):
+                    metrics.inc_webhook_rejected_secret()
+                    log.warning("[WPP webhook] 路径 token 不匹配 path=%s from=%s",
                                 redact(path), _client_ip(self))
                     self._reply(403, b'{"error":"forbidden"}')
                     return
@@ -350,9 +426,11 @@ class WppWebhookServer:
                     pass
                 try:
                     if chunked:
-                        body = self._read_chunked()
+                        raw_body = self._read_chunked()
                     else:
-                        body = self.rfile.read(length) if length else b"{}"
+                        raw_body = self.rfile.read(length) if length else b""
+                    # 解析用的体：空体按 ``{}`` 处理（保持旧行为）；签名用 raw_body。
+                    body = raw_body or b"{}"
                 except _BodyTooLarge:
                     metrics.inc_webhook_rejected_body_size()
                     self._reply(413, b'{"error":"payload too large"}')
@@ -370,6 +448,15 @@ class WppWebhookServer:
                                 redact(path), _client_ip(self), exc)
                     self._reply(400, b'{"error":"bad body"}')
                     return
+                # ★ secret 校验必须在**读完原始体之后**：v2 签名覆盖 raw body。
+                #   老 vendor 的明文 secret 头/query 在这里同样走一遍（无体也能过）。
+                if not self._authorized(path, secret, path_token, raw_body):
+                    metrics.inc_webhook_rejected_secret()
+                    log.warning("[WPP webhook] 鉴权失败 path=%s from=%s",
+                                redact(path), _client_ip(self))
+                    self._reply(403, b'{"error":"forbidden"}')
+                    return
+
                 # TS ``webhook-receiver.ts:191-200``：解析失败 **400 拒绝**（不是当空对象
                 # 继续调度）—— 否则"vendor 发了畸形负载"在本地看起来与一次正常通知完全
                 # 一样，只有计数能看出来。

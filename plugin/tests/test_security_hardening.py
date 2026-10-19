@@ -524,6 +524,14 @@ def test_set_webhook_sends_the_ts_body():
     })
 
 
+def test_set_webhook_includes_secret_only_when_configured():
+    """vendor 用 ``secret`` 对回调做 v2 HMAC；空串绝不下发（否则会清掉已有 secret）。"""
+    assert "secret" not in _wire("set_webhook", "https://example.com/hook")[0][1]
+    sent = _wire("set_webhook", "https://example.com/hook", "s3cret")
+    assert sent[0][1]["secret"] == "s3cret"
+    assert sent[0][1]["enabled"] is True
+
+
 def test_webhook_tool_transform_and_authcode_injection():
     """通用工具路：transform 补默认值，唯一出口补请求体 authcode（TS 契约）。"""
     from plugin.toolkit import policy
