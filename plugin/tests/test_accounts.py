@@ -597,3 +597,21 @@ def test_legacy_require_at_mention_key_is_ignored(_isolated_accounts_dir):
     acct = A.resolve("default")
     assert not hasattr(acct, "require_at_mention"), \
         "账号模型里不应再有这个键；规则由 inbound.triggers 的 @ / 心流分流实现"
+
+
+def test_empty_env_secret_warns_only_once(caplog):
+    """``<key>Env`` 指向空变量时**只告警一次**。
+
+    为什么要有这条：``resolve()`` 被 5 分钟一次的 sweep 反复调用，不去重就是
+    一天 288 条同款 WARNING（2026-10-19 审计实测），真异常被埋在噪音里。
+    去重是**进程级**的（``_WARNED_EMPTY_ENVS``），值从"有"变"无"时允许再报。
+    """
+    from plugin.core import accounts as A
+
+    A._WARNED_EMPTY_ENVS.clear()
+    cfg = {"webhookSecretEnv": "WPP_TEST_MISSING_SECRET_ENV"}
+    with caplog.at_level("WARNING"):
+        assert A._resolve_secret(cfg, "webhookSecret", "WPP_TEST_MISSING_SECRET_ENV") == ""
+        assert A._resolve_secret(cfg, "webhookSecret", "WPP_TEST_MISSING_SECRET_ENV") == ""
+    hits = [r for r in caplog.records if "WPP_TEST_MISSING_SECRET_ENV" in r.getMessage()]
+    assert len(hits) == 1, f"应当只告警一次，实际 {len(hits)} 次"
