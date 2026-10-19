@@ -2,7 +2,7 @@
 
 个人微信（WeChatPadPro 协议）接进 Hermes Agent 的**平台适配器 + 工具面**。一个进程里同时提供：
 
-- **平台**：收消息（WS + webhook 双通道）、发消息、媒体下载/上传、群/好友/朋友圈/视频号/公众号/支付等 299 个工具；
+- **平台**：收消息（WS + webhook 双通道）、发消息、媒体下载/上传、群/好友/朋友圈/视频号/公众号/支付等 302 个工具；
 - **心流（heartflow）**：群聊里判断"要不要主动搭话"，含预算、画像、复读去重、静默段；
 - **周边**：意图识别（LLM + embedding）、黑话挖掘、好感度记账、会话标题、语音转写。
 
@@ -12,6 +12,9 @@
 ---
 
 ## 架构
+
+> 完整的架构与数据流、关键不变量、排障入口见 **`docs/architecture.md`**。
+> 本节只是速览。
 
 ```
                     ┌──────────── Hermes gateway ────────────┐
@@ -42,7 +45,7 @@
 | `data/` | MySQL 连接、schema.sql、迁移/漂移检测、各域仓储（消息/心流/好感度） |
 | `inbound/` | 消息解析、触发判定、debounce、意图、心流全套、语音/媒体处理 |
 | `platform/` | 平台适配器、双通道入站、出站发送、媒体、命令、配对、webhook 路由 |
-| `toolkit/` | 299 个工具的定义与注册（端点表由生成器产出，裁决层在 `policy.py`） |
+| `toolkit/` | 302 个工具的定义与注册（端点表由生成器产出，裁决层在 `policy.py`） |
 | `llm/` | judge（心流判定）与 embedding 客户端 |
 
 ---
@@ -74,7 +77,7 @@ bash deploy.sh            # 人用：远程目标（默认 .183）
 
 ## 工具面
 
-- **299 个工具**：`wpp_*`（厂商端点）+ `wecom_*`（企微）+ `phoneerp_*`（ERP）。
+- **302 个工具**：`wpp_*`（厂商端点）+ `wecom_*`（企微）+ `phoneerp_*`（ERP）。
 - 端点定义由 `tools/gen_vendor_defs.py` 从 `tools/vendor_source/` 蓝本生成 →
   `plugin/toolkit/vendor_defs{,_extra}.py`（**禁止手改**，`--check` 是部署门禁）。
 - 注册期的撤注册/纠错/补注册统一在 `toolkit/policy.py`（每条都带 TS 侧 `file:line` 出处）。
