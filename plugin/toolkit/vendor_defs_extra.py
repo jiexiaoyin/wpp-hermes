@@ -7,7 +7,7 @@
     python3 tools/gen_vendor_defs.py --check    # 只校验（deploy.sh 回归门）
 
 源（本仓蓝本）: /root/dev/wpp-hermes-py2/tools/vendor_source/tools_data_extra.py
-源 SHA-256: 0b1378d6f2795c19fb455814498f63be5aaabe37e0d6829b43af8c06309d0e04
+源 SHA-256: 12d00247ad1a556e24feaea0840dd9be611a1c608a505777b10a2e71e74cf787
 派生组数: 15，工具条数: 107（已排除聚合项: ALL_EXTRA_TOOLS）
 
 `GROUPS` 是唯一真源；新 `registration.py` 直接 `for group, defs in GROUPS:` 迭代，
@@ -176,13 +176,13 @@ GROUPS: tuple[tuple[str, tuple[dict, ...]], ...] = (
                     'cursor': {'type': 'string', 'desc': '分页游标'},
                     'limit': {'type': 'integer', 'desc': '数量限制'}}},
         {'name': 'wpp_search_books',
-         'description': '搜书籍/读书内容。',
+         'description': '搜微信读书里的书，返回书名/作者/评分。找书用这个（不是商品库）。',
          'endpoint': '/Search/Books',
          'params': {'query': {'type': 'string', 'required': True, 'desc': '搜索词'},
                     'cursor': {'type': 'string', 'desc': '分页游标'},
                     'limit': {'type': 'integer', 'desc': '数量限制'}}},
         {'name': 'wpp_search_emoji',
-         'description': '表情搜索 (可分页)',
+         'description': '搜微信表情包，支持 cursor 分页。选好表情后用发送表情的能力发出去。',
          'endpoint': '/Search/Emoji',
          'params': {'query': {'type': 'string', 'required': True, 'desc': '搜索词'},
                     'cursor': {'type': 'string', 'desc': '分页游标'},

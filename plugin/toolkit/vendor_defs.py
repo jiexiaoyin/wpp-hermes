@@ -7,7 +7,7 @@
     python3 tools/gen_vendor_defs.py --check    # 只校验（deploy.sh 回归门）
 
 源（本仓蓝本）: /root/dev/wpp-hermes-py2/tools/vendor_source/tools_data.py
-源 SHA-256: 9dda385616bd58c580c36a5db3104de2c0b32ce33466fc184bca71dc193617cc
+源 SHA-256: 759b2f1d70e9c6fe7947faba713776ea14e3a102c112e87f4372c2f2c03626d1
 派生组数: 20，工具条数: 112
 
 `GROUPS` 是唯一真源；新 `registration.py` 直接 `for group, defs in GROUPS:` 迭代，
@@ -565,19 +565,19 @@ GROUPS: tuple[tuple[str, tuple[dict, ...]], ...] = (
          'params': {'query': {'type': 'string', 'required': True, 'desc': '搜索词'},
                     'limit': {'type': 'integer', 'desc': '返回数量上限'}}},
         {'name': 'wpp_search_official_accounts',
-         'description': '搜索公众号账号。',
+         'description': '搜索公众号账号，返回账号名/微信号/简介。要搜文章正文用 wpp_search_articles（账号 ≠ 文章）。',
          'endpoint': '/Search/OfficialAccounts',
          'params': {'query': {'type': 'string', 'required': True, 'desc': '搜索词'}}},
         {'name': 'wpp_search_moments',
-         'description': '搜索朋友圈内容。',
+         'description': '按关键词搜朋友圈动态（命中好友发过的内容）。只看某个好友的时间线请用朋友圈列表工具。',
          'endpoint': '/Search/Moments',
          'params': {'query': {'type': 'string', 'required': True, 'desc': '搜索词'}}},
         {'name': 'wpp_search_mini_programs',
-         'description': '搜索小程序。',
+         'description': '搜索小程序，返回名称/AppID。调用其它小程序能力前先用它拿 AppID。',
          'endpoint': '/Search/MiniPrograms',
          'params': {'query': {'type': 'string', 'required': True, 'desc': '搜索词'}}},
         {'name': 'wpp_search_articles',
-         'description': '搜索公众号文章。',
+         'description': '搜索公众号文章，返回标题/摘要/链接。按关键词找素材或核实信息时用它。',
          'endpoint': '/Search/Articles',
          'params': {'query': {'type': 'string', 'required': True, 'desc': '搜索词'}}},
     )),
