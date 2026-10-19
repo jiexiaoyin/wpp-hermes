@@ -1,7 +1,7 @@
 # 只放工具链配置（本仓不打包发布）。pytest 配置仍在 pytest.ini。
 [project]
 name = "wpp-hermes-py2"
-version = "2.0.2"
+version = "2.0.3"
 description = "WeChatPadPro 的 Hermes 平台插件（个人微信 → Hermes Agent）"
 requires-python = ">=3.11"
 # 运行时依赖：全部是**函数体内延迟导入**（注册期不能有第三方依赖，见

@@ -8,6 +8,26 @@
 
 ---
 
+## v2.0.3 — 2026-10-19
+
+审计后的五项收口（结构 / 噪音 / 可观测性 / 依赖 / 文档）。
+
+- **拆 `adapter.py`**：媒体链路（9 个方法、约 500 行）抽到 `platform/adapter_media.py`
+  的 `MediaMixin`。`adapter.py` 3069 → 2573 行。MRO 保持 `WppAdapter(MediaMixin,
+  BasePlatformAdapter)`，与原「类内定义覆盖基类」等价，调用点零改动。
+- **告警去重**：`webhookSecretEnv` 空变量从"每 5 分钟一条"（一天 288 条）改为
+  进程级只告警一次，且「从有变无」时重新告警；心流画像 `mute-phrase stripped`
+  降 DEBUG（已处理状态不该每轮吵），「新生成时又被剥掉」仍是 WARNING。
+- **可观测性**：`/metrics` 增加 Prometheus 文本格式
+  （`?format=prom` 或 `Accept: text/plain`），JSON 快照保持默认；仍只回环可读。
+- **依赖声明**：`pyproject.toml` 补 `[project].dependencies`
+  （aiohttp / pymysql / websockets / pyyaml，上界按 next-major）与 `dev` 组。
+- 测试 2517 通过 / 10 跳过 / 0 失败；ruff、结构守卫、注册探针(299) 全绿。
+
+> 备注：审计报告里「79 个工具无 `required`」经复核**不是缺陷** —— 其中 77 个的参数
+> 只有可选的 `account_id` 与分页字段，必填集本就为空；`registry.py:122-141` 的
+> required 生成逻辑是正确的。
+
 ## v2.0.2 — 2026-10-19
 
 深度审阅后的第二批修复（入站解析 / 出站投递 / 安全加固）：
