@@ -12,9 +12,16 @@
 **正确顺序**：
 1. ✏️  改 `/root/dev/wpp-hermes-py2/plugin/**`（开发版）
 2. ✅  语法校验：`python3 -m py_compile`（部署脚本会做，用**目标机的 python** 复检）
-3. ✅  跑 `bash /root/dev/wpp-hermes-py2/deploy.sh`（语法检查 → 备份 → rsync → restart → md5 逐位校验）
-4. 🚀  `hermes gateway restart` 让插件重新加载
+3. ✅  跑 `bash /root/dev/wpp-hermes-py2/sync.sh`（备份 → 生成物校验 → 注册对账 →
+   结构守卫 → rsync → 目标机语法复检 → md5 逐位；**不重启**）
+   或 `bash deploy.sh`（全流程，含重启 —— 只能在**人**的外部 shell 里跑）
+4. 🚀  `hermes gateway restart` 让插件重新加载（在网关进程外执行）
 5. ✔️  md5sum 验证 dev == deploy（**逐文件**，不是抽样）
+
+> **这条对 agent 同样成立**：任何一次改动插件行为的动作（改代码、改 `plugin.yaml`、
+> 改生成物蓝本、加工具描述）都必须**先落在 dev 树**，再由 `sync.sh` 同步过去。
+> 生产目录 `/root/.hermes/plugins/wechatpadpro` 是**只读产物**，不允许直接编辑 ——
+> 直接改它会在下次同步时被覆盖，并且破坏「代码从哪来」的可追溯性。
 
 **错误顺序（禁止）**：
 - ❌ 直接编辑 `.183:/root/.hermes/plugins/wechatpadpro/*.py`

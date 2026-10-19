@@ -521,8 +521,14 @@ DECLARED_AST_DIFFS: dict[str, dict[str, str]] = {
             "``wpp_fc_publish_ai`` 从「mmx image-01」改为「Hermes image_gen → 百炼 "
             "qwen-image」；② 2026-10-18 超长回复修复：嵌套的 ``send_text`` 先走 "
             "``outbound.chunk_text`` 分片（微信个人号 >2000 字会被静默截断），"
-            "``quote_reply`` 在引用气泡装不下（>500 字）时改发普通文本而不是截断。"
-            "工具名、schema、toolset 均未变。"
+            "``quote_reply`` 在引用气泡装不下（>500 字）时改发普通文本而不是截断；"
+            "③ 2026-10-19 群发收口：``toIds`` 在 handler 内去重并限制 64 个目标"
+            "（schema 的 maxItems 只是提示，不能当运行期约束）。"
+        ),
+        "send_group_mass_text": (
+            "2026-10-19 安全加固：群发一次请求打 N 个群且撤不回，旧实现把模型给的"
+            "数组原样交给厂商（空列表/上千目标都放行）。现在 handler 内去重、拒绝空"
+            "目标、超过 64 个直接回 ``ok:false``（与 ``core.outbound_guard`` 同上限）。"
         ),
     },
     "registry.py": {
@@ -586,6 +592,10 @@ DECLARED_REGISTRATION_DIFFS: dict[str, dict[str, str]] = {
             "``send/quote-reply.ts`` 重写：DB 回查被引用消息、群聊 @ 被回复人、"
             "type=57 refermsg XML 走 ``/Msg/ShareLink``；schema 因此新增必填 "
             "``msgId`` 与可选 ``newMsgId``。"
+        ),
+        "wpp_group_mass_text": (
+            "2026-10-19 安全加固：``toIds`` 新增 ``maxItems: 64``（与 handler 内"
+            "硬性上限一致）。schema 只是给模型的提示，真正的闸在 handler。"
         ),
     },
     "jargon": {

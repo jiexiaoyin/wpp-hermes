@@ -1,7 +1,7 @@
 name: wechatpadpro-platform
 label: WeChatPadPro (Personal WeChat)
 kind: platform
-version: 2.0.0
+version: 2.0.2
 author: knowhub-ops
 
 manifest_version: 2          # v2 解析路径（未知字段 warning 而非静默丢弃）

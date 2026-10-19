@@ -54,14 +54,19 @@
 python3 -m venv /tmp/wpvenv && /tmp/wpvenv/bin/pip install pytest pyyaml aiohttp
 env -u WECHATPRO_SEND_ALLOWLIST /tmp/wpvenv/bin/python -m pytest -q   # 2467 用例，约 20s
 
-# 全部门禁（结构 / 生成物幂等 / 注册对账 / LLM judge）
+# 全部门禁（结构 / 生成物幂等 / 注册对账 / LLM judge / lint）
 tools/gates.sh
 
-# 部署（dev → 生产；自动备份 + md5 逐位校验）
-bash deploy.sh --local          # 本机生产（.182）
-bash deploy.sh                  # 远程（默认 .183）
-bash deploy.sh --check          # 只看差异，不落盘
+# 部署：两种路径，都只允许 dev → 生产 单向
+bash sync.sh              # 同步 + 门禁 + md5 逐位（**不碰服务**，agent/CI 用这个）
+bash sync.sh --check      # 只核对 dev 与生产是否一致
+bash deploy.sh --local    # 人用：全流程，含重启与加载验收（本机生产）
+bash deploy.sh            # 人用：远程目标（默认 .183）
 ```
+
+> `sync.sh` 是 `deploy.sh` 的 1–8 步：备份 → 生成物校验 → 注册对账 → 结构守卫 →
+> rsync（排除 `accounts/`）→ 目标机语法复检 → md5 逐位。它**故意不含重启**——
+> 网关进程内部不能执行重启类命令，重启由人在外部 shell 做（见 `DEVELOPMENT_RULES.md`）。
 
 > ⚠️ **改代码只在 dev 树改**，deploy 目录是产物。铁律与红线见 `DEVELOPMENT_RULES.md`。
 

@@ -6,6 +6,73 @@
 
 ---
 
+---
+
+## v2.0.2 — 2026-10-19
+
+深度审阅后的第二批修复（入站解析 / 出站投递 / 安全加固）：
+
+**入站**
+- **AddMsgs 包装解析**：vendor 的业务回调把每个字段裹成 `{"string": …}`（复杂字段还是
+  JSON 字符串），旧解析对 `from_user` / `app` / `reply_context` / `voice` 直接当 dict 用 ⇒
+  引用消息的「被回复人 / 原文」整段丢失、语音的厂商转写变成 `{'string': …}`。
+  `parser` / `media` 统一解包后再取。
+- **引用文件不再被当成文件**：`is_file_message` 先剥 `<refermsg>` 再判外层 appmsg ——
+  引用一条文件消息的纯文本回复此前会走「文件无法下载」兜底话术。
+- **引用接龙不算接龙**：`relay.strip_quoted_content` 统一剥掉被引用的原消息；
+  `is_relay_message` 与 `_is_solitaire` 都用它 ⇒ 引用接龙卡片不再 100% 必回。
+- **心流缓冲排除系统通知/撤回**：`MT_SYSTEM` / `MT_REVOKE` 不进缓冲，judge 上下文
+  与「有人说话」沉默时长不再被污染。
+- **语音标记按元数据判**：带语音元数据（`voice_ctx` / `vendor_transcript` / `stt_text`）
+  就标 `[语音]`，不再依赖 `msg_type == 34` —— 49 appmsg 里承载的语音不再被兜底成
+  `[文件]`、与同一条正文的 `[转写]` 自相矛盾。正常语音的正文形状不变：
+  `[语音] 收到一条语音` + `\n[转写] …`。
+
+**出站**
+- **cron/standalone 附件真正投递**：`_standalone_send` 此前收了 `media_files` /
+  `force_document` 却完全没消费（附件静默丢弃、调用方还收到 success）。现按扩展名与
+  标志走 image/voice/video/file 四条链路，与 live `_send_media` 同款（含落库）。
+- **空消息不再假成功**：`chunk_text` 对空/纯空白返回零片（此前 `[""]` 会真发空气泡）；
+  standalone 在无文本且无附件时回 `error` 而不是 `success(message_id=None)`。
+- **过滤判据收窄**：`💾` 必须带自审摘要标题才算机械通知；`无 @提及` 必须构成
+  「……不回复」才算出站拒绝话术 —— 正常业务话术不再被静默丢弃。
+- **文件消息 XML**：`fileext` 同样过 XML 转义；`totallen` 用 base64 长度估算，
+  不再为算一个展示字段同步 `b64decode` 整个文件；超限在**上传前**拒绝。
+
+**安全 / 可靠性**
+- 本地读取：`/tmp` 下的凭据类文件（`.env*`、私钥、`credentials` 等）一律拒绝；
+  已知 profile scope 时只放行本 profile 的工作目录，不再跨 profile 读。
+- SSRF：CGNAT / 基准测试等非全局地址段一并拒绝。
+- 厂商响应读取全部加上限（含 chunked / 缺 `Content-Length`）。
+- 群发文本目标去重 + 上限 64（schema 与 handler 双判）。
+- 管理员门禁新增 23 个不可逆/资金/认证类工具（共 57 个，默认仍关闭）。
+- 热路径同步 pymysql 调用改走 `asyncio.to_thread`（含引用身份回查）。
+
+测试：新增 `test_hf_note_wiring.py` / `test_standalone_media.py` 及多处回归；
+全量 **2507 通过 / 10 跳过 / 0 失败**。
+
+---
+
+## v2.0.1 — 2026-10-19
+
+出站与本地媒体三处修复（07:24/07:29 实测，老板在场）：
+
+- **netguard**：多 profile 网关不带 `HERMES_PROFILE` env ⇒ profile 自己的
+  `workspace/cache/tmp` 全部「本地媒体读取被拒」（wpp_send_image 从 profile 目录发图必挂）。
+  env 缺失时改为扫描 `profiles/*/` 的工作目录面补白名单；拒绝名单（accounts 凭据、
+  备份目录、插件点文件/JSON）仍**先于**白名单判定，凭据外泄面不变。
+- **outbound_guard**：新增 `guard_targets()` 上下文——无收件人的上传步骤
+  （`/Tools/UploadFile`）此前在 `WECHATPRO_SEND_ALLOWLIST` 开着时被 fail-closed
+  永久拒绝 ⇒ **所有发文件都挂**。现在组合调用（UploadFile→ShareLink）把已校验
+  收件人带进上传步骤；上下文目标同样逐个过白名单，白名单外照样拒。
+- **toolkit/msg**：`_resolve_to_base64` 的报错用 `WppApiError` 单参构造（签名要求
+  `(code, message)`），把「白名单/读取被拒」伪装成 `TypeError`，误导排查。
+
+测试：`plugin/tests/test_security_hardening.py` 新增 ⑦⑧ 三例（上传上下文、
+上下文只覆盖上传步骤、profile workspace 可读 + 凭据仍拒）；全量 2006 例通过。
+
+---
+
 ## v2.0.0 — 2026-10-18
 
 Hermes Python 侧重写完成，接管生产（profile `wpp-wechat`，单账号 `default`）。
