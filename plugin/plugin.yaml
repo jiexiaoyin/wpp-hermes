@@ -167,10 +167,13 @@ provides_tools:
   - wpp_mcp_account_status
   - wpp_mcp_get_contact
   - wpp_mcp_get_group
+  - wpp_mcp_group_members
   - wpp_mcp_list_contacts
   - wpp_mcp_list_groups
   - wpp_mcp_recent_messages
   - wpp_mcp_search
+  - wpp_mcp_send_pat
+  - wpp_mcp_translate
   - wpp_oa_article_ext
   - wpp_oa_article_like
   - wpp_oa_article_list

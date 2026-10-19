@@ -67,7 +67,7 @@ os.environ.setdefault("WPP_TOOLS_ONLY", "1")
 from plugin.toolkit.policy import gate_for  # noqa: E402  （纯 stdlib 依赖，可裸导入）
 
 #: 与 ``tools/probe_registration.py`` 的 ``EXPECTED_TOTAL`` 同源（对不上就说明部署树不同版本）。
-EXPECTED_TOTAL = 299
+EXPECTED_TOTAL = 302
 TOOLSET = "wechatpadpro"
 #: 撤注册（对齐 TS 裁决）—— 对 AI 来说"看不见"才算撤掉。
 DENIED = {"wpp_fc_publish_raw", "wpp_send_app_msg"}

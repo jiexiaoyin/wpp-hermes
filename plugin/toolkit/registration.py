@@ -45,7 +45,7 @@ _EXTRA_TOOL_MODULES: tuple[tuple[str, str], ...] = (
 _EXPECTED_DOMAIN_COUNTS: dict[str, int] = {
     "msg": 22,
     "jargon": 1,
-    "mcp": 7,
+    "mcp": 10,   # 2026-10-19: +translate / group_members / send_pat（vendor MCP 真实能力）
     "parity": 4,
 }
 

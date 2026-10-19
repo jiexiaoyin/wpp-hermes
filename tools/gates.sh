@@ -23,7 +23,33 @@ unset JUDGE_API_KEY JUDGE_BASE_URL JUDGE_FALLBACK_API_KEY JUDGE_FALLBACK_BASE_UR
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 [ $# -ge 1 ] && ROOT=$1
 cd "$ROOT" || exit 1
-PY=${PY:-python3}
+# 选一个**带 pytest** 的 python3。
+#
+# 为什么不能直接写 `PY=${PY:-python3}`：在 Hermes 的工具进程里，PATH 上的 python3 是
+# Hermes 自己的 venv（`~/.hermes/installs/<hash>/environments/<hash>/venv/bin/python3`），
+# 那里**没有 pytest**。于是 `gates.sh` 每一项都报 "基线就没过：No module named pytest"，
+# 三个热路径守卫全变假红 —— 2026-10-19 实测。
+#
+# 规则：$PY 显式给了就完全信任它（CI 可以钉死）；否则按顺序找第一个能 import pytest 的。
+pick_python() {
+    for cand in python3 /usr/bin/python3 /usr/local/bin/python3 python; do
+        command -v "$cand" >/dev/null 2>&1 || continue
+        "$cand" -c 'import pytest' >/dev/null 2>&1 && { echo "$cand"; return 0; }
+    done
+    return 1
+}
+
+if [ -n "${PY:-}" ]; then
+    if ! "$PY" -c 'import pytest' >/dev/null 2>&1; then
+        echo "❌ PY=$PY 里没有 pytest（显式指定时不做回退）" >&2
+        exit 1
+    fi
+else
+    PY=$(pick_python) || {
+        echo "❌ 找不到带 pytest 的 python3；用 PY=/path/to/python3 指定" >&2
+        exit 1
+    }
+fi
 
 FAILED=""
 NPASS=0

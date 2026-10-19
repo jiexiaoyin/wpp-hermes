@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 from . import policy
 from .registry import get_client, mk_handler, resolve_account_id
@@ -224,6 +225,73 @@ def register_mcp_tools(ctx, adapter_getter) -> None:
             client, local)
         return text
 
+    async def _vendor_only(tool_name, arguments, client, what):
+        """只走 vendor MCP、没有本地回退的工具（翻译/拍一拍/群成员都属此类）。"""
+        try:
+            result = await asyncio.wait_for(
+                vendor_mcp.call_tool(tool_name, arguments, client.authcode),
+                timeout=_VENDOR_TIMEOUT_S)
+        except (TimeoutError, Exception):  # noqa: BLE001
+            result = None
+        if result is None:
+            return f"MCP {tool_name} 调用失败（vendor MCP 不可用，{what}无本地回退）"
+        return vendor_mcp.result_text(result) or f"MCP {tool_name} 返回空"
+
+    async def mcp_translate(**params):
+        adapter, account_id, client, error = await _account(params)
+        if error:
+            return error
+        gate = _gate(adapter, account_id, "wpp_mcp_translate")
+        if gate:
+            return gate
+        text = str(params.get("text") or "").strip()
+        target = str(params.get("target_lang") or "").strip()
+        if not text:
+            return "需要 text（1-5000 字）"
+        if not target:
+            return "需要 target_lang（如 en / zh / ja / fr）"
+        args = {"text": text[:5000], "target_lang": target}
+        src = str(params.get("source_lang") or "").strip()
+        if src:
+            args["source_lang"] = src
+        return await _vendor_only("wechat_translate_text", args, client, "翻译")
+
+    async def mcp_group_members(**params):
+        adapter, account_id, client, error = await _account(params)
+        if error:
+            return error
+        gate = _gate(adapter, account_id, "wpp_mcp_group_members")
+        if gate:
+            return gate
+        group_id = str(params.get("group_id") or "").strip()
+        if not group_id:
+            return "需要 group_id（@chatroom 结尾）"
+        args = {"group_id": group_id}
+        for k in ("limit", "offset"):
+            v = params.get(k)
+            if v is not None:
+                args[k] = int(v)
+        return await _vendor_only("wechat_list_group_members", args, client, "群成员列表")
+
+    async def mcp_send_pat(**params):
+        adapter, account_id, client, error = await _account(params)
+        if error:
+            return error
+        gate = _gate(adapter, account_id, "wpp_mcp_send_pat")
+        if gate:
+            return gate
+        group_id = str(params.get("group_id") or "").strip()
+        member_id = str(params.get("member_id") or "").strip()
+        if not group_id or not member_id:
+            return "需要 group_id 与 member_id（member_id 先用 wpp_mcp_group_members 取）"
+        # vendor 要求幂等键 8-128 字符
+        key = str(params.get("idempotency_key") or "").strip()
+        if len(key) < 8:
+            key = f"pat-{account_id}-{group_id[-8:]}-{member_id[-8:]}-{int(time.time())}"
+        return await _vendor_only("wechat_send_pat",
+                                  {"group_id": group_id, "member_id": member_id,
+                                   "idempotency_key": key[:128]}, client, "拍一拍")
+
     tools = [
         ("wpp_mcp_account_status",
          "查询当前微信账号状态（在线/设备模式/昵称）. 无需参数.", {
@@ -286,6 +354,39 @@ def register_mcp_tools(ctx, adapter_getter) -> None:
              # vendor 的 wechat_search 语义不完整。
              "required": ["query", "category"],
          }, mcp_search),
+        ("wpp_mcp_translate",
+         "翻译文本（自动检测源语言，不发送消息）。target_lang 如 en/zh/ja/fr.", {
+             "type": "object",
+             "properties": {
+                 "text": {"type": "string", "description": "待翻译文本 1-5000 字"},
+                 "target_lang": {"type": "string", "description": "目标语言，如 en / zh / ja / fr"},
+                 "source_lang": {"type": "string", "description": "源语言（可省略，自动检测）"},
+                 "account_id": {"type": "string"},
+             },
+             "required": ["text", "target_lang"],
+         }, mcp_translate),
+        ("wpp_mcp_group_members",
+         "分页列出群成员（安全 DTO）。member_id 可用于 wpp_mcp_send_pat。", {
+             "type": "object",
+             "properties": {
+                 "group_id": {"type": "string", "description": "@chatroom 结尾的群 ID"},
+                 "limit": {"type": "integer", "description": "每页 1-100, 默认 20"},
+                 "offset": {"type": "integer", "description": "起始偏移"},
+                 "account_id": {"type": "string"},
+             },
+             "required": ["group_id"],
+         }, mcp_group_members),
+        ("wpp_mcp_send_pat",
+         "在群里拍一拍某个成员（互动用；member_id 先用 wpp_mcp_group_members 取）。", {
+             "type": "object",
+             "properties": {
+                 "group_id": {"type": "string", "description": "@chatroom 结尾的群 ID"},
+                 "member_id": {"type": "string", "description": "成员 ID"},
+                 "idempotency_key": {"type": "string", "description": "重试键，可省略（自动生成）"},
+                 "account_id": {"type": "string"},
+             },
+             "required": ["group_id", "member_id"],
+         }, mcp_send_pat),
     ]
 
     for name, desc, schema, fn in tools:

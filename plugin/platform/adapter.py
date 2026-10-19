@@ -139,6 +139,9 @@ _DEDUP_MAX_SIZE = 5000
 _CURRENT_ADAPTER: WppAdapter | None = None
 
 
+#: 已告警过「未配 webhookSecret」的账号 —— 进程级去重（重连会反复调 _start_webhook）
+_WARNED_NO_WEBHOOK_SECRET: set[str] = set()
+
 def _resolve_platform() -> Platform:
     """取 ``Platform("wechatpadpro")``。
 
@@ -1102,7 +1105,10 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             )
             registered += 1
             self._webhook_accounts.add(acct.id)
-            if not acct.webhook_secret:
+            if not acct.webhook_secret and acct.id not in _WARNED_NO_WEBHOOK_SECRET:
+                # 进程级一次：_start_webhook 会被重连/重扫反复调用，每次都打就是噪音
+                # （实测 35 条/天）。这是**安全提示**而非错误，一次足够。
+                _WARNED_NO_WEBHOOK_SECRET.add(acct.id)
                 log.warning("[WPP:%s] 未配 webhookSecret —— 仅靠路径 token 鉴权；"
                             "nginx 反代后公网可达，建议补上（支持 vendor v2 HMAC）",
                             acct.id)

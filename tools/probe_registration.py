@@ -38,7 +38,7 @@ ROOT_DEFAULT = Path(__file__).resolve().parent.parent
 #: 期望总数（wpp 288 + wecom 7 + phoneerp 4 = 299）。
 #: 2026-10-18：补齐 TS 工具面缺口 33 个（wpp 250 → 283），详见
 #: `plugin/toolkit/policy.py:ADDED_GROUP` 与 `plugin/toolkit/parity.py`。
-EXPECTED_TOTAL = 299
+EXPECTED_TOTAL = 302
 
 #: 只在 Hermes 运行时里存在的内部包 —— 空壳冒充成包，够 ``register()`` import 就行。
 _HERMES_INTERNAL = {

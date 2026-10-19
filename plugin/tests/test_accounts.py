@@ -600,18 +600,25 @@ def test_legacy_require_at_mention_key_is_ignored(_isolated_accounts_dir):
 
 
 def test_empty_env_secret_warns_only_once(caplog):
-    """``<key>Env`` 指向空变量时**只告警一次**。
+    """``<key>Env`` 指向空变量时**只记录一次，且是 DEBUG 不是 WARNING**。
 
-    为什么要有这条：``resolve()`` 被 5 分钟一次的 sweep 反复调用，不去重就是
-    一天 288 条同款 WARNING（2026-10-19 审计实测），真异常被埋在噪音里。
+    两层理由（2026-10-19 审计）：
+    1. ``resolve()`` 被 5 分钟一次的 sweep 反复调用，不去重就是一天几百条同款；
+    2. 这是**配置写法**问题（键写了 Env 但变量没设），不是运行期异常 —— 多进程各持
+       一份进程级 set，WARNING 一天仍有 100+ 条（实测 122），把真异常埋掉。
+       所以降 DEBUG，同时保留"每种变量名只一次"的去重契约。
+
     去重是**进程级**的（``_WARNED_EMPTY_ENVS``），值从"有"变"无"时允许再报。
     """
+    import logging
+
     from plugin.core import accounts as A
 
     A._WARNED_EMPTY_ENVS.clear()
     cfg = {"webhookSecretEnv": "WPP_TEST_MISSING_SECRET_ENV"}
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         assert A._resolve_secret(cfg, "webhookSecret", "WPP_TEST_MISSING_SECRET_ENV") == ""
         assert A._resolve_secret(cfg, "webhookSecret", "WPP_TEST_MISSING_SECRET_ENV") == ""
     hits = [r for r in caplog.records if "WPP_TEST_MISSING_SECRET_ENV" in r.getMessage()]
-    assert len(hits) == 1, f"应当只告警一次，实际 {len(hits)} 次"
+    assert len(hits) == 1, f"应当只记录一次，实际 {len(hits)} 次"
+    assert hits[0].levelno == logging.DEBUG, "配置写法问题不该占 WARNING（会被真异常淹没）"

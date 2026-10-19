@@ -355,8 +355,11 @@ def _resolve_secret(cfg: dict[str, Any], literal_key: str, *fallback_envs: str) 
         # 真异常会被埋掉 —— 2026-10-19 审计发现）。
         if indirect not in _WARNED_EMPTY_ENVS:
             _WARNED_EMPTY_ENVS.add(indirect)
-            log.warning("[WPP] %sEnv=%s 指向的环境变量为空/未设置（后续不再重复告警）",
-                        literal_key, indirect)
+            # 降为 DEBUG：这是**配置写法**问题（键写了 Env 但变量没设），不是运行期异常。
+            # 实测多进程各持一份 set，WARNING 一天仍 100+ 条，把真异常埋掉
+            # （2026-10-19 审计：164 条噪音 vs 7 条真缺陷）。
+            log.debug("[WPP] %sEnv=%s 指向的环境变量为空/未设置（每种变量名只报一次）",
+                      literal_key, indirect)
     for name in fallback_envs:
         got = secret_env(name)
         if got:
