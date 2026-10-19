@@ -16,17 +16,37 @@ import subprocess
 log = logging.getLogger(__name__)
 
 
-async def _phoneerp_natural_async(query: str) -> str:
+def _caller_userid(model_value: str = "") -> str:
+    """调用者身份：**只信入站 contextvar**，模型填的 userid 一律不采信。
+
+    模型参数是 prompt injection 可改写的（同 ``account_id``/``callerWxid`` 的教训，
+    见 ``core/inbound_context.py``）。绑定存在时以真实发送者 wxid 为准；没有绑定
+    （CLI/TUI 直调）才回退到显式传参，保持旧行为。
+    """
+    from ..core import inbound_context
+
+    real = inbound_context.sender()
+    return real or str(model_value or "")
+
+
+async def _phoneerp_natural_async(query: str, userid: str = "") -> str:
     """``_phoneerp_natural`` 的异步壳（30s 同步子进程 ⇒ 工作线程）。"""
-    return await asyncio.to_thread(_phoneerp_natural, query)
+    return await asyncio.to_thread(_phoneerp_natural, query, userid)
 
 
-def _phoneerp_natural(query: str) -> str:
-    """直接跑 phoneerp CLI natural 模式, 返回 JSON 字符串."""
+def _phoneerp_natural(query: str, userid: str = "") -> str:
+    """直接跑 phoneerp CLI natural 模式, 返回 JSON 字符串.
+
+    ``--userid`` 必须真的传给 CLI：旧实现把 `` userid=xxx`` 拼进 query 文本，
+    CLI 不解析这种写法 ⇒ 权限过滤从未生效。
+    """
     cli = "/root/.hermes/skills/phoneerp/cli.js"
+    argv = ["node", cli, "--json", "natural", query]
+    if userid:
+        argv += ["--userid", userid]
     try:
         result = subprocess.run(
-            ["node", cli, "--json", "natural", query],
+            argv,
             capture_output=True, text=True, timeout=30,
             env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": "/root/.cache/ms-playwright"},
         )
@@ -49,27 +69,24 @@ def register(ctx, adapter_getter) -> int:
     count = 0
 
     # 工具 1: 销售明细
-    async def sales_detail(query: str = "零售明细 今天", userid: str = "") -> str:
+    async def sales_detail(query: str = "零售明细 今天") -> str:
         """查 phoneerp 销售数据 (零售明细/批发明细/提成明细)。
 
         Args:
             query: 自然语言查询, 例如 "零售明细 今天" / "批发明细 上周" / "提成明细 5月份"
-            userid: 店员/店长 userid (默认空, 老板权限)
         Returns:
             phoneerp CLI 返回的 JSON 字符串
         """
-        full_q = query + (f" userid={userid}" if userid else "")
-        return await _phoneerp_natural_async(full_q)
+        return await _phoneerp_natural_async(query, _caller_userid())
 
     ctx.register_tool(
         name="phoneerp_query",
         toolset="wechatpadpro",
         schema={
             "type": "object",
-            "description": "查 phoneerp 业务数据(销售/批发/提成/库存)。调用示例: phoneerp_query(query='零售明细 今天')。返回 phoneerp CLI 的 JSON 结果,含表格明细和汇总金额。",
+            "description": "查 phoneerp 业务数据(销售/批发/提成/库存)。调用示例: phoneerp_query(query='零售明细 今天')。返回 phoneerp CLI 的 JSON 结果,含表格明细和汇总金额。权限按当前微信发送者自动过滤,不需要也不能指定 userid。",
             "properties": {
                 "query": {"type": "string", "description": "自然语言查询, 例如 '零售明细 今天' / '批发明细 上周' / '提成明细 5月份'"},
-                "userid": {"type": "string", "description": "可选: 店员/店长 userid (留空 = 老板权限)"},
             },
             "required": ["query"],
         },
@@ -89,7 +106,7 @@ def register(ctx, adapter_getter) -> int:
         Returns:
             含 latitude/longitude/label/poi_name 的 JSON
         """
-        return await _phoneerp_natural_async(f"发定位 {store}")
+        return await _phoneerp_natural_async(f"发定位 {store}", _caller_userid())
 
     ctx.register_tool(
         name="phoneerp_location",
@@ -116,7 +133,7 @@ def register(ctx, adapter_getter) -> int:
         Returns:
             phoneerp CLI JSON, 含商品/门店/价格
         """
-        return await _phoneerp_natural_async(f"串码查询 {imei}")
+        return await _phoneerp_natural_async(f"串码查询 {imei}", _caller_userid())
 
     ctx.register_tool(
         name="phoneerp_imei",
@@ -137,7 +154,7 @@ def register(ctx, adapter_getter) -> int:
     # 工具 4: 任意自然语言查询 (兜底)
     async def nl_query(query: str) -> str:
         """phoneerp 任意自然语言查询 (兜底入口, 当 query 不知道用哪个具体工具时)。"""
-        return await _phoneerp_natural_async(query)
+        return await _phoneerp_natural_async(query, _caller_userid())
 
     ctx.register_tool(
         name="phoneerp_natural",
