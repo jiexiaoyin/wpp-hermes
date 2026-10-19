@@ -45,6 +45,10 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+#: 已告警过的「<key>Env 指向空变量」——进程级去重（resolve() 被 sweep 反复调用）。
+#: set 的 add/discard 在 GIL 下是原子的，这里不需要额外锁。
+_WARNED_EMPTY_ENVS: set[str] = set()
+
 #: ``plugin/`` 目录（本文件在 ``plugin/core/`` 下）
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 ACCOUNTS_DIR = PLUGIN_DIR / "accounts"
@@ -333,9 +337,16 @@ def _resolve_secret(cfg: dict[str, Any], literal_key: str, *fallback_envs: str) 
     if indirect:
         got = secret_env(indirect)
         if got:
+            # 后来配上了 ⇒ 允许下次再告警（值从"有"变"无"是值得知道的状态变化）
+            _WARNED_EMPTY_ENVS.discard(indirect)
             return got
-        log.warning("[WPP] %sEnv=%s 指向的环境变量为空/未设置",
-                    literal_key, indirect)
+        # 只告警一次：resolve() 会被 5 分钟一次的 sweep 反复调用，
+        # 不去重就是每 5 分钟一条同样的 WARNING（实测一天 288 条，
+        # 真异常会被埋掉 —— 2026-10-19 审计发现）。
+        if indirect not in _WARNED_EMPTY_ENVS:
+            _WARNED_EMPTY_ENVS.add(indirect)
+            log.warning("[WPP] %sEnv=%s 指向的环境变量为空/未设置（后续不再重复告警）",
+                        literal_key, indirect)
     for name in fallback_envs:
         got = secret_env(name)
         if got:

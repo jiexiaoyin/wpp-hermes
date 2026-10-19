@@ -872,12 +872,15 @@ def load_hf_profiles_into_cache(
         # （如 09-26 那批"基本不该插话的旁观者"）立刻失效，不必等下一次重生成；
         # 原始画像仍留在库里供 /heartflow profile 查看。
         p = guard_hf_profile_for_prompt(raw)
+        # 这里每 5 分钟的 sweep 都会走一次：降 DEBUG 并保留原信息。
+        # 「库里已有坏画像被过滤」是**已处理**的正常状态，不是每次都要吵 ——
+        # 真正需要看见的是下面「新生成时又被剥掉」（那条仍是 WARNING）。
         if raw.bot_role and not p.bot_role:
-            log.warning("[WPP HF] profile mute-phrase stripped: account=%s group=%s field=bot_role",
-                        account_id, group_id)
+            log.debug("[WPP HF] profile mute-phrase stripped: account=%s group=%s field=bot_role",
+                      account_id, group_id)
         if raw.summary and not p.summary:
-            log.warning("[WPP HF] profile mute-phrase stripped: account=%s group=%s field=summary",
-                        account_id, group_id)
+            log.debug("[WPP HF] profile mute-phrase stripped: account=%s group=%s field=summary",
+                      account_id, group_id)
         with _lock:
             _profiles[_key(account_id, group_id)] = {
                 "text": render_hf_profile_for_prompt(p, max_prompt_chars),

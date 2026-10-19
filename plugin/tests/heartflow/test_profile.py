@@ -580,10 +580,14 @@ def test_cache_warm_strips_mute_phrases_and_logs(caplog):
     """预热时过滤 —— 库里**已有**的坏画像（09-26 那批）立刻失效，不必等下一次重生成。
 
     原始画像仍留在库里供 ``/heartflow profile`` 查看（只有进 prompt 的文本被过滤）。
+
+    ⚠️ 留痕在 **DEBUG**：这条路径被 5 分钟一次的 sweep 反复走到，WARNING 会刷屏
+    （2026-10-19 审计：一天 288 条同款告警，真异常被埋）。「新生成时又被剥掉」
+    那条才是 WARNING（见下一个用例）。
     """
     bad = json.dumps({"nature": "x", "bot_role": "基本不该插话的旁观者",
                       "engage": ["售后"], "summary": "不要插话, 少说话"}, ensure_ascii=False)
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         P.load_hf_profiles_into_cache("acc", [prof_row("g", bad)], 400)
     text = P.get_hf_profile_prompt_text("acc", "g")
     assert "旁观者" not in text, "禁言令不得进缓存文本"
