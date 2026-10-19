@@ -182,9 +182,10 @@ class WppWebhookServer:
 
             # ---------------------------------------------------------- 校验
 
-            def _reply(self, code: int, body: bytes = b'{"ok":true}') -> None:
+            def _reply(self, code: int, body: bytes = b'{"ok":true}',
+                       ctype: str = "application/json") -> None:
                 self.send_response(code)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -374,7 +375,17 @@ class WppWebhookServer:
                     if not _is_loopback(_client_ip(self)):
                         self._reply(404, b'{"error":"unknown path"}')
                         return
-                    self._reply(200, metrics.render_json().encode("utf-8"))
+                    # 两种格式，同一端点：
+                    #   默认/无参数      → JSON 快照（`curl /metrics | jq`）
+                    #   ?format=prom     → Prometheus 文本（Grafana/node_exporter 直接抓）
+                    # 也认 `Accept: text/plain`，方便抓取器不带 query。
+                    want_prom = ("format=prom" in self.path
+                                 or "text/plain" in (self.headers.get("Accept") or ""))
+                    if want_prom:
+                        self._reply(200, metrics.render_prometheus().encode("utf-8"),
+                                    ctype="text/plain; version=0.0.4; charset=utf-8")
+                    else:
+                        self._reply(200, metrics.render_json().encode("utf-8"))
                     return
                 # vendor 可能用 GET 做 URL 可达性验证 —— 只对**已注册**的路径回 200，
                 # 否则 404（别把"这个口开着"告诉扫路径的人）。
