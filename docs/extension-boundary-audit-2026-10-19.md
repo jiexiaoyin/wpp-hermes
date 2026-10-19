@@ -141,6 +141,22 @@ class ChatCapabilities:
 WPP 实现这三个协议；WeCom / Telegram 各自实现。主动消息、画像、风格、禁言、
 OSS 都只依赖协议，不再 import `wpp_*`。
 
+### 5.1 P1 落地状态（2026-10-19）
+
+- `plugin/neutral/contracts.py`：四个接口与 `MessageRow` 已落地，纯 stdlib。
+- `plugin/platform/conversation.py`：WPP 的 `WppConversationStore` /
+  `WppOutboundSender` / `key_from_message` / `WPP_CAPABILITIES`，以及
+  `repo_messages.count_outbound_since`。
+- `plugin/inbound/proactive.py`：`maybe_send_once` 已改为协议驱动。默认仍走
+  WPP（`adapter` 路径行为不变），也可以只注入 `cfg + store + sender + key_for`
+  在别的通道上跑；测试里用一个“企微形状”的假通道验证了这条路径。
+- **尚未做真企微 transport**：Hermes 核心的 wecom 适配器走 openws，插件侧没有
+  公共出站 API（`ctx.platform_actions` 只有 reaction/title）。真接企微需要
+  核心提供一层 `OutboundSender` 桥，或由 wecom 插件自己实现该协议；这两者都
+  不在本树内。当前的“第二通道验证”是协议级，不是生产级。
+- `plugin/tests/test_neutral_boundary.py`：AST 钉住中立层不许 import 通道包，
+  防止后续提交悄悄把边界改回去。
+
 ## 6. 明确不做的三件事
 
 1. **不整体上提心流**。`triggers.py` 的 @/引用/红包/接龙判定是微信群参与策略，

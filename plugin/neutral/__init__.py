@@ -13,4 +13,9 @@
 迁移期间旧路径（``plugin/inbound/<name>.py``）保留 re-export 兼容层，
 新代码请直接 import 本包。目标是等第二个通道接入时，整包平移到 Hermes 核心
 或独立插件而不改一行逻辑。
+
+P1（2026-10-19）起，会话身份与出站统一走 :mod:`.contracts` 里的
+``ConversationKey`` / ``MessageRow`` / ``ConversationStore`` / ``OutboundSender`` /
+``ChatCapabilities``；通道实现放在通道自己的包里（WPP 是
+``plugin/platform/conversation.py``）。策略层只认协议，不认平台名。
 """

@@ -179,6 +179,31 @@ def list_messages_by_peer(
     return rows
 
 
+def count_outbound_since(
+    account_id: str, peer_id: str, since_sec: int,
+    conn: db.Connection | None = None,
+) -> int:
+    """统计某会话 ``since_sec`` 之后的出站条数（主动消息的每日预算用）。
+
+    与 :func:`list_messages_by_peer` 同一个 ``(account_id, peer_id)`` 口径，
+    但只数不取正文 —— 预算判定不该把整段历史拉回来。
+    """
+    c = conn or db.get_conn()
+    rows = c.query(
+        """
+        SELECT COUNT(*) AS n
+        FROM wpp_messages
+        WHERE account_id = %s AND peer_id = %s AND direction = 'outbound'
+          AND UNIX_TIMESTAMP(ts) >= %s
+        """,
+        (account_id, peer_id, int(since_sec)),
+    )
+    try:
+        return int((rows[0] if rows else {}).get("n") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def list_messages(
     account_id: str, limit: int = 50, conn: db.Connection | None = None,
 ) -> list[dict]:

@@ -28,8 +28,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from typing import Any, Mapping
 
+from ..neutral.contracts import ConversationKey, ConversationStore, OutboundSender
 from ..neutral.proactive_policy import (  # noqa: F401 —— 兼容旧 import
     DEFAULT_HISTORY_LIMIT,
     DEFAULT_SYSTEM,
@@ -47,16 +49,37 @@ log = logging.getLogger(__name__)
 #: 默认每轮 sweep 间隔（秒）。主动消息不需要很灵敏，半小时一轮足够。
 DEFAULT_SWEEP_INTERVAL = 1800
 
-#: 判断"今天是否已主动发过"的内存记录（account_id, peer_id）→ 本地日期。
-_last_sent: dict[tuple[str, str], str] = {}
+#: 判断"今天是否已主动发过"的内存记录（会话身份元组）→ 本地日期。
+_last_sent: dict[tuple[str, str, str, str], str] = {}
+
+#: 注入的落库回调：``(会话, 正文, 消息id, 时间) -> None``。
+PersistFn = Callable[[ConversationKey, str, str, int], Any]
 
 
-async def maybe_send_once(adapter: Any, account_id: str,
-                          now: float | None = None) -> dict[str, Any]:
-    """跑一轮：满足条件就生成并发送一条主动消息。返回结构化结果（便于测试/日志）。"""
-    acct = adapter.account(account_id)
-    cfg = resolve_proactive_cfg(getattr(acct, "proactive", {}),
-                                ai=getattr(acct, "raw", {}).get("ai"))
+async def maybe_send_once(
+    adapter: Any = None,
+    account_id: str = "",
+    now: float | None = None,
+    *,
+    cfg: ProactiveConfig | None = None,
+    store: ConversationStore | None = None,
+    sender: OutboundSender | None = None,
+    persist: PersistFn | None = None,
+    key_for: Callable[[str], ConversationKey] | None = None,
+) -> dict[str, Any]:
+    """跑一轮：满足条件就生成并发送一条主动消息。返回结构化结果（便于测试/日志）。
+
+    通道无关入口：只传 ``cfg`` + ``store`` + ``sender`` 即可跑在任意通道上
+    （第二个通道不需要 WPP 的 adapter）。不传时按 WPP 适配器走原有路径
+    （``adapter.account`` / ``adapter._clients`` / ``wpp_messages``）。
+    """
+    use_wpp_defaults = store is None and sender is None
+    if cfg is None:
+        if adapter is None:
+            raise ValueError("maybe_send_once: cfg 与 adapter 至少给一个")
+        acct = adapter.account(account_id)
+        cfg = resolve_proactive_cfg(getattr(acct, "proactive", {}),
+                                    ai=getattr(acct, "raw", {}).get("ai"))
     if not cfg.enabled:
         return {"sent": 0, "reason": "disabled"}
     if not cfg.allow_from:
@@ -64,20 +87,34 @@ async def maybe_send_once(adapter: Any, account_id: str,
     now_sec = int(now if now is not None else time.time())
     if in_quiet_hours(cfg, now_sec):
         return {"sent": 0, "reason": "quiet_hours"}
-    client = (getattr(adapter, "_clients", {}) or {}).get(account_id)
-    if client is None:
-        return {"sent": 0, "reason": "not_connected"}
 
-    from ..data import repo_messages
+    if use_wpp_defaults:
+        if adapter is None:
+            raise ValueError("maybe_send_once: 未注入 store/sender 时必须给 adapter")
+        client = (getattr(adapter, "_clients", {}) or {}).get(account_id)
+        if client is None:
+            return {"sent": 0, "reason": "not_connected"}
+        from ..platform.conversation import WppConversationStore, WppOutboundSender
+
+        store = WppConversationStore(account_id)
+        sender = WppOutboundSender.from_adapter(adapter, account_id)
+        if persist is None:
+            persist = _persist
+    if store is None or sender is None:
+        raise ValueError("maybe_send_once: store 与 sender 必须成对注入")
+    if key_for is None:
+        platform = (getattr(store, "platform", "")
+                    or getattr(sender, "platform", ""))
+        def key_for(peer_id: str) -> ConversationKey:  # noqa: F811
+            return ConversationKey(platform, account_id, "dm", peer_id)
 
     sent = 0
     for peer_id in cfg.allow_from:
-        if _last_sent.get((account_id, peer_id)) == today_key(now_sec):
+        conv = key_for(peer_id)
+        if _last_sent.get(conv.as_tuple()) == today_key(now_sec):
             continue
         try:
-            rows = await asyncio.to_thread(
-                repo_messages.list_messages_by_peer,
-                account_id, peer_id, cfg.history_limit)
+            rows = await asyncio.to_thread(store.recent, conv, cfg.history_limit)
         except Exception as exc:  # noqa: BLE001 —— DB 抖动只跳过本轮
             log.warning("[WPP PROACTIVE] 读取 %s 历史失败（跳过）: %s", peer_id, exc)
             continue
@@ -88,14 +125,18 @@ async def maybe_send_once(adapter: Any, account_id: str,
         if not text:
             continue
         try:
-            resp = await client.send_text(peer_id, text)
+            msg_id = await sender.send_text(conv, text)
         except Exception as exc:  # noqa: BLE001
             log.warning("[WPP PROACTIVE] 主动消息发送失败（%s）: %s", peer_id, exc)
             continue
         log.info("[WPP PROACTIVE] 已主动发送 → %s（%d 字）", peer_id, len(text))
         sent += 1
-        _last_sent[(account_id, peer_id)] = today_key(now_sec)
-        _persist(account_id, peer_id, text, resp, now_sec)
+        _last_sent[conv.as_tuple()] = today_key(now_sec)
+        if persist is not None:
+            try:
+                persist(conv, text, msg_id, now_sec)
+            except Exception as exc:  # noqa: BLE001 —— 消息已发出，落库失败不能回滚
+                log.warning("[WPP PROACTIVE] 落库失败（消息已发出）: %s", exc)
     return {"sent": sent, "reason": "ok"}
 
 
@@ -119,22 +160,20 @@ async def _generate(rows: list[Mapping[str, Any]], cfg: ProactiveConfig) -> str:
     return text
 
 
-def _persist(account_id: str, peer_id: str, text: str, resp: Any, now_sec: int) -> None:
-    """落库出站记录（失败只 warn —— 消息已经发出去了）。"""
+def _persist(conv: ConversationKey, text: str, msg_id: str, now_sec: int) -> None:
+    """WPP 默认落库（失败只 warn —— 消息已经发出去了）。"""
     try:
         from ..data import repo_messages
         from ..inbound.persist import db_chat_id, db_peer_kind
-        from ..platform import outbound
 
-        ids = outbound.extract_outbound_msg_ids(resp)
         repo_messages.save_message(
-            account_id,
+            conv.account_id,
             direction="outbound",
-            peer_kind=db_peer_kind("dm"),
-            peer_id=peer_id,
-            chat_id=db_chat_id(peer_id, is_group=False),
-            msg_id=ids.new_msg_id or ids.msg_id or None,
-            new_msg_id=ids.new_msg_id,
+            peer_kind=db_peer_kind(conv.chat_type),
+            peer_id=conv.chat_id,
+            chat_id=db_chat_id(conv.chat_id, is_group=conv.is_group),
+            msg_id=msg_id or None,
+            new_msg_id=msg_id or "",
             content=text,
             msg_type="text",
             raw_payload={"proactive": True},
