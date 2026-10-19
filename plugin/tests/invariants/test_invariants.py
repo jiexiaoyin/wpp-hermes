@@ -794,3 +794,20 @@ def _all_py_sources() -> list[str]:
     return sorted(str(p.relative_to(ROOT))
                   for p in (ROOT / "plugin").rglob("*.py")
                   if "__pycache__" not in p.parts)
+
+
+def test_lingering_legacy_vars_are_scoped_not_process_env(monkeypatch):
+    """旧名检测必须走 **scoped 凭据面**，不能读 ``os.environ``。
+
+    multiplex 下 ``os.environ`` 装的是 launch profile（default）那一份：wpp-wechat
+    已经删掉 ``DEEPSEEK_API_KEY``，用 os.environ 判断却会**永远**报残留（2026-10-19
+    实测）。反过来同样危险 —— 真残留时若读到 default 的空值就会漏报。
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "process-level-leak")
+    monkeypatch.setattr(J, "secret_env", lambda name, default="": "")
+    assert J.lingering_legacy_judge_vars() == [], "进程 env 有值不算残留（串号）"
+
+    monkeypatch.setattr(
+        J, "secret_env",
+        lambda name, default="": "k" if name == "DEEPSEEK_API_KEY" else "")
+    assert J.lingering_legacy_judge_vars() == ["DEEPSEEK_API_KEY"], "scoped 面有值必须点名"

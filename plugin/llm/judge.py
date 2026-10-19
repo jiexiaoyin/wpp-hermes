@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -64,6 +63,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..core import metrics
+from ..core.env_compat import secret_env
 from ..core.netguard import GuardError, assert_endpoint_public
 
 log = logging.getLogger(__name__)
@@ -159,18 +159,18 @@ def resolve_judge_creds(
     主端点 baseUrl 链：显式覆盖 > ``JUDGE_BASE_URL`` > ``DEFAULT_JUDGE_ENDPOINTS["deepseek"]``。
     旧名 ``DEEPSEEK_BASE_URL`` / ``DEEPSEEK_API_KEY`` **不读**（v1.14.0 破坏性改名）。
     """
-    judge_key = (os.environ.get(JUDGE_MAIN_VARS["api_key"]) or "").strip()
+    judge_key = (secret_env(JUDGE_MAIN_VARS["api_key"]) or "").strip()
     if judge_key:
         base = (
             judge_base_url
-            or (os.environ.get(JUDGE_MAIN_VARS["base_url"]) or "").strip()
+            or (secret_env(JUDGE_MAIN_VARS["base_url"]) or "").strip()
             or DEFAULT_JUDGE_ENDPOINTS["deepseek"]
         )
         return JudgeCreds(api_key=judge_key, base_url=base.rstrip("/"), format="openai")
 
     minimax_key = (
-        (os.environ.get("MINIMAX_CN_API_KEY") or "").strip()
-        or (os.environ.get("MINIMAX_API_KEY") or "").strip()
+        (secret_env("MINIMAX_CN_API_KEY") or "").strip()
+        or (secret_env("MINIMAX_API_KEY") or "").strip()
     )
     base = minimax_base_url or DEFAULT_JUDGE_ENDPOINTS["minimax"]
     return JudgeCreds(api_key=minimax_key, base_url=base.rstrip("/"), format="anthropic")
@@ -181,9 +181,9 @@ def resolve_judge_fallback() -> JudgeFallbackState:
 
     格式恒 ``openai``：兜底点的既定用途就是 DeepSeek 系，与主端点同协议。
     """
-    base_url = (os.environ.get(JUDGE_FALLBACK_VARS["base_url"]) or "").strip()
-    api_key = (os.environ.get(JUDGE_FALLBACK_VARS["api_key"]) or "").strip()
-    model = (os.environ.get(JUDGE_FALLBACK_VARS["model"]) or "").strip()
+    base_url = (secret_env(JUDGE_FALLBACK_VARS["base_url"]) or "").strip()
+    api_key = (secret_env(JUDGE_FALLBACK_VARS["api_key"]) or "").strip()
+    model = (secret_env(JUDGE_FALLBACK_VARS["model"]) or "").strip()
     missing: list[str] = []
     if not base_url:
         missing.append(JUDGE_FALLBACK_VARS["base_url"])
@@ -229,8 +229,15 @@ def describe_judge_fallback(state: JudgeFallbackState | None = None) -> str:
 
 
 def lingering_legacy_judge_vars() -> list[str]:
-    """还残留在进程 env 里的旧名（启动自述用；空列表 = 干净）。只点名，不打印值。"""
-    return [name for name in LEGACY_JUDGE_VARS if (os.environ.get(name) or "").strip()]
+    """还残留在**本 profile** 凭据面里的旧名（启动自述用；空列表 = 干净）。只点名，不打印值。
+
+    ⚠️ 必须走 scoped 口径（:func:`secret_env`）而不是 ``os.environ``：multiplex 下
+    ``os.environ`` 装的是 **launch profile**（default）的那份，拿它判断会串号 ——
+    2026-10-19 实测：wpp-wechat 的 ``.env`` 里已经删掉 ``DEEPSEEK_API_KEY``，这里却
+    因为 default 还留着而每次启动照报一条。同理，上面几个解析函数也必须 scoped，
+    否则「改了一个 profile 的 key，另一个 profile 静默用旧值」是查不出来的。
+    """
+    return [name for name in LEGACY_JUDGE_VARS if (secret_env(name) or "").strip()]
 
 
 _CONFIG_LOGGED = False
