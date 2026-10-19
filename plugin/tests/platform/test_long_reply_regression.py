@@ -77,6 +77,26 @@ def test_a_long_paragraph_breaks_at_sentence_boundaries():
         [c[-12:] for c in chunks]
 
 
+@pytest.mark.parametrize("content", ["", "   ", "\n\n", "\t \n "])
+def test_empty_content_produces_zero_chunks(content):
+    """空/纯空白 ⇒ ``[]``（不是 ``[""]``）。
+
+    ``[""]`` 会让调用方真去发一条空文本：cron 只投附件时文本本来就是空的
+    （vendor 报错或推一条空气泡），而 ``_standalone_send`` 又没法区分
+    "没文本"和"要发空文本"。
+    """
+    assert O.chunk_text(content) == []
+
+
+def test_media_kind_routes_by_extension_and_flags():
+    assert O.media_kind("/x/a.JPG") == "image"
+    assert O.media_kind("/x/a.mp4") == "video"
+    assert O.media_kind("/x/a.pdf") == "file"
+    assert O.media_kind("/x/a.png", force_document=True) == "file", \
+        "force_document 优先级最高（Hermes 用它把图片按文件发）"
+    assert O.media_kind("/x/a.mp3", is_voice=True) == "voice"
+
+
 def test_without_any_punctuation_it_still_falls_back_to_a_hard_cut():
     """没有任何可断之处时不能无限找 —— 按上限硬切，保证每条都发得出去。"""
     chunks = O.chunk_text("字" * 4500)
@@ -133,10 +153,10 @@ def _shell(A, monkeypatch):
         return None
 
     monkeypatch.setattr(A, "SendResult", _SendResult)
-    monkeypatch.setattr(
-        A.WppAdapter, "_quote_identity",
-        staticmethod(lambda acct, svrid: quote_ref.QuoteIdentity(
-            fromusr=SENDER, display_name=NICK, matched=True)))
+    async def _ident(acct, svrid):
+        return quote_ref.QuoteIdentity(fromusr=SENDER, display_name=NICK, matched=True)
+
+    monkeypatch.setattr(A.WppAdapter, "_quote_identity", staticmethod(_ident))
     monkeypatch.setattr(A.WppAdapter, "_quote_prefix", staticmethod(_prefix))
     monkeypatch.setattr(A.WppAdapter, "_persist_outbound", staticmethod(_persist))
     return A.WppAdapter.__new__(A.WppAdapter)

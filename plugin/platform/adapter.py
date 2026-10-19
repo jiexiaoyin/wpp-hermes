@@ -78,6 +78,7 @@ from ..core.api_client import WppApiError, WppClient
 from ..core.sync_fallback import REASON_OPEN, REASON_PUSH, SyncFallback
 from ..inbound import (
     FILEHELPER,
+    MT_REVOKE,
     MT_SYSTEM,
     InboundPipeline,
     WppMessage,
@@ -241,12 +242,19 @@ async def _persist_outbound_record(acct: accounts_mod.Account, peer_id: str,
     看不见消息。
 
     失败只 warn —— 审计写不进去不该让已发出的消息算发送失败。
+
+    ⚠️ ``repo_messages.save_message`` 是**同步 pymysql**：这条函数在 async 发送
+    路径上，直接调用会把整个事件循环卡在一次 DB 往返上（发送高峰时所有账号一起
+    停顿）。⇒ 走 ``asyncio.to_thread``（与入站 ``persist_inbound`` 同一做法）。
     """
     try:
+        import asyncio
+
         from ..data import repo_messages
 
         is_group = outbound.is_group_peer(peer_id)
-        repo_messages.save_message(
+        await asyncio.to_thread(
+            repo_messages.save_message,
             acct.id,
             direction="outbound",
             # 消息层口径写 "dm"，由 db_peer_kind 映射到 ENUM 的 'direct'
@@ -324,6 +332,10 @@ class WppAdapter(BasePlatformAdapter):
         #: Hermes 多路复用用 ``token`` 做**冲突检测**（同一凭据被两个 profile 用会互相踢）。
         #: 取排序后第一个账号的凭据指纹 —— 确定性的，不含明文（见 core.accounts.fingerprint）。
         self.token = ""
+        #: 出站白名单**在 connect 时捕获**（那时仍在 profile scope 内）。发送任务
+        #: （cron / 后台协程）稍后可能已经掉出 scope；若那时重新读 ambient env，
+        #: 会回落到根 ``.env`` —— 2026-10-19 07:36 私聊回复被拒两次的根因。
+        self._send_allowlist: tuple[str, ...] = ()
 
     # ================================================================== 属性
 
@@ -496,6 +508,27 @@ class WppAdapter(BasePlatformAdapter):
 
             self._accounts = accounts_mod.load_all(self._extra().get("accounts"))
 
+            # ★ 出站白名单在 connect 时定版（此时仍在 profile runtime scope 内）。
+            #   不能等到 send() 再读：后台/cron 发送任务可能没有 scope，届时
+            #   platform_gate_env 会回落根 .env，把 wpp-wechat 的六条读成 default 的一条
+            #   （2026-10-19 07:36 生产事故）。
+            profile_home = None
+            try:
+                from agent.secret_scope import current_secret_scope_home
+                profile_home = current_secret_scope_home()
+            except Exception:  # noqa: BLE001 —— 插件在 Hermes 进程外时可无此模块
+                profile_home = None
+            if not profile_home and os.environ.get("HERMES_PROFILE"):
+                try:
+                    from hermes_constants import get_hermes_home
+                    profile_home = get_hermes_home()
+                except Exception:  # noqa: BLE001
+                    profile_home = None
+            self._send_allowlist = outbound.netguard.send_allowlist(
+                profile_home=str(profile_home) if profile_home else None)
+            log.info("[WPP] 出站白名单已绑定: %d 条 (profile=%s)",
+                     len(self._send_allowlist), profile_home or "-")
+
             # 红线先炸，再谈"跳过"。两者都由 ``refusal_reason`` 返回字符串，但后果
             # 差着量级：未启用 / 无凭据是"这个账号先不连"（正常态，跳过就好），
             # 生产身份是"连上去会把生产踢下线 + 劫持它的 webhook"（**不可逆**）。
@@ -532,6 +565,7 @@ class WppAdapter(BasePlatformAdapter):
                 self._clients[acct.id] = WppClient(
                     base_url=acct.api_base_url, authcode=acct.authcode,
                     account_id=acct.id, timeout=30,
+                    send_allowlist=self._send_allowlist,
                 )
                 self._pipelines[acct.id] = InboundPipeline(acct.id, self._pipeline_cfg(acct))
                 # W7-6：每账号一个到达层聚合器。窗口来自账号文件 ``debounceMs``
@@ -1295,6 +1329,15 @@ class WppAdapter(BasePlatformAdapter):
         hf = self._hf_mod()
         if hf is None:
             return
+        # ★ 系统通知（"xxx 撤回了一条消息"/"你已加入群聊"）不是人说的话：
+        #   进缓冲会污染 judge 的"最近 N 条上下文"，还会刷新"有人说话"的沉默时长
+        #   ⇒ 预算以为群里一直有人聊。撤回同理（正常路径已被 should_process 拦，
+        #   这里再兜一道，防止未来换入口）。
+        try:
+            if int(msg.msg_type or 0) in (MT_SYSTEM, MT_REVOKE):
+                return
+        except (TypeError, ValueError):
+            pass
         content = msg.content or ""
         try:
             hf.note_group_message(
@@ -1590,7 +1633,10 @@ class WppAdapter(BasePlatformAdapter):
                 # TS 同样在查库**之前**判（``dispatcher.ts:338-342``）⇒ 空 @ 不白查一次库。
                 return None
             ts = int(msg.timestamp or 0) or int(time.time())
-            rows = repo_messages.list_group_messages(
+            # ⚠️ pymysql 是**同步**的：直接在收信协程里查库会卡住整个事件循环
+            #   （同进程的其他账号/心跳/WS 一起停顿）。DB 调用一律进线程池。
+            rows = await asyncio.to_thread(
+                repo_messages.list_group_messages,
                 acct.id, msg.chatroom_id or msg.peer_id,
                 limit=resolve_intent_window(acct.raw), before_sec=ts,
             )
@@ -2113,8 +2159,10 @@ class WppAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=f"账号 {acct.id} 未连接",
                                   error_kind="transient")
 
-            # 出站白名单闸（未设 env 时是 no-op）
-            outbound.assert_outbound_allowed(peer_id, acct.id)
+            # 出站白名单闸（未设 env 时是 no-op）；用 connect 时捕获的那份，
+            # 不在发送任务里重新读 ambient env（见 __init__ 的 _send_allowlist）。
+            outbound.assert_outbound_allowed(peer_id, acct.id,
+                                             allowed=self._send_allowlist)
 
             # 心流交付缝（**前置**）：只有"刚判定通过、正在等这一条回复"的群才有登记，
             # 其余（含所有私聊、所有非心流群消息）是一次内存查表后返回 None。
@@ -2148,6 +2196,16 @@ class WppAdapter(BasePlatformAdapter):
                         return result
                     log.warning("[WPP:%s] 多片发送中途失败：前 %d 片已发出（不可撤回）"
                                 "⇒ 按部分发出记账: %s", acct.id, idx, result.error)
+                    # ★ 2026-10-19：把部分投递写进 Hermes 的契约字段。没有它，
+                    #   ``_send_with_retry`` 会把整条消息重发一遍（前 idx 片重复）。
+                    #   有了 partial_overflow，框架只会尝试续传；本适配器不实现
+                    #   ``_resume_partial_send`` ⇒ 直接保留部分失败，不会重发已见头部。
+                    raw = dict(result.raw_response) if isinstance(
+                        result.raw_response, dict) else {}
+                    raw.update({"partial_overflow": True,
+                                "sent_chunks": idx,
+                                "sent_message_id": last_id})
+                    result.raw_response = raw
                     # 账本只认 ``ok``/``msg_id``（见 ``_hf_note_sent``），故这里给一个
                     # "成功发出前几片"的形状；**只记交付缝，不记 bot 上下文** ——
                     # ``note_bot_reply`` 的 docstring 说了整句没出现就不许记，
@@ -2165,8 +2223,19 @@ class WppAdapter(BasePlatformAdapter):
             log.error("[WPP] 发送被拒: %s", exc)
             return SendResult(success=False, error=str(exc), error_kind="forbidden")
         except WppApiError as exc:
-            log.error("[WPP] 发送失败: %s", exc)
-            return SendResult(success=False, error=str(exc), error_kind="transient")
+            # ★ 超时单独分类：Hermes 的 ``_is_timeout_error`` 只认英文
+            #   ``timed out/readtimeout/writetimeout``，而本客户端的超时文案是中文
+            #   「超时」⇒ 原先落进 transient 被自动重试。超时语义是「可能已送达」，
+            #   重试就是重复发送（微信撤不回）。这里补英文前缀，让框架走
+            #   「不重试、不 plain fallback」那条分支。
+            error_text = str(exc)
+            if getattr(exc, "code", None) == "timeout" or "超时" in error_text:
+                log.error("[WPP] 发送超时（结果未知，禁止自动重试）: %s", error_text)
+                return SendResult(success=False,
+                                  error=f"timed out: {error_text}",
+                                  error_kind="unknown")
+            log.error("[WPP] 发送失败: %s", error_text)
+            return SendResult(success=False, error=error_text, error_kind="transient")
         except Exception as exc:
             log.error("[WPP] 发送异常: %s", exc, exc_info=True)
             return SendResult(success=False, error=str(exc), error_kind="unknown")
@@ -2233,7 +2302,7 @@ class WppAdapter(BasePlatformAdapter):
             #   Hermes 移植时丢了 ⇒ ``fromusr`` 恒空 ⇒ 群里的 ``@被回复人`` 从来没出现过。
             #   详见 ``inbound/quote_ref.py`` 的模块 docstring（含"为什么 metadata 那条路
             #   在 wechatpadpro 上永远是空的"）。
-            ident = self._quote_identity(acct, svrid)
+            ident = await self._quote_identity(acct, svrid)
             # metadata 那一档**保留在最前**：它是 TS ``params.fromWxid`` 的对应物
             #   （dispatcher 手上现成的触发消息身份），现在才算真的有消费者。
             fromusr = (metadata or {}).get("quote_from_wxid") or ident.fromusr
@@ -2255,10 +2324,21 @@ class WppAdapter(BasePlatformAdapter):
                 # 前缀会额外占几个字：若 chunk 本身已顶到 2000，拼上前缀可能再超
                 # 普通文本上限 ⇒ 这里再按平台上限分一次（通常只有一片）。
                 resp: dict = {}
+                sent_pieces = 0
                 for piece in outbound.chunk_text(quote_text):
                     resp = await client.send_text(to_wxid=peer_id, content=piece)
                     if not outbound.send_ok(resp):
+                        if sent_pieces:
+                            # 前几片已发出（引用气泡降级后的普通文本），不能再让框架
+                            # 整条重发 —— 与 send() 的多片失败同一契约。
+                            raw = dict(resp) if isinstance(resp, dict) else {"resp": resp}
+                            raw.update({"partial_overflow": True,
+                                        "sent_chunks": sent_pieces})
+                            return SendResult(success=False,
+                                              error=outbound.send_error_text(resp),
+                                              error_kind="unknown", raw_response=raw)
                         break
+                    sent_pieces += 1
         else:
             resp = await client.send_text(to_wxid=peer_id, content=chunk)
 
@@ -2269,8 +2349,8 @@ class WppAdapter(BasePlatformAdapter):
         await self._persist_outbound(acct, peer_id, chunk, ids)
         return SendResult(success=True, message_id=ids.msg_id, raw_response=resp)
 
-    def _quote_identity(self, acct: accounts_mod.Account,
-                        svrid: str) -> quote_ref.QuoteIdentity:
+    async def _quote_identity(self, acct: accounts_mod.Account,
+                              svrid: str) -> quote_ref.QuoteIdentity:
         """按锚点 id 回查被引用消息，拿"是谁被回复了"（``fromusr`` + 该行的 ``peer_name``）。
 
         **永不抛**：查不到、库读不了都只是少一个 ``@`` —— 昵称是装饰，发送才是正事
@@ -2285,8 +2365,9 @@ class WppAdapter(BasePlatformAdapter):
         try:
             from ..data import repo_messages
 
-            row = repo_messages.get_message_by_id_or_new_id(acct.id, msg_id=svrid,
-                                                           new_msg_id=svrid)
+            row = await asyncio.to_thread(
+                repo_messages.get_message_by_id_or_new_id,
+                acct.id, msg_id=svrid, new_msg_id=svrid)
         except Exception as exc:  # noqa: BLE001 —— DB 不可用只降级，不许挡住发送
             log.debug("[WPP:%s] 引用锚点回查降级 %s: %s", acct.id, svrid, exc)
             return quote_ref.QuoteIdentity()
@@ -2335,7 +2416,7 @@ class WppAdapter(BasePlatformAdapter):
         if not name or name == fromusr:
             name = str(db_name or "").strip()
         if not name or name == fromusr:
-            name = self._contact_name(acct.id, fromusr)
+            name = await asyncio.to_thread(self._contact_name, acct.id, fromusr)
         if not name or name == fromusr:
             name = await self._resolve_display_name(acct, client, fromusr)
         if not name or name == fromusr:
@@ -2498,32 +2579,37 @@ class WppAdapter(BasePlatformAdapter):
                          reply_to: str | None = None,
                          metadata: dict | None = None) -> SendResult:
         """发图（URL / 本地路径 / base64 均可）。"""
-        return await self._send_media(chat_id, image_url, "image", caption, metadata)
+        return await self._send_media(chat_id, image_url, "image", caption, metadata,
+                                     reply_to=reply_to)
 
     async def send_image_file(self, chat_id: str, image_path: str, caption: str | None = None,
                               reply_to: str | None = None,
                               metadata: dict | None = None, **kwargs) -> SendResult:
-        return await self._send_media(chat_id, image_path, "image", caption, metadata)
+        return await self._send_media(chat_id, image_path, "image", caption, metadata,
+                                     reply_to=reply_to)
 
     async def send_voice(self, chat_id: str, audio_path: str, caption: str | None = None,
                          reply_to: str | None = None, metadata: dict | None = None,
                          **kwargs) -> SendResult:
-        return await self._send_media(chat_id, audio_path, "voice", caption, metadata)
+        return await self._send_media(chat_id, audio_path, "voice", caption, metadata,
+                                     reply_to=reply_to)
 
     async def send_video(self, chat_id: str, video_path: str, caption: str | None = None,
                          reply_to: str | None = None, metadata: dict | None = None,
                          **kwargs) -> SendResult:
-        return await self._send_media(chat_id, video_path, "video", caption, metadata)
+        return await self._send_media(chat_id, video_path, "video", caption, metadata,
+                                     reply_to=reply_to)
 
     async def send_document(self, chat_id: str, file_path: str, caption: str | None = None,
                             file_name: str | None = None, reply_to: str | None = None,
                             metadata: dict | None = None, **kwargs) -> SendResult:
         return await self._send_media(chat_id, file_path, "file", caption, metadata,
-                                     file_name=file_name)
+                                     file_name=file_name, reply_to=reply_to)
 
     async def _send_media(self, chat_id: str, ref: str, kind: str,
                           caption: str | None, metadata: dict | None,
-                          file_name: str | None = None) -> SendResult:
+                          file_name: str | None = None,
+                          reply_to: str | None = None) -> SendResult:
         """媒体发送的统一实现。
 
         ``ref`` → base64 的解析走 :func:`outbound.resolve_to_base64`（**内建安全闸**：
@@ -2540,7 +2626,8 @@ class WppAdapter(BasePlatformAdapter):
             if client is None:
                 return SendResult(success=False, error=f"账号 {acct.id} 未连接",
                                   error_kind="transient")
-            outbound.assert_outbound_allowed(peer_id, acct.id)
+            outbound.assert_outbound_allowed(peer_id, acct.id,
+                                             allowed=self._send_allowlist)
 
             b64 = await outbound.resolve_to_base64(ref)
             if not b64:
@@ -2574,8 +2661,25 @@ class WppAdapter(BasePlatformAdapter):
                 acct, peer_id, marker, outbound.extract_outbound_msg_ids(resp),
                 msg_type=kind if kind in ("image", "voice", "video", "file") else "file",
                 raw_payload=resp)
-            return SendResult(success=True, message_id=outbound.extract_msg_id(resp),
-                              raw_response=resp)
+            media_id = outbound.extract_msg_id(resp)
+            # ★ 2026-10-19：caption 原先被完全丢掉。Hermes 的
+            #   ``_media_caption_split`` 会把「一张图 + 短文案」合成一次媒体发送，
+            #   ``_send_live_adapter_media`` 已把 caption 传进来 —— 这里不消费，
+            #   用户就只能看到图、看不到说明。媒体已发出后文案单独发；文案失败
+            #   不能返回 failure（否则框架会把整张图再发一遍），但必须留 ERROR。
+            cap = (caption or "").strip()
+            if cap:
+                cap_result = await self.send(chat_id, cap, reply_to=reply_to,
+                                             metadata=metadata)
+                if not cap_result.success:
+                    log.error("[WPP] 媒体已发出但文案发送失败（不重发媒体）: %s",
+                              cap_result.error)
+                    raw = dict(resp) if isinstance(resp, dict) else {"media": resp}
+                    raw["caption_error"] = cap_result.error
+                    return SendResult(success=True, message_id=media_id,
+                                      raw_response=raw)
+                media_id = cap_result.message_id or media_id
+            return SendResult(success=True, message_id=media_id, raw_response=resp)
         except (ValueError, outbound.netguard.GuardError) as exc:
             log.error("[WPP] 媒体发送被拒: %s", exc)
             return SendResult(success=False, error=str(exc), error_kind="forbidden")
@@ -2805,7 +2909,13 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
 
     ⚠️ 旧实现**泄漏 WppClient**（从不 close）—— 这里用 ``async with`` 保证回收。
     """
-    if outbound.is_rejection_phrase(message):
+    # 带附件时**不许**因为文案像拒绝话术就整条丢掉 —— 附件是调用方明确要投递的，
+    # 文案被过滤掉只是"别发这句话"，不是"别发这条消息"（见下方二次判定）。
+    has_media = bool(media_files)
+    if not has_media and outbound.is_rejection_phrase(message):
+        return {"success": True, "message_id": None}
+    # 与 live ``send()`` 同一道：内部机械通知（静默兜底报错 / 💾 自审摘要）绝不进群。
+    if not has_media and outbound.is_machinery_notice(message):
         return {"success": True, "message_id": None}
 
     account_id, peer_id = DEFAULT_ACCOUNT, chat_id
@@ -2825,14 +2935,44 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
         # 出站 @self 闸 —— 与 live ``send()`` 同一道（cron 路径不许绕过，见那处注释）
         message = outbound.strip_self_mention(message or "", acct.self_wxid, acct.nickname)
         if outbound.is_rejection_phrase(message):
-            return {"success": True, "message_id": None}
+            if not has_media:
+                return {"success": True, "message_id": None}
+            message = ""      # 只丢这句文案；下面照常发附件
+        if outbound.is_machinery_notice(message):
+            if not has_media:
+                return {"success": True, "message_id": None}
+            message = ""
 
-        outbound.assert_outbound_allowed(peer_id, acct.id)
+        # 进程外 cron 没有 adapter 的 connect 期捕获；这里按 profile 目录直接读
+        # 白名单。否则 platform_gate_env 会回落根 .env（2026-10-19 07:36 事故）。
+        profile_home = None
+        try:
+            from agent.secret_scope import current_secret_scope_home
+            profile_home = current_secret_scope_home()
+        except Exception:  # noqa: BLE001
+            profile_home = None
+        if not profile_home:
+            root_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+            candidates = []
+            if os.environ.get("HERMES_PROFILE"):
+                candidates.append(os.path.join(root_home, "profiles",
+                                               os.environ["HERMES_PROFILE"]))
+            candidates.append(os.path.join(root_home, "profiles", acct.agent))
+            profile_home = next((c for c in candidates if os.path.isdir(c)), None)
+        send_allowlist = outbound.netguard.send_allowlist(profile_home=profile_home)
+        outbound.assert_outbound_allowed(peer_id, acct.id, allowed=send_allowlist)
         async with WppClient(base_url=acct.api_base_url, authcode=acct.authcode,
-                             account_id=acct.id, timeout=30) as client:
+                             account_id=acct.id, timeout=30,
+                             send_allowlist=send_allowlist) as client:
             message_id = None
             sent = 0
-            for chunk in outbound.chunk_text(message):
+            chunks = outbound.chunk_text(message)
+            if not chunks and not has_media:
+                # ★ 什么都发不出去时**不许**回 success（``message_id=None``）——
+                #   调用方会把它记成"已投递"，实际群里一条都没有。空输入是调用方
+                #   的问题，如实报错（带附件时允许文本为空，见下面的附件段）。
+                return {"error": "空消息：没有可发送的文本或附件"}
+            for chunk in chunks:
                 resp = await client.send_text(to_wxid=peer_id, content=chunk)
                 if not outbound.send_ok(resp):
                     # ★ 多片消息中途失败时，前几片**已经发出**（微信撤不回）。旧实现只
@@ -2852,7 +2992,66 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
                 # ★ 与 live ``_send_chunk`` 同一套落库 —— 否则 cron 投递在
                 #   ``wpp_messages`` 里隐形，事后无法核"到底发没发/发给谁"。
                 await _persist_outbound_record(acct, peer_id, chunk, ids)
-            return {"success": True, "message_id": message_id}
+
+            # ── 附件（2026-10-19）─────────────────────────────────────────
+            # Hermes cron/send_message 的 ``standalone_sender_fn`` 契约里
+            # ``media_files`` 是 ``[(路径, is_voice), …]`` —— 旧实现签名收了却**完全
+            # 没消费**：模型生成的图片/文件被静默丢弃，调用方还收到 success
+            # （等于"发了"的假账）。这里按扩展名走与 live ``_send_media`` 同一条链路。
+            media_sent = 0
+            for item in (media_files or []):
+                if isinstance(item, str):
+                    media_path, is_voice = item, False
+                else:
+                    try:
+                        media_path, is_voice = item[0], bool(item[1])
+                    except (TypeError, ValueError, IndexError):
+                        log.warning("[WPP] standalone 跳过无法解析的媒体项: %r", item)
+                        continue
+                path = str(media_path or "")
+                if not path:
+                    continue
+                kind = outbound.media_kind(path, is_voice=is_voice,
+                                           force_document=force_document)
+                b64 = await outbound.resolve_to_base64(path)
+                if not b64:
+                    err = f"媒体内容不可用: {path[:120]}"
+                    if sent or media_sent:
+                        return {"error": err, "partial": True, "sent_chunks": sent,
+                                "sent_media": media_sent, "message_id": message_id}
+                    return {"error": err}
+                name = os.path.basename(path) or f"{kind}.bin"
+                if kind == "image":
+                    resp = await client.send_image(to_wxid=peer_id, image_base64=b64)
+                elif kind == "voice":
+                    resp = await WppAdapter._send_voice_media(client, peer_id, path, name, b64)
+                elif kind == "video":
+                    thumb = await WppAdapter._video_thumb(path)
+                    if not thumb:
+                        log.warning("[WPP] standalone 视频无缩略图（vendor 可能拒收）: %s",
+                                    name)
+                    resp = await client.send_video(to_wxid=peer_id, video_base64=b64,
+                                                   thumb_base64=thumb)
+                else:
+                    resp = await client.send_file_v2(to_wxid=peer_id, file_name=name,
+                                                     file_base64=b64)
+                if not outbound.send_ok(resp):
+                    err = outbound.send_error_text(resp)
+                    if sent or media_sent:
+                        log.warning("[WPP] standalone 附件中途失败：已发 %d 段文本 + %d 个附件"
+                                    "（不可撤回）⇒ 按部分发出上报", sent, media_sent)
+                        return {"error": err, "partial": True, "sent_chunks": sent,
+                                "sent_media": media_sent, "message_id": message_id}
+                    return {"error": err}
+                media_sent += 1
+                ids = outbound.extract_outbound_msg_ids(resp)
+                message_id = ids.msg_id or message_id
+                marker = {"image": "[图片]", "voice": "[语音]",
+                          "video": "[视频]"}.get(kind, f"[文件] {name}")
+                await _persist_outbound_record(acct, peer_id, marker, ids,
+                                               msg_type=kind, raw_payload=resp)
+
+            return {"success": True, "message_id": message_id, "media_sent": media_sent}
     except Exception as exc:
         log.error("[WPP] standalone 发送失败: %s", exc, exc_info=True)
         return {"error": str(exc)}

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -61,7 +62,16 @@ def quote_reply_fits(text: str) -> bool:
     return len((text or "").strip()) <= QUOTE_REPLY_MAX_CHARS
 
 #: 2026-09-01 修复：过滤「无 @提及，按群规则不回复」类拒绝话术（老板在益融管理群看到 2 次）
-REJECTION_PHRASE_RE = re.compile(r"无\s*@\s*提及|按群规则不回复|不回复\s*[:：]")
+#:
+#: ⚠️ 2026-10-19 收窄：裸 ``无 @提及`` **不再**单独命中 —— 它可能是正常业务话术的一部分
+#: （「这个客户无 @提及 需求」），而命中 = **静默丢弃**，用户永远不知道为什么没回。
+#: 保留的两种是"整句拒绝声明"：``无 @提及…不回复`` 与行首 ``不回复：``。
+REJECTION_PHRASE_RE = re.compile(
+    r"无\s*@\s*提及[，,、\s]*(?:按群规则)?不回复"
+    r"|按群规则不回复"
+    r"|^\s*不回复\s*[:：]",
+    re.MULTILINE,
+)
 
 #: 2026-10-18 事故修复：网关**内部机械通知**严禁进生产微信群。
 #: 现场：移动业务对接群里漏出两条——① 网关"静默兜底"英文报错
@@ -76,7 +86,11 @@ REJECTION_PHRASE_RE = re.compile(r"无\s*@\s*提及|按群规则不回复|不回
 #: 形状固定（glyph + provider + em dash + recalled N memor(y|ies)），按行首锚定。
 MACHINERY_NOTICE_RE = re.compile(
     r"only a silence marker|只返回了静默标记|只回傳了靜默標記"
-    r"|Self-improvement review|自我改进回顾|自我改進檢閱|💾"
+    r"|Self-improvement review|自我改进回顾|自我改進檢閱"
+    # ⚠️ 2026-10-19：💾 **必须带标题**。旧写法是裸 ``|💾`` ⇒ 任何正文里出现这个
+    #    表情（「记得备份💾」）都会被整条静默丢弃。它是自审摘要的**行首标记**，
+    #    不是关键词。
+    r"|💾\s*(?:Self-improvement review|自我改进回顾|自我改進檢閱)"
     r"|^\s*(?:🧠|👁️)\s+\S.*?—\s*recalled\s+\d+\s+memor(?:y|ies)\s*$"
     # 「忙碌回执」同属过程话术：网关在处理上一轮时又收到消息，会回一行
     # 「⏳ 已排队至下一回合 / ⚡ 正在中断当前任务 / ⏳ 网关正在重启…」。
@@ -152,14 +166,25 @@ def send_ok(resp: Any) -> bool:
         return True
     lst = data.get("List")
     if isinstance(lst, (list, tuple)) and lst:
+        saw_ret = False
         for item in lst:
             # 非 dict 的条目没有 Ret 可判 —— 跳过（不因形状怪异把成功判成失败）
             ret = item.get("Ret") if isinstance(item, dict) else None
             if ret is None:
                 continue
+            saw_ret = True
             if not _ret_ok(ret):
                 return False
-        return True
+        if saw_ret:
+            return True
+        # ★ 2026-10-19：List 非空但**所有条目都缺 Ret** 时不能直接判成功。
+        #   旧写法 == 只要 List 非空就 True，连 BaseResponse.ret=101 都不看 ⇒
+        #   vendor 明确拒绝也报成功（幽灵出站记录）。没有逐条结果就退回
+        #   BaseResponse；两边都没有可用判据时才按老 vendor 兼容判成功。
+        br = data.get("BaseResponse")
+        if not isinstance(br, dict):
+            return True
+        return _ret_ok(br.get("ret"))
     br = data.get("BaseResponse")
     if not isinstance(br, dict):
         return True
@@ -373,6 +398,11 @@ def chunk_text(content: str, limit: int = _TEXT_CHUNK_LIMIT) -> list[str]:
     - 旧实现按"行"拼，本实现按"段"拼（空行分隔），对齐蓝本。
     """
     content = content or ""
+    if not content.strip():
+        # ★ 空串/纯空白 ⇒ **零片**，不是 ``[""]``：``[""]`` 会让调用方真去发一条空文本
+        #   （cron 只投附件时尤其常见 —— 文本为空但媒体列表非空），vendor 要么报错
+        #   要么推一条空气泡。去掉它之后"没文本"自然退化成"不发文本"。
+        return []
     if len(content) <= limit:
         return [content]
 
@@ -607,6 +637,31 @@ def build_quote_reply_xml(reply_content: str, svrid: str, fromusr: str = "") -> 
 
 # ------------------------------------------------------------------ 媒体解析
 
+#: 走 ``/Msg/SendImg`` 的图片扩展名（与 Hermes ``send_message`` 的图片集合对齐）。
+IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic"})
+
+#: 走 ``/Msg/SendVideo`` 的视频扩展名。
+VIDEO_EXTS = frozenset({".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".3gp"})
+
+
+def media_kind(path: str, *, is_voice: bool = False,
+               force_document: bool = False) -> str:
+    """Hermes ``media_files`` 的一项 → ``image`` / ``voice`` / ``video`` / ``file``。
+
+    ``force_document`` 优先级最高（Hermes 用它把图片强制按文件发），其次 ``is_voice``
+    （发送方已判定这是语音，具体能否进 ``/Msg/SendVoice`` 由 SILK 转码那一步决定）。
+    """
+    if force_document:
+        return "file"
+    if is_voice:
+        return "voice"
+    ext = os.path.splitext(path or "")[1].lower()
+    if ext in IMAGE_EXTS:
+        return "image"
+    if ext in VIDEO_EXTS:
+        return "video"
+    return "file"
+
 
 async def resolve_to_base64(ref: str, *, timeout: int = 15) -> str:
     """URL / 本地路径 / base64 / ``data:`` → 纯 base64。
@@ -630,11 +685,16 @@ async def resolve_to_base64(ref: str, *, timeout: int = 15) -> str:
         return base64.b64encode(data).decode()
 
     if ref.startswith("/") or ref.startswith("~"):
-        if not netguard.is_local_read_allowed(ref):
-            log.warning("[WPP] 本地媒体读取被拒（不在白名单）: %s", ref[:60])
+        # ``~`` 必须先展开：白名单判据与 open() 用的都应是同一个真实路径，
+        # 否则辨识与读取分家（旧实现直接 open("~...") 必失败）。
+        # ``expanduser`` 是纯字符串处理（读 HOME 环境变量），不碰文件系统 ——
+        # 真正的 IO 在下面的 open()，那一步已被 per-file-ignores 的 ASYNC230 覆盖。
+        local_ref = os.path.expanduser(ref)  # noqa: ASYNC240 —— 无 IO，仅字符串展开
+        if not netguard.is_local_read_allowed(local_ref):
+            log.warning("[WPP] 本地媒体读取被拒（不在白名单）: %s", local_ref[:60])
             return ""
         try:
-            with open(ref, "rb") as fh:
+            with open(local_ref, "rb") as fh:
                 return base64.b64encode(fh.read()).decode()
         except OSError as exc:
             log.warning("[WPP] 本地媒体读取失败: %s", exc)
@@ -644,6 +704,7 @@ async def resolve_to_base64(ref: str, *, timeout: int = 15) -> str:
     return ref
 
 
-def assert_outbound_allowed(peer_id: str, account_id: str = "") -> None:
+def assert_outbound_allowed(peer_id: str, account_id: str = "",
+                            *, allowed: tuple[str, ...] | None = None) -> None:
     """出站白名单闸（调试保险）。未设 ``WECHATPRO_SEND_ALLOWLIST`` 时是 no-op。"""
-    netguard.check_outbound_allowed(peer_id, account_id)
+    netguard.check_outbound_allowed(peer_id, account_id, allowed=allowed)

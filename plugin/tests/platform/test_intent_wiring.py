@@ -89,10 +89,10 @@ def test_h1_the_master_switch_is_checked_before_any_io():
     fn = _fn("_intent_channel_context")
     src = _code(fn)
     for needle in ("acct.group_context_enabled", "classify_group_intent(",
-                   "list_group_messages(", "select_intent_context("):
+                   "list_group_messages", "select_intent_context("):
         assert needle in src, f"装配缺一块：{needle}"
     order = [src.index("acct.group_context_enabled"), src.index("classify_group_intent("),
-             src.index("list_group_messages("), src.index("select_intent_context(")]
+             src.index("list_group_messages"), src.index("select_intent_context(")]
     assert order == sorted(order), f"守卫或查询顺序错了（开关要第一个判）：{order}"
 
     # 两个守卫都得**真的拦住**：body 必须就是 `return None`。
@@ -107,7 +107,7 @@ def test_h1_the_master_switch_is_checked_before_any_io():
 
     # 非群消息同样在 IO 之前出局（TS 的 `if (msg.peerKind !== "group") return null`）
     assert "msg.is_group" in src
-    assert src.index("msg.is_group") < src.index("list_group_messages(")
+    assert src.index("msg.is_group") < src.index("list_group_messages")
 
     # 反面自证：把守卫挪到查库**之后**（真违规形态），判据要能红
     probe = ("rows = repo_messages.list_group_messages(acct.id, gid)\n"
@@ -160,12 +160,22 @@ def test_h3_the_candidate_pool_excludes_the_trigger_message_itself():
     assert "msg.timestamp" in src, "ts 必须来自这条消息自己的时间戳"
     assert "before_sec=" in src, "没传 before_sec ⇒ 触发消息会被喂回给意图判断"
 
-    call = [n for n in ast.walk(_fn("_intent_channel_context"))
-            if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "list_group_messages"]
-    assert len(call) == 1, f"list_group_messages 调用点不止一个：{len(call)}"
-    kw = {k.arg: ast.unparse(k.value) for k in call[0].keywords}
+    fn = _fn("_intent_channel_context")
+    refs = [n for n in ast.walk(fn)
+            if isinstance(n, ast.Attribute) and n.attr == "list_group_messages"]
+    assert len(refs) == 1, f"list_group_messages 调用点不止一个：{len(refs)}"
+    # 2026-10-19：同步 pymysql 查询挪进 ``asyncio.to_thread``（否则卡事件循环）。
+    # 被调函数变成 to_thread 的**位置参数**，业务参数整体右移一位。
+    threaded = [n for n in ast.walk(fn)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "to_thread"
+                and n.args
+                and ast.unparse(n.args[0]) == "repo_messages.list_group_messages"]
+    assert threaded, "同步 DB 查询必须走 asyncio.to_thread（否则阻塞事件循环）"
+    call = threaded[0]
+    offset = 1
+    kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
     assert "before_sec" in kw, f"before_sec 必须显式传：{kw}"
     assert "ts" in kw["before_sec"], f"before_sec 要取这条消息的 ts：{kw['before_sec']}"
     # 窗口大小走 resolver（TS `resolveGroupWindow`，1..100、默认 10），不在这里硬编码
@@ -173,9 +183,10 @@ def test_h3_the_candidate_pool_excludes_the_trigger_message_itself():
         f"limit 没走 resolver（硬编码的窗口改不动）：{kw.get('limit')}"
     # 群 id：TS 用 peerId；py2 优先 chatroom_id（落库形态兼容见 W1）。
     # 这一支是**位置**传参（``(account_id, group_id, ...)``），所以判位置不判关键字。
-    gid = kw.get("group_id") or ast.unparse(call[0].args[1])
+    gid = kw.get("group_id") or ast.unparse(call.args[1 + offset])
     assert gid.startswith("msg.chatroom_id"), f"群 id 取错了：{gid}"
-    assert ast.unparse(call[0].args[0]) == "acct.id", "第一个位置参数必须是账号 id"
+    assert ast.unparse(call.args[0 + offset]) == "acct.id", \
+        "第一个位置参数必须是账号 id"
 
 
 def test_h4_none_means_do_not_inject_and_it_survives_the_walk_back():

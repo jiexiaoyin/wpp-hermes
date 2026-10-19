@@ -247,7 +247,10 @@ def test_the_four_name_sources_are_tried_in_order() -> None:
     db = [n.lineno for n in ast.walk(qp) if isinstance(n, ast.Assign)
           for t in n.targets if isinstance(t, ast.Name) and t.id == "name"
           and ast.unparse(n.value) == "str(db_name or '').strip()"]
-    contacts = _line(_calls(qp, "_contact_name"))
+    # ``_contact_name`` 走 ``asyncio.to_thread(self._contact_name, …)`` —— 它是
+    # 作为**参数**传进去的，不再是 Call 节点，按属性引用找。
+    contacts = min(n.lineno for n in ast.walk(qp)
+                   if isinstance(n, ast.Attribute) and n.attr == "_contact_name")
     vendor = _line(_calls(qp, "_resolve_display_name"))
     final = _line(_calls(qp, "build_mention_prefix"))
     assert meta and db, (meta, db)
@@ -377,8 +380,14 @@ def test_the_anchor_lookup_asks_by_both_ids_in_one_query() -> None:
     "锚点其实是服务端 id"的那一半，而**漏掉就是静默不 @**。
     """
     qi = _methods()["_quote_identity"]
-    call = _one(qi, "get_message_by_id_or_new_id")
-    assert [ast.unparse(a) for a in call.args] == ["acct.id"]
+    # 同步 pymysql 调用必须包在 ``asyncio.to_thread(...)`` 里（否则慢库会卡住事件
+    # 循环）；被包住的函数是**参数**，不是 Call 节点。
+    threaded = [c for c in _calls(qi, "to_thread")
+                if c.args and isinstance(c.args[0], ast.Attribute)
+                and c.args[0].attr == "get_message_by_id_or_new_id"]
+    assert len(threaded) == 1, "回查必须走 to_thread 且只有一个调用点"
+    call = threaded[0]
+    assert [ast.unparse(a) for a in call.args[1:]] == ["acct.id"]
     assert _kv(call) == {"msg_id": "svrid", "new_msg_id": "svrid"}, _kv(call)
 
 
@@ -653,7 +662,7 @@ def test_the_identity_comes_from_the_message_row(adapter, monkeypatch) -> None:
 
     monkeypatch.setattr(repo_messages, "get_message_by_id_or_new_id", fake)
     ad = _shell(adapter, names=False)
-    ident = ad._quote_identity(ACCT, "9001")
+    ident = asyncio.run(ad._quote_identity(ACCT, "9001"))
     assert (ident.fromusr, ident.display_name, ident.matched) == (SENDER, "张三", True)
     assert seen == [("acct-42", "9001", "9001")], "两个 id 都要问（厂商回的可能是任一个）"
 
@@ -666,5 +675,5 @@ def test_a_broken_database_only_costs_the_mention(adapter, monkeypatch) -> None:
 
     monkeypatch.setattr(repo_messages, "get_message_by_id_or_new_id", boom)
     ad = _shell(adapter, names=False)
-    ident = ad._quote_identity(ACCT, "9001")
+    ident = asyncio.run(ad._quote_identity(ACCT, "9001"))
     assert (ident.fromusr, ident.matched) == ("", False), "降级成空身份，但不许抛"

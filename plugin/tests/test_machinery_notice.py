@@ -48,11 +48,37 @@ def test_machinery_notice_matches_known_forms(text):
     "我 recalled 9 memories 里的那条记录", # 句中出现不能误伤（必须整行形状）
     "已排队至下一回合前，请先把上一单出库",   # 不带回执 glyph 的正常业务句
     "正在中断当前任务的客户，请稍等",         # 同上：没有行首 glyph 不匹配
-    "",
+    "",                                      # ⚠️ 空输入
     None,
+    # ★ 2026-10-19：💾 是自审摘要的**行首标记**，不是关键词 —— 旧判据里裸 ``|💾``
+    #   会把下面这些正常业务话术整条静默丢弃（用户永远等不到回复）。
+    "记得备份💾",
+    "今天出单 12 台💾 记录一下",
 ])
 def test_machinery_notice_does_not_match_business_text(text):
     assert not outbound.is_machinery_notice(text)
+
+
+@pytest.mark.parametrize("text", [
+    "无 @提及，按群规则不回复",
+    "无@提及,按群规则不回复",
+    "不回复：没有需要回应的内容",
+    "前缀\n  不回复：本轮无事",
+])
+def test_rejection_phrase_matches_the_meta_statements(text):
+    assert outbound.is_rejection_phrase(text)
+
+
+@pytest.mark.parametrize("text", [
+    # ★ 2026-10-19：裸「无 @提及」不再单独命中 —— 它可能只是业务描述的一部分，
+    #   而命中 = 静默丢弃（用户永远不知道为什么没回）。
+    "这个客户无 @提及 需求，我们先不回复",
+    "群里没人 @ 你，这条不用管",
+    "",
+    None,
+])
+def test_rejection_phrase_does_not_match_business_text(text):
+    assert not outbound.is_rejection_phrase(text)
 
 
 @pytest.fixture

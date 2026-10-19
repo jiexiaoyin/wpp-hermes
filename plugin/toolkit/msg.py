@@ -50,6 +50,10 @@ log = logging.getLogger(__name__)
 _get_client = registry.get_client
 _mk_handler = registry.mk_handler
 
+#: 群发单次目标上限（与 ``core.outbound_guard._MAX_TARGETS`` 同值）。
+#: schema 的 ``maxItems`` 只是给模型的提示，**不能**当运行期约束。
+_MAX_MASS_TARGETS = 64
+
 
 async def _resolve_to_base64(ref: str) -> str:
     """旧契约的**抛错版**包装（别换成直接引用 outbound 那个，见模块 docstring）。"""
@@ -63,11 +67,14 @@ async def _resolve_to_base64(ref: str) -> str:
     ref = (ref or "").strip()
     if not ref:
         return ""  # 旧实现末支：空串原样返回，不抛（send_file 允许 fileUrl 缺省）
-    if not (ref.startswith("data:") or ref.startswith("http") or ref.startswith("/")):
+    if not (ref.startswith("data:") or ref.startswith("http")
+            or ref.startswith("/") or ref.startswith("~")):
         return ref  # 旧实现末支：既非 URL 也非路径 ⇒ 当作已是 base64
     b64 = await outbound.resolve_to_base64(ref)
     if not b64:
-        raise WppApiError(f"媒体解析失败（取不到内容，拒绝发送空媒体）: {ref[:60]}")
+        raise WppApiError("media_unresolved",
+                          f"媒体解析失败（取不到内容，拒绝发送空媒体）: {ref[:60]}",
+                          "/Msg/UploadImg")
     return b64
 
 
@@ -225,6 +232,9 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             payload["chunked"] = True
             payload["chunks"] = len(chunks)
             payload["sentChunks"] = sent
+            # 部分投递必须显式上浮：模型看到 ok:false 时不能把已发出的前几片再发一遍。
+            if sent:
+                payload["partial"] = True
         return payload
 
     # sendImage: 发送图片（UploadImg 上传即发送）
@@ -235,7 +245,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         aid, client = acct(adapter, params)
         # base64 处理（本地路径/URL 转 base64）
         base64_str = img
-        if img.startswith("http") or img.startswith("/"):
+        if img.startswith(("http", "/", "~", "data:")):
             base64_str = await _resolve_to_base64(img)
         resp = await client.send_image(to_wxid, base64_str)
         data = resp.get("Data") or {}
@@ -556,6 +566,17 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         adapter = adapter_getter()
         to_ids = params.get("toIds", params.get("to_ids", []))
         content = params.get("content", "")
+        # ★ 模型传进来的数组不受 schema 约束（maxItems 只是提示）⇒ 在 handler
+        #   再硬性收口。群发是**一次请求打 N 个群、撤不回**，空列表还会让厂商
+        #   自行解释（可能广播）。
+        raw_ids = [to_ids] if isinstance(to_ids, str) else list(to_ids or [])
+        to_ids = list(dict.fromkeys(
+            str(t).strip() for t in raw_ids if str(t).strip()))
+        if not to_ids:
+            return {"ok": False, "error": "toIds 为空：群发必须有明确目标"}
+        if len(to_ids) > _MAX_MASS_TARGETS:
+            return {"ok": False,
+                    "error": f"toIds 超过上限 {_MAX_MASS_TARGETS}（收到 {len(to_ids)}）"}
         aid, client = acct(adapter, params)
         resp = await client.send_group_mass_text(to_ids, content)
         data = resp.get("Data") or {}
@@ -611,7 +632,8 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         if not voice:
             return {"error": "voiceUrl/voiceBase64 至少给一个（厂商不收空语音）"}
         # 非 base64 尝试下载（安全：SSRF 防护）
-        base64_str = await _resolve_to_base64(voice) if (voice.startswith("http") or voice.startswith("/")) else voice
+        base64_str = (await _resolve_to_base64(voice)
+                      if voice.startswith(("http", "/", "~", "data:")) else voice)
         # 厂商 /Msg/SendVoice **只收 SILK**（Type=4）。mp3 等其它格式没有转码器时
         # 降级成文件消息（TS v1.3.53 VOICE-DEGRADE 同口径），绝不把 mp3 当语音发。
         no_query = voice.split("?")[0].lower()
@@ -641,9 +663,10 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         duration = params.get("videoDuration", 0)
         aid, client = acct(adapter, params)
         # 安全下载（SSRF 防护 + 本地白名单）
-        base64_str = await _resolve_to_base64(video) if (video.startswith("http") or video.startswith("/")) else video
+        base64_str = (await _resolve_to_base64(video)
+                      if video.startswith(("http", "/", "~", "data:")) else video)
         thumb_b64 = ""
-        if thumb.startswith("http") or thumb.startswith("/"):
+        if thumb.startswith(("http", "/", "~", "data:")):
             thumb_b64 = await _resolve_to_base64(thumb)
         body = {"ToWxid": to_wxid, "Base64": base64_str, "ImageBase64": thumb_b64, "PlayLength": int(duration)}
         resp = await client.call("/Msg/SendVideo", body)
@@ -873,7 +896,9 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         ("wpp_group_mass_text", "群发文本到多个群", {
             "type": "object",
             "properties": {
-                "toIds": {"type": "array", "items": {"type": "string"}, "description": "群 @chatroom id 数组"},
+                "toIds": {"type": "array", "items": {"type": "string"},
+                          "maxItems": _MAX_MASS_TARGETS,
+                          "description": "群 @chatroom id 数组"},
                 "content": {"type": "string"},
                 "account_id": {"type": "string"},
             },

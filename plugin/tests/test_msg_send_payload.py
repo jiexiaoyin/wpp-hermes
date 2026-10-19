@@ -16,7 +16,11 @@
 
 from __future__ import annotations
 
-from plugin.toolkit.msg import _send_payload
+import asyncio
+import json
+import types
+
+from plugin.toolkit.msg import _send_payload, register_msg_tools
 
 
 def test_list_ret_rejection_is_reported_as_failure() -> None:
@@ -54,3 +58,57 @@ def test_extra_fields_are_preserved() -> None:
 
 def test_non_dict_response_is_failure() -> None:
     assert _send_payload(None)["ok"] is False
+
+
+# ------------------------------------------------- 群发目标上限（2026-10-19）
+
+
+class _MassClient:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def send_group_mass_text(self, to_ids, content):
+        self.calls.append(list(to_ids))
+        return {"Code": 0, "Data": {"BaseResponse": {"ret": 0}}}
+
+
+def _mass_handler():
+    client = _MassClient()
+    adapter = types.SimpleNamespace(_clients={"acct": client})
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.tools: dict[str, dict] = {}
+
+        def register_tool(self, **kw) -> None:
+            self.tools[kw["name"]] = kw
+
+    ctx = _Ctx()
+    register_msg_tools(ctx, lambda: adapter)
+    handler = ctx.tools["wpp_group_mass_text"]["handler"]
+
+    def call(**params):
+        return json.loads(asyncio.run(handler(account_id="acct", **params)))
+
+    return client, call
+
+
+def test_group_mass_rejects_empty_targets() -> None:
+    client, call = _mass_handler()
+    out = call(toIds=[], content="hi")
+    assert out["ok"] is False and "为空" in out["error"]
+    assert client.calls == [], "空目标绝不许发给厂商"
+
+
+def test_group_mass_rejects_more_than_64_targets() -> None:
+    client, call = _mass_handler()
+    out = call(toIds=[f"g{i}@chatroom" for i in range(65)], content="hi")
+    assert out["ok"] is False and "上限 64" in out["error"]
+    assert client.calls == []
+
+
+def test_group_mass_dedupes_and_trims_targets() -> None:
+    client, call = _mass_handler()
+    out = call(toIds=[" a@chatroom ", "a@chatroom", "b@chatroom", ""], content="hi")
+    assert out["ok"] is True
+    assert client.calls == [["a@chatroom", "b@chatroom"]]
