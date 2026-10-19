@@ -1,4 +1,26 @@
 # 只放工具链配置（本仓不打包发布）。pytest 配置仍在 pytest.ini。
+[project]
+name = "wpp-hermes-py2"
+version = "2.0.2"
+description = "WeChatPadPro 的 Hermes 平台插件（个人微信 → Hermes Agent）"
+requires-python = ">=3.11"
+# 运行时依赖：全部是**函数体内延迟导入**（注册期不能有第三方依赖，见
+# plugin/toolkit/hermes_contract.py 的取证），但部署机仍必须装。
+# 上界按 next-major 卡死（与 Hermes 的依赖策略一致）。
+dependencies = [
+  "aiohttp>=3.9,<4",
+  "pymysql>=1.1,<2",
+  "websockets>=12,<16",
+  "pyyaml>=6,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<10",
+  "pytest-asyncio>=0.23,<2",
+  "ruff>=0.6,<1",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"
@@ -55,3 +77,5 @@ ignore = [
 "plugin/platform/outbound.py" = ["ASYNC230"]
 "plugin/platform/silk_encoder.py" = ["ASYNC230", "ASYNC240"]
 "plugin/toolkit/msg.py" = ["ASYNC221", "ASYNC230", "ASYNC240"]
+# adapter_media.py 是从 adapter.py 整体搬出来的，存量性质与上面一致（未改行为）。
+"plugin/platform/adapter_media.py" = ["ASYNC230", "ASYNC240", "G201"]
