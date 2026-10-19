@@ -1,0 +1,182 @@
+"""群名同步（``inbound/name_sync.py``）的契约。
+
+这个模块原来覆盖率 **0%**（54 条语句一条都没跑过），但它做的是"把厂商群列表
+写进 ``wpp_chatrooms``"——写错了会直接污染 WebUI 的会话标题，而且**失败是静默的**
+（只记 debug/warning，不影响收发消息）。所以这里钉四件事：
+
+1. **三种返回形状都要认**（``group_details`` / ``items`` / ``GroupList``）——
+   厂商换一版字段名，群名就集体停更，而日志只有一行 warning；
+2. **``Code != 0`` 必须抛**，不能被当成"空列表"静默吞掉（否则永远 0 个群）；
+3. **单个群写库失败不拖累整批**（事务粒度是行，不是批）；
+4. **``CancelledError`` 必须原样抛出**——被 ``except Exception`` 吃掉的话，
+   连接关闭时这个任务永远退不出去。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from plugin.inbound import name_sync
+
+
+# ---------------------------------------------------------------- _group_rows
+
+@pytest.mark.parametrize("key", ["group_details", "items", "GroupList", "groups"])
+def test_group_rows_accepts_every_known_shape(key):
+    payload = {"Data": {key: [{"id": "1@chatroom", "name": "群一"}]}}
+    rows = name_sync._group_rows(payload)
+    assert len(rows) == 1
+    assert rows[0]["id"] == "1@chatroom"
+
+
+def test_group_rows_tolerates_lowercase_data():
+    payload = {"data": {"items": [{"id": "2@chatroom"}]}}
+    assert name_sync._group_rows(payload) == [{"id": "2@chatroom"}]
+
+
+@pytest.mark.parametrize("payload", [
+    {},
+    {"Data": None},
+    {"Data": []},                       # data 不是 dict
+    {"Data": {"group_details": []}},    # 空列表
+    {"Data": {"items": ["not-a-dict"]}},
+    {"Data": {"unknown_key": [{"id": "1@chatroom"}]}},
+])
+def test_group_rows_returns_empty_instead_of_raising(payload):
+    """厂商换字段 / 返回异常形状时，同步应该安静返回 0，不是把任务炸掉。"""
+    assert name_sync._group_rows(payload) == []
+
+
+# --------------------------------------------------------- apply_group_rows
+
+def test_apply_group_rows_skips_rows_without_an_id():
+    repo = MagicMock()
+    with patch("plugin.data.repo_messages.upsert_chatroom", repo.upsert_chatroom):
+        written = name_sync.apply_group_rows("default", [{"name": "无 id 的群"}])
+    assert written == 0
+    repo.upsert_chatroom.assert_not_called()
+
+
+def test_apply_group_rows_falls_back_to_display_name():
+    """``name`` 为空时用 ``display_name``（通常形如「群名(人数)」）。"""
+    repo = MagicMock()
+    with patch("plugin.data.repo_messages.upsert_chatroom", repo.upsert_chatroom):
+        name_sync.apply_group_rows("default", [
+            {"id": "1@chatroom", "name": "", "display_name": "技术群(12)"},
+        ])
+    kwargs = repo.upsert_chatroom.call_args.kwargs
+    assert kwargs["nickname"] == "技术群(12)"
+
+
+def test_apply_group_rows_keeps_writing_after_one_row_fails():
+    """单群写库失败只记 debug，不能中断整批 —— 否则一个坏群名让其余全停更。"""
+    ok, bad = MagicMock(), MagicMock(side_effect=RuntimeError("boom"))
+    calls = {"n": 0}
+
+    def _upsert(account_id, chatroom_id, **kw):
+        calls["n"] += 1
+        return bad(account_id, chatroom_id) if chatroom_id == "bad@chatroom" else ok()
+
+    with patch("plugin.data.repo_messages.upsert_chatroom", _upsert):
+        written = name_sync.apply_group_rows("default", [
+            {"id": "bad@chatroom", "name": "坏"},
+            {"id": "good@chatroom", "name": "好"},
+        ])
+    assert calls["n"] == 2, "第二个群必须仍然被尝试"
+    assert written == 1, "只有成功的那一行计数"
+
+
+def test_apply_group_rows_passes_owner_and_member_count():
+    repo = MagicMock()
+    with patch("plugin.data.repo_messages.upsert_chatroom", repo.upsert_chatroom):
+        name_sync.apply_group_rows("default", [
+            {"id": "1@chatroom", "name": "群", "owner_id": "wxid_owner", "member_count": 42},
+        ])
+    kwargs = repo.upsert_chatroom.call_args.kwargs
+    assert kwargs["owner_wxid"] == "wxid_owner"
+    assert kwargs["member_count"] == 42
+
+
+# --------------------------------------------------------------- sync_once
+
+@pytest.mark.asyncio
+async def test_sync_once_raises_on_nonzero_code():
+    """``Code != 0`` 不能当成空列表 —— 否则群名永远停在旧快照且无告警。"""
+    client = MagicMock()
+    client.call = AsyncMock(return_value={"Code": 40001, "Message": "auth failed"})
+
+    with pytest.raises(RuntimeError, match="Code=40001"):
+        await name_sync.sync_once(client, "default")
+
+
+@pytest.mark.asyncio
+async def test_sync_once_returns_zero_when_the_list_is_empty():
+    client = MagicMock()
+    client.call = AsyncMock(return_value={"Code": 0, "Data": {"group_details": []}})
+
+    assert await name_sync.sync_once(client, "default") == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_once_clears_the_title_cache_after_writing():
+    """同步和标题解析同进程 —— 写完必须清缓存，否则新群名要等 5 分钟 TTL。"""
+    client = MagicMock()
+    client.call = AsyncMock(return_value={
+        "Code": 0, "Data": {"group_details": [{"id": "1@chatroom", "name": "群"}]}})
+
+    with patch("plugin.inbound.name_sync.apply_group_rows", return_value=1), \
+         patch("plugin.inbound.session_title.clear_name_cache") as clear:
+        written = await name_sync.sync_once(client, "default")
+
+    assert written == 1
+    clear.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_once_does_not_touch_the_cache_when_nothing_was_written():
+    client = MagicMock()
+    client.call = AsyncMock(return_value={
+        "Code": 0, "Data": {"group_details": [{"id": "1@chatroom"}]}})
+
+    with patch("plugin.inbound.name_sync.apply_group_rows", return_value=0), \
+         patch("plugin.inbound.session_title.clear_name_cache") as clear:
+        await name_sync.sync_once(client, "default")
+
+    clear.assert_not_called()
+
+
+# ------------------------------------------------------------- sync_forever
+
+@pytest.mark.asyncio
+async def test_sync_forever_propagates_cancellation():
+    """被 ``except Exception`` 吃掉的话，连接关闭时这个任务永远退不出去。"""
+    client = MagicMock()
+
+    async def _boom(*_a, **_k):
+        raise asyncio.CancelledError
+
+    with patch("plugin.inbound.name_sync.sync_once", _boom):
+        with pytest.raises(asyncio.CancelledError):
+            await name_sync.sync_forever(client, "default", interval_sec=0)
+
+
+@pytest.mark.asyncio
+async def test_sync_forever_survives_a_failed_round():
+    """同步失败只 warn，不能退出循环 —— 下一轮还要重试。"""
+    client = MagicMock()
+    calls = {"n": 0}
+
+    async def _fail_then_cancel(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("vendor down")
+        raise asyncio.CancelledError
+
+    with patch("plugin.inbound.name_sync.sync_once", _fail_then_cancel):
+        with pytest.raises(asyncio.CancelledError):
+            await name_sync.sync_forever(client, "default", interval_sec=0)
+
+    assert calls["n"] == 2, "第一轮失败后必须继续跑第二轮"
