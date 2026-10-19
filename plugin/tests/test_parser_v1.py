@@ -22,8 +22,11 @@ local_id, recipient_id, sender_id, status, type}``）。字段名对不上不会
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from plugin.inbound.media import is_file_message
 from plugin.inbound.parser import (
     MT_APP, MT_IMAGE, MT_TEXT, InboundPipeline, _extract_msg_type, parse_message,
 )
@@ -385,6 +388,61 @@ def test_a_legacy_refermsg_quote_is_not_tagged_as_a_file():
     assert msg is not None and msg.reply_to.get("svrid") == "4174"
     text = InboundPipeline(ACCT, {}).prepare_text(msg)
     assert not text.startswith("[文件]")
+
+
+def test_addmsgs_wrapped_quote_is_extracted():
+    """business callback 的 ``AddMsgs`` 把字段包成 ``{"string": …}``，复杂对象还是
+    JSON 字符串 —— 引用解析必须解包，否则这一路 ``reply_to`` 恒空（且不报错）。"""
+    app = {"category": "quote",
+           "reference": {"svr_id": "9001", "from_user_id": "wxid_q",
+                         "display_name": "接晓银"}}
+    src = {
+        "MsgId": {"string": "msg-1"},
+        "FromUserName": {"string": "wxid_boss"},
+        "ToUserName": {"string": "room@chatroom"},
+        "MsgType": {"string": "49"},
+        "Content": {"string": "回复正文"},
+        "app": {"string": json.dumps(app)},
+    }
+    msg = parse_message(ACCT, src)
+    assert msg is not None
+    assert msg.reply_to == {"svrid": "9001", "from_wxid": "wxid_q",
+                            "quote_content": "", "display_name": "接晓银"}
+
+
+def test_addmsgs_wrapped_refermsg_xml_is_extracted():
+    xml = ("<msg><appmsg><title>回复正文</title><type>57</type>"
+           "<refermsg><svrid>4174</svrid><fromusr>wxid_boss</fromusr>"
+           "<displayname>接晓银</displayname></refermsg></appmsg></msg>")
+    src = {
+        "MsgId": {"string": "msg-2"},
+        "FromUserName": {"string": "wxid_boss"},
+        "ToUserName": {"string": "room@chatroom"},
+        "MsgType": {"string": "49"},
+        "Content": {"string": xml},
+    }
+    msg = parse_message(ACCT, src)
+    assert msg is not None and msg.reply_to.get("svrid") == "4174"
+
+
+def test_quoting_a_file_is_not_itself_a_file_message():
+    """引用一条**文件**消息 ≠ 这条是文件（refermsg 里嵌的是原文件的 appmsg）。"""
+    quoted_file = ("<msg><appmsg><title>报表.pdf</title><type>6</type>"
+                   "<filename>报表.pdf</filename></appmsg></msg>")
+    src = _v1(type=49, content=(
+        "<msg><appmsg><title>这条是纯文本回复</title><type>57</type>"
+        f"<refermsg><svrid>555</svrid><fromusr>wxid_q</fromusr>"
+        f"<content>{quoted_file}</content></refermsg></appmsg></msg>"))
+    msg = parse_message(ACCT, src)
+    assert msg is not None and msg.reply_to.get("svrid") == "555"
+    assert is_file_message(src) is False, "引用文件的消息不许走路文件兜底话术"
+
+
+def test_a_real_file_appmsg_is_still_detected():
+    outer = ("<msg><appmsg><title>报表.pdf</title><type>6</type>"
+             "<filename>报表.pdf</filename></appmsg></msg>")
+    assert is_file_message({"content": outer}) is True
+    assert is_file_message({"app": {"category": "file", "title": "x.pdf"}}) is True
 
 
 @pytest.mark.parametrize("category", ["file", "app_message", None])

@@ -93,6 +93,20 @@ class RelayParseResult:
     items: list[RelayItem] = field(default_factory=list)
 
 
+_REFERMSG_RE = re.compile(r"<refermsg\b[\s\S]*?</refermsg>", re.I)
+
+
+def strip_quoted_content(content: str) -> str:
+    """去掉 ``<refermsg>…</refermsg>``（引用回复里嵌入的**原消息**）。
+
+    引用一张接龙卡片时，原卡片的 ``#接龙`` / ``N. xxx`` 会跟着进正文；
+    不剥掉的话「这条引用回复」会被当成接龙 ⇒ 100% 必回（且错认发送意图）。
+    """
+    if not isinstance(content, str) or "<refermsg" not in content:
+        return content if isinstance(content, str) else ""
+    return _REFERMSG_RE.sub("", content)
+
+
 def is_relay_message(msg: Any) -> bool:
     """是不是接龙消息。
 
@@ -121,7 +135,8 @@ def is_relay_message(msg: Any) -> bool:
     app = raw.get("app") if isinstance(raw, dict) and isinstance(raw.get("app"), dict) else {}
     title = app.get("title") if isinstance(app.get("title"), str) else ""
 
-    text = f"{getattr(msg, 'content', '') or ''} {title}"
+    content = strip_quoted_content(str(getattr(msg, "content", "") or ""))
+    text = f"{content} {title}"
     if "#接龙" in text:
         return True
     return "接龙" in text and bool(_NUMBERED_ITEM_RE.search(text))

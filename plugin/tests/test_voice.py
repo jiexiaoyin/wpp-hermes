@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import struct
@@ -35,7 +36,7 @@ import textwrap
 import pytest
 
 from plugin.inbound import stt
-from plugin.inbound.media import voice_transcript
+from plugin.inbound.media import extract_media_meta, voice_transcript
 from plugin.inbound.parser import MT_APP, MT_TEXT, MT_VOICE, InboundPipeline, WppMessage
 
 #: 复用注册面那套空壳环境（``gateway.*`` 只在 Hermes 运行时里存在），**不另写一份**。
@@ -112,13 +113,58 @@ def test_transcript_is_not_gated_on_msg_type() -> None:
     等哪天后一路补上时这里会**静默吞掉**那批语音的转写。
     """
     msg = _msg(msg_type=MT_APP, content="x", media={"vendor_transcript": "appmsg 里的语音"})
-    assert _pipeline().prepare_text(msg).endswith("[转写] appmsg 里的语音")
+    out = _pipeline().prepare_text(msg)
+    assert out.endswith("[转写] appmsg 里的语音")
+    assert out.startswith("[语音] "), out
+
+
+def test_appmsg_voice_is_tagged_voice_not_file() -> None:
+    """49 承载的语音（TS ``handler.ts:363`` 的 ``<voicemsg>`` 那一路）也必须标 ``[语音]``。
+
+    旧实现只看 ``msg_type``：49 立刻掉进下面的 ``[文件]`` 兜底 ⇒ 模型看到
+    ``[文件] …`` 却同时看到 ``[转写] …``（自相矛盾），会答「你发了个文件」。
+    判据必须是"带语音元数据"，不是类型——``voice_ctx`` 在、转写在，就是语音。
+    """
+    msg = _msg(msg_type=MT_APP, content="", media={
+        "voice_ctx": {"msg_id": 7, "format": 4},
+        "vendor_transcript": "今天下午三点开会",
+    })
+    assert _pipeline().prepare_text(msg) == "[语音]\n[转写] 今天下午三点开会"
+
+
+def test_text_typed_message_with_voice_metadata_is_tagged_voice() -> None:
+    """类型退化成文本（vendor 字段缺失）但带语音元数据 ⇒ 仍标 ``[语音]``，不裸奔。"""
+    msg = _msg(msg_type=MT_TEXT, content="收到一条语音",
+               media={"voice_ctx": {"msg_id": 7, "format": 4}})
+    assert _pipeline().prepare_text(msg) == "[语音] 收到一条语音"
 
 
 def test_text_message_without_media_untouched() -> None:
     """普通文字消息一个字符都不变（转写只挂在语音上，靠 media 键自身区分）。"""
     msg = _msg(msg_type=MT_TEXT, content="你好")
     assert _pipeline().prepare_text(msg) == "你好"
+
+
+def test_addmsgs_wrapped_voice_transcript_is_unwrapped() -> None:
+    """AddMsgs 的业务回调把每个字段裹成 ``{"string": …}``（复杂字段是 JSON 字符串）。
+
+    旧的 ``voice.get("transcript")`` 会拿到 ``{"string": "…"}`` 这个 **dict**
+    ⇒ 正文里出现 ``[转写] {'string': '今天下午三点开会'}``（不是人话），
+    或者整条 ``voice`` 是 JSON 字符串时连语音都认不出。两种形态都要解。
+    """
+    from_field = {"voice": {
+        "transcript": {"string": "今天下午三点开会"},
+        "download_context": {"string": json.dumps({"msg_id": 7, "format": 4})},
+    }}
+    m1 = extract_media_meta(from_field)
+    assert m1["vendor_transcript"] == "今天下午三点开会"
+    assert m1["voice_ctx"]["msg_id"] == 7
+
+    whole = {"voice": json.dumps({"transcript": {"string": "帮我看下价格"}})}
+    assert extract_media_meta(whole)["vendor_transcript"] == "帮我看下价格"
+
+    body = _pipeline().prepare_text(_msg(media=m1))
+    assert body == "[语音] 收到一条语音\n[转写] 今天下午三点开会"
 
 
 def test_voice_transcript_reader_prefers_vendor() -> None:

@@ -28,8 +28,31 @@ VOICE-DOWNLOAD-BINARY / v1.3.8 VIDEO-DOWNLOAD / v1.3.22 VENDOR-TRANSCRIPT）。
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
+
+
+def _unwrap_scalar(v: Any) -> str:
+    """解 AddMsgs 的 ``{"string": …}`` 包装，标量原样转字符串。"""
+    while isinstance(v, dict) and "string" in v:
+        v = v["string"]
+    return v if isinstance(v, str) else ""
+
+
+def _as_dict(v: Any) -> dict | None:
+    """解 ``{"string": "{...json...}"}`` 包装（AddMsgs 的复杂字段常这么裹）。"""
+    while isinstance(v, dict) and "string" in v:
+        v = v["string"]
+    if isinstance(v, str):
+        s = v.strip()
+        if s[:1] != "{":
+            return None
+        try:
+            v = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return v if isinstance(v, dict) else None
 
 
 def _first(d: dict, *keys: str) -> Any:
@@ -131,11 +154,18 @@ def _extract_flat_fields(src: dict, media: dict) -> None:
 
 
 def _extract_voice(src: dict, media: dict) -> None:
-    """voice 形态（v1.2.6 VOICE-DOWNLOAD-BINARY）。"""
-    voice = src.get("voice")
+    """voice 形态（v1.2.6 VOICE-DOWNLOAD-BINARY）。
+
+    ⚠️ 2026-10-19：AddMsgs 业务回调把 ``voice`` / ``download_context`` /
+    ``transcript`` 都裹成 ``{"string": …}``（复杂对象是 JSON 字符串）。
+    旧实现直接 ``voice.get("transcript")`` ⇒ 拿到的是 ``{"string": …}``
+    （或整条 voice 认不出）⇒ 正文里要么没有转写，要么出现 ``{'string': …}``
+    这种不是话的"话"。与引用解析同一类包装，统一解包。
+    """
+    voice = _as_dict(src.get("voice"))
     if not isinstance(voice, dict):
         return
-    ctx = voice.get("download_context") or {}
+    ctx = _as_dict(voice.get("download_context")) or {}
     media["voice_ctx"] = {
         "msg_id": ctx.get("msg_id") or 0,
         "new_msg_id": ctx.get("new_msg_id") or "",
@@ -147,9 +177,12 @@ def _extract_voice(src: dict, media: dict) -> None:
         "from_user_name": ctx.get("from_user_name") or "",
         "to_user_name": ctx.get("to_user_name") or "",
     }
-    # vendor 自带 transcript（v1.3.22 VENDOR-TRANSCRIPT）—— 有就直接给 agent，免 STT
-    if voice.get("transcript"):
-        media["vendor_transcript"] = voice["transcript"]
+    # vendor 自带 transcript（v1.3.22 VENDOR-TRANSCRIPT）—— 有就直接给 agent，免 STT。
+    # 必须是**字符串**：包在 ``{"string": …}`` 里时先解包（AddMsgs），解不出来就当没有
+    # —— 把 dict 交给正文会让模型看到 ``{'string': '…'}``。
+    transcript = _unwrap_scalar(voice.get("transcript"))
+    if transcript:
+        media["vendor_transcript"] = transcript
     # 老 schema 兜底
     if voice.get("aes_key") or voice.get("file_no") or voice.get("cdn_voice_file_no"):
         media["legacy_cdn"] = {
@@ -163,7 +196,7 @@ def _extract_voice(src: dict, media: dict) -> None:
 
 def _extract_file(src: dict, media: dict) -> None:
     """file 形态（v1.2.5 FILE-DOWNLOAD-BINARY，返回原始字节而非 base64）。"""
-    file_obj = src.get("file")
+    file_obj = _as_dict(src.get("file"))
     if not isinstance(file_obj, dict):
         return
     ctx = file_obj.get("download_context") or {}
@@ -234,30 +267,38 @@ def is_file_message(src: dict) -> bool:
     对齐 TS ``isV1SchemaFile`` + ``handler.ts:382`` 的 v0 判据。单独成函数是因为
     "没有 download_context 的文件也要走兜底话术"，而 :func:`extract_media_meta`
     在那种消息上产出的是空 dict —— 不能拿 ``not media`` 当"不是文件"。
+
+    ⚠️ **被引用的文件不算**（2026-10-19 修）：引用一条文件消息时，vendor 会把原文件
+    的 appmsg XML 嵌进 ``<refermsg>`` 里。旧实现直接扫整段 ``content``，于是**纯文本
+    的引用回复**被判成文件消息 ⇒ 适配器走"文件无法下载"兜底话术，模型答非所问。
+    现在先剥掉 ``<refermsg>`` 再看**外层** appmsg 的 type。
     """
     if not isinstance(src, dict):
         return False
-    if isinstance(src.get("file"), dict):
+    if _as_dict(src.get("file")) is not None:
         return True
-    app = src.get("app")
+    app = _as_dict(src.get("app"))
     if isinstance(app, dict) and str(app.get("category") or "") == "file":
         return True
-    content = str(src.get("content") or "")
-    return ("<appmsg" in content
-            and ("<type>6</type>" in content or "<type>8</type>" in content))
+    content = _unwrap_scalar(src.get("content") or src.get("Content"))
+    # 只看外层：被引用消息（refermsg）里的 appmsg 是**原消息**的文件，不是这条
+    outer = re.sub(r"<refermsg\b[\s\S]*?</refermsg>", "", content)
+    return ("<appmsg" in outer
+            and ("<type>6</type>" in outer or "<type>8</type>" in outer))
 
 
 def file_name_of(src: dict, media: dict | None = None) -> str:
     """从 v1 ``app.title`` / ``file_ctx.file_name`` / v0 XML ``<filename>`` 取文件名。"""
     media = media or {}
     ctx = media.get("file_ctx") or {}
+    app = _as_dict(src.get("app")) or {}
     for cand in (ctx.get("file_name"), media.get("filename"),
-                 (src.get("app") or {}).get("title") if isinstance(src.get("app"), dict) else "",
-                 src.get("filename"), src.get("FileName")):
+                 app.get("title"), _unwrap_scalar(src.get("filename")),
+                 _unwrap_scalar(src.get("FileName"))):
         if cand:
             return str(cand)
     m = re.search(r'<filename(?:\s+name="[^"]*")?>([^<]+)</filename>',
-                  str(src.get("content") or ""))
+                  _unwrap_scalar(src.get("content") or src.get("Content")))
     return m.group(1).strip() if m else ""
 
 

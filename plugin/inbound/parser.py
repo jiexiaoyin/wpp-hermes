@@ -46,6 +46,7 @@ isBotMentionedByText``）要求昵称必须带 ``@`` 前缀。这里跟 TS 走�
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import secrets
@@ -149,6 +150,23 @@ def _safe_str(v: Any) -> str:
         # 解包后还不是标量 ⇒ 这个字段我们不认识，别把 dict 字面量当成值传播下去
         return ""
     return str(v or "").strip()
+
+
+def _as_obj(v: Any) -> dict | None:
+    """把 ``{"string": "{...json...}"}`` 解成 dict（AddMsgs 的复杂字段常这么裹）。
+
+    解不出来返回 ``None``（**不抛**）：引用解析是装饰，坏一个字段不该让整条消息丢。
+    """
+    v = _unwrap(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if s[:1] not in "{[":
+            return None
+        try:
+            v = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return v if isinstance(v, dict) else None
 
 
 # ------------------------------------------------------------------ 群消息清洗
@@ -273,7 +291,7 @@ def _nickname_from_push_content(src: dict) -> str:
 
 def _extract_from_user(src: dict) -> tuple[str, str]:
     """从消息提取发送者 ``(wxid, nickname)``（支持嵌套 ``from_user`` 对象）。"""
-    fu = src.get("from_user") or src.get("fromUser")
+    fu = _as_obj(src.get("from_user") or src.get("fromUser"))
     if isinstance(fu, dict):
         wxid = fu.get("wxid") or fu.get("userName") or fu.get("UserName") or ""
         nick = fu.get("nickname") or fu.get("nickName") or fu.get("NickName") or ""
@@ -416,24 +434,29 @@ def extract_quote_ref(src: dict) -> dict:
     3. ``content`` 里的 ``<refermsg>`` XML（旧版）
 
     ``display_name`` 优先用微信给的（群友非联系人也能拿到昵称）。
+
+    ⚠️ **AddMsgs 形态同样要认**（2026-10-19 修）：business callback 的
+    ``Data.Data.AddMsgs[]`` 把每个字段包成 ``{"string": …}``，复杂对象（``app`` /
+    ``reply_context``）还常被序列化成**字符串**。旧实现只认原生 dict ⇒ 这一路的
+    引用全部丢成 ``{}``，``@被回复人`` 与引用卡片都失效（且不报错）。
     """
-    app = src.get("app") if isinstance(src.get("app"), dict) else None
+    app = _as_obj(src.get("app"))
     if app and app.get("category") == "quote" and isinstance(app.get("reference"), dict):
         ar = app["reference"]
-        svrid = str(ar.get("svr_id") or ar.get("new_msg_id") or "")
+        svrid = _safe_str(ar.get("svr_id") or ar.get("new_msg_id"))
         if svrid:
-            return {"svrid": svrid, "from_wxid": str(ar.get("from_user_id") or ""),
-                    "quote_content": "", "display_name": str(ar.get("display_name") or "")}
+            return {"svrid": svrid, "from_wxid": _safe_str(ar.get("from_user_id")),
+                    "quote_content": "", "display_name": _safe_str(ar.get("display_name"))}
 
-    rc = src.get("reply_context") or src.get("replyContext")
+    rc = _as_obj(src.get("reply_context") or src.get("replyContext"))
     if isinstance(rc, dict):
-        svrid = str(rc.get("svr_id") or rc.get("msg_id") or rc.get("new_msg_id") or "")
+        svrid = _safe_str(rc.get("svr_id") or rc.get("msg_id") or rc.get("new_msg_id"))
         if svrid:
-            return {"svrid": svrid, "from_wxid": str(rc.get("from_user_id") or ""),
-                    "quote_content": str(rc.get("quote_content") or ""),
-                    "display_name": str(rc.get("display_name") or "")}
+            return {"svrid": svrid, "from_wxid": _safe_str(rc.get("from_user_id")),
+                    "quote_content": _safe_str(rc.get("quote_content")),
+                    "display_name": _safe_str(rc.get("display_name"))}
 
-    content = src.get("content") or src.get("Content") or ""
+    content = _safe_str(src.get("content") or src.get("Content"))
     if isinstance(content, str) and "<refermsg" in content:
         m = re.search(r"<refermsg\b[^>]*>([\s\S]*?)</refermsg>", content)
         if m:
@@ -724,6 +747,17 @@ class InboundPipeline:
             return ""
         if msg.media.get("relay_rendered"):
             return ""
+
+        # ★ 语音判据是"带不带语音元数据"，**不是** ``msg_type == 34``。
+        #   TS 语音本来就有两路（``MsgType.VOICE`` 与 49 appmsg 里的 ``<voicemsg>``，
+        #   ``handler.ts:357/363``）；py2 目前只解析前一路，但 vendor 转写
+        #   （``voice.transcript``）**与类型无关**——真出现 49/文本形态的语音时，
+        #   下面 49 的兜底会给 ``[文件]``、文本类型给空串 ⇒ 模型看到「你发了个文件」，
+        #   而 ``[转写]`` 行又暴露了这是句话（自相矛盾）。带语音元数据一律 ``[语音]``。
+        from .media import voice_transcript
+        if msg.media.get("voice_ctx") or voice_transcript(msg.media):
+            return "[语音]"
+
         if msg.msg_type != MT_APP:
             return _MEDIA_TAGS.get(int(msg.msg_type or 0), "")
 

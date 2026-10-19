@@ -43,7 +43,7 @@ import re
 
 from .hongbao import is_red_packet_message
 from .parser import MT_APP, MT_CHAT_HISTORY, MT_REVOKE, WppMessage, is_bot_mentioned_by_text
-from .relay import is_relay_message
+from .relay import is_relay_message, strip_quoted_content
 
 log = logging.getLogger(__name__)
 
@@ -262,7 +262,9 @@ def _is_solitaire(msg: WppMessage) -> bool:
     """
     if is_relay_message(msg):
         return True
-    content = msg.content or ""
+    # ★ 引用回复里嵌入的**原消息**不算本条的内容（2026-10-19）：否则引用一条
+    #   接龙卡片会被判成接龙 ⇒ 100% 必回。
+    content = strip_quoted_content(msg.content or "")
     if "#接龙" in content:
         return True
     if "接龙" not in content and "[接龙]" not in content:

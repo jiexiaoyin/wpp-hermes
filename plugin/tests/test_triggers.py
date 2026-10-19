@@ -377,6 +377,22 @@ def test_a_non_relay_card_is_not_judged_by_its_type():
                             _cfg())[1] != "group_solitaire"
 
 
+def test_quoting_a_relay_card_is_not_itself_a_relay():
+    """**2026-10-19**：引用一条接龙卡片 ≠ 发接龙。
+
+    引用回复会把原消息整段嵌进 ``<refermsg>``（``#接龙`` / ``N. 条目`` 都在里面）。
+    旧实现扫整段正文 ⇒ 这条普通回复被判成接龙 ⇒ **100% 必回**，把 judge 和发言
+    预算都绕过去了。现在外层正文才代表这条消息的意图。
+    """
+    outer = ("<msg><appmsg><title>这条是引用回复</title><type>57</type>"
+             "<refermsg><svrid>777</svrid>"
+             "<content><msg><appmsg><title>#接龙 报名 1. 我</title>"
+             "<type>49</type></appmsg></msg></content></refermsg></appmsg></msg>")
+    assert T.should_process(_group(content=outer, msg_type=MT_APP), _cfg()) == \
+        (False, "heartflow_candidate"), \
+        "被引用消息的接龙标记不属于本条（否则引用即必回）"
+
+
 def test_a_plain_text_relay_template_still_triggers():
     """**召回护栏**：纯文本形态的真接龙（微信模板 ``#接龙``）照旧 100% 必回。
 
