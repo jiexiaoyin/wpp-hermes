@@ -36,6 +36,7 @@ import asyncio
 import hmac
 import json
 import logging
+import os
 import threading
 from collections.abc import Awaitable, Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,7 +63,49 @@ class _BodyTooLarge(Exception):
     """chunked 读入超限（不能事先拿 Content-Length 判，只能边读边数）。"""
 
 #: 校验 secret 时的候选头（不同 vendor 版本用的名字不一样，全试）
+#:
+#: ⚠️ **wechatpadpromax（本项目在用的 vendor）不在此列**：它配 secret 后发的是
+#: ``X-Webhook-Signature``（64 位 hex）+ ``X-Webhook-Timestamp`` / ``-Timestamp-Ms``
+#: / ``-Delivery`` / ``-Signature-Version: v2`` 的 **HMAC 签名**，没有发明文 secret
+#: 头（2026-10-19 实抓确认）。所以给这个 vendor 配 ``webhookSecret`` 会让**每一条**
+#: 入站回调 403 —— 配之前先确认签名算法，否则宁可只靠路径 token。
 _SECRET_HEADERS = ("X-Webhook-Secret", "X-WPP-Secret", "X-Access-Token")
+
+#: 诊断开关：``WPP_WEBHOOK_DEBUG=1`` 时把回调的鉴权头原样打出来。
+#: **只在排查时开**（签名值会进日志），默认关。
+#: ⚠️ 必须走 :func:`gate_env`（per-profile 口径）：multiplex 下 ``os.environ`` 装的是
+#: launch profile（default）的 ``.env``，读不到 wpp-wechat 里的开关。
+def _debug_headers_enabled() -> bool:
+    # webhook server 跑在独立线程、没有 profile scope ⇒ gate_env 拿不到当前 profile
+    # 的 .env；先看进程 env（launch profile 的 .env 会注入这里），再看 scoped 口径。
+    if os.environ.get("WPP_WEBHOOK_DEBUG", "").strip() == "1":
+        return True
+    from ..core.env_compat import gate_env
+
+    return gate_env("WPP_WEBHOOK_DEBUG").strip() == "1"
+
+
+def _dump_headers(handler: BaseHTTPRequestHandler) -> None:
+    """把 vendor 回调的签名头打出来（诊断用）。
+
+    为什么需要它：vendor（wechatpadpromax）配 secret 后**不是**发明文
+    ``X-Webhook-Secret``，而是 ``X-Webhook-Signature`` + ``X-Webhook-Timestamp``
+    的 HMAC 签名 —— 与这里 :data:`_SECRET_HEADERS` 的明文比对口径不兼容（配了反而
+    100% 403，2026-10-19 实测）。要接这个签名口径，先得看到真实样本。
+    """
+    interesting: dict[str, str] = {}
+    for key, val in handler.headers.items():
+        lower = key.lower()
+        if lower.startswith(("x-webhook", "x-wpp", "x-hub")):
+            interesting[key] = val
+        elif lower.startswith("x-access"):
+            # 这个头可能是 authcode，只记长度
+            interesting[key] = f"<{len(val)} chars>"
+    # 只留 tail 两段（``default/webhook``）——路径前缀里有 path token，不进日志
+    safe_path = "/".join(handler.path.split("?")[0].split("/")[-2:])
+    log.info("[WPP webhook][debug] from=%s path=…/%s body_len=%s headers=%s",
+             _client_ip(handler), safe_path,
+             handler.headers.get("Content-Length"), interesting)
 
 
 def _client_ip(handler: BaseHTTPRequestHandler) -> str:
@@ -275,6 +318,8 @@ class WppWebhookServer:
                     self._reply(404, b'{"error":"unknown path"}')
                     return
                 on_message, secret, path_token = route
+                if _debug_headers_enabled():
+                    _dump_headers(self)
                 if not self._authorized(path, secret, path_token):
                     metrics.inc_webhook_rejected_secret()
                     log.warning("[WPP webhook] 鉴权失败 path=%s from=%s",
@@ -329,6 +374,9 @@ class WppWebhookServer:
                 # 继续调度）—— 否则"vendor 发了畸形负载"在本地看起来与一次正常通知完全
                 # 一样，只有计数能看出来。
                 try:
+                    if _debug_headers_enabled():
+                        log.info("[WPP webhook][debug] body=%s",
+                                 body[:800].decode("utf-8", "replace"))
                     payload = json.loads(body)
                 except json.JSONDecodeError as exc:
                     metrics.inc_webhook_parse_failed()
