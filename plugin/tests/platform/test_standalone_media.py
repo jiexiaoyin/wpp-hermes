@@ -46,7 +46,7 @@ class _FakeClient:
     async def send_video(self, to_wxid, video_base64, thumb_base64=""):
         return self._ok("video", to_wxid=to_wxid)
 
-    async def send_voice(self, to_wxid, voice_base64, voice_type=4):
+    async def send_voice(self, to_wxid, voice_base64, voice_type=4, voice_time=0):
         return self._ok("voice", to_wxid=to_wxid)
 
 

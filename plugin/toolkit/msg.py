@@ -206,12 +206,35 @@ async def _send_voice_file(client, account_id: str, to_wxid: str, out_path: str)
     return payload
 
 
+async def _send_voice_bubble(client, account_id: str, to_wxid: str, out_path: str) -> dict:
+    """把合成音频作为**语音气泡**发出（SILK；超 60s 自动分段）。
+
+    与 live 出站共用 :meth:`MediaMixin._send_voice_media`：编码失败才降级文件。
+    """
+    import base64 as _b64
+    import os as _os
+
+    from ..platform.adapter_media import MediaMixin
+
+    if not _os.path.isfile(out_path) or _os.path.getsize(out_path) <= 0:
+        return {"error": f"语音文件不存在或为空: {out_path}"}
+    with open(out_path, "rb") as f:
+        b64 = _b64.b64encode(f.read()).decode()
+    name = _os.path.basename(out_path) or "voice.mp3"
+    resp = await MediaMixin._send_voice_media(client, to_wxid, out_path, name, b64)
+    data = resp.get("Data") or {}
+    payload = _send_payload(resp, msg_id=data.get("Msgid"), voice_path=out_path)
+    if payload.get("ok"):
+        _persist_tool_outbound(account_id, to_wxid, "[语音]", resp, msg_type="voice")
+    return payload
+
+
 async def _maybe_auto_voice(adapter, account_id: str, client, to_wxid: str,
                             text: str) -> None:
-    """``tts.autoVoice`` 概率命中时，给刚发出的文本补一条语音文件。
+    """``tts.autoVoice`` 概率命中时，给刚发出的文本补一条**语音气泡**。
 
-    **默认关闭**（``autoVoice=0``）：微信里的 MP3 是文件不是语音气泡，重复发一份
-    只在用户显式要求时才值得。失败只 warn（文本已经发出去了，语音只是附加）。
+    **默认关闭**（``autoVoice=0``）：重复发一份语音只在用户显式要求时才值得。
+    失败只 warn（文本已经发出去了，语音只是附加）。
     """
     try:
         from ..inbound import tts_emotion
@@ -225,7 +248,7 @@ async def _maybe_auto_voice(adapter, account_id: str, client, to_wxid: str,
         mood = tts_emotion.get_chat_mood(account_id, to_wxid)
         out_path = _voice_output_path(account_id)
         await tts_emotion.synthesize_to_file_async(clean, out_path, cfg, mood=mood)
-        payload = await _send_voice_file(client, account_id, to_wxid, out_path)
+        payload = await _send_voice_bubble(client, account_id, to_wxid, out_path)
         if not payload.get("ok"):
             log.warning("[WPP:%s] 自动语音发送失败: %s", account_id, payload.get("error"))
     except Exception as exc:  # noqa: BLE001 —— 语音是附加，不许影响已发出的文本
@@ -378,7 +401,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             )
         except Exception as e:  # noqa: BLE001 —— 合成失败必须让模型看见（别发空文件）
             return {"error": f"语音合成失败: {e}"}
-        return await _send_voice_file(client, aid, to_wxid, out_path)
+        return await _send_voice_bubble(client, aid, to_wxid, out_path)
 
     # sendLocation: 发送定位卡片（/Msg/ShareLocation, Type 48）
     # 对齐原 wpp sendLocation: X=纬度, Y=经度, Label/Poiname/Scale/Infourl
@@ -676,6 +699,11 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         aid, client = acct(adapter, params)
         if not voice:
             return {"error": "voiceUrl/voiceBase64 至少给一个（厂商不收空语音）"}
+        try:
+            if int(duration or 0) > 60_000:
+                return {"error": "微信语音单条上限 60 秒，请分段发送（AI 语音可用 wpp_send_ai_voice 自动分段）"}
+        except (TypeError, ValueError):
+            pass
         # 非 base64 尝试下载（安全：SSRF 防护）
         base64_str = (await _resolve_to_base64(voice)
                       if voice.startswith(("http", "/", "~", "data:")) else voice)
@@ -1030,7 +1058,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             },
             "required": ["toWxid", "prompt"],
         }, send_ai_image),
-        ("wpp_send_ai_voice", "AI 合成语音并自动发送到微信（Hermes TTS / 阿里 Token Plan，按当前会话情绪自动选择语气）。微信语音是 SILK，MP3 以文件形式发送", {
+        ("wpp_send_ai_voice", "AI 合成语音并自动发送到微信（Hermes TTS / 阿里 Token Plan，按当前会话情绪自动选择语气）。会转成微信语音气泡；超过 60 秒自动分段发送", {
             "type": "object",
             "properties": {
                 "toWxid": {"type": "string", "description": "接收者 wxid"},

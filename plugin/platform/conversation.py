@@ -138,12 +138,23 @@ class WppOutboundSender:
         from . import silk_encoder
 
         client = self._client(conv)
-        b64 = await silk_encoder.encode_to_silk(audio_path)
-        if b64 is None:
-            # 本机没有 silk 编码链 ⇒ 与适配器同款降级：发文件（老板 6-12 定的偏好）
-            return await self.send_file(conv, audio_path)
-        resp = await client.send_voice(conv.chat_id, b64)
-        return self._result(resp, "send_voice")
+        # 微信单条 ≤60s，且厂商卡 SILK 60 KB 字节上限 ⇒ 超长先切段
+        segments = await silk_encoder.split_audio(audio_path)
+        last = ""
+        try:
+            for seg in segments:
+                b64 = await silk_encoder.encode_to_silk_fitting(seg)
+                if b64 is None:
+                    # 本机没有 silk 编码链 ⇒ 与适配器同款降级：发文件（老板 6-12 定的偏好）
+                    last = await self.send_file(conv, seg)
+                    continue
+                # VoiceTime 传 0 会被厂商 Code=-2 拒收（2026-10-19 实测）⇒ 必须带真实毫秒数
+                voice_ms = await silk_encoder.probe_duration_ms(seg)
+                resp = await client.send_voice(conv.chat_id, b64, voice_time=voice_ms)
+                last = self._result(resp, "send_voice")
+            return last
+        finally:
+            silk_encoder.cleanup_segments(segments)
 
     async def send_file(self, conv: ConversationKey, file_path: str) -> str:
         client = self._client(conv)

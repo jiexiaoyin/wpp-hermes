@@ -130,8 +130,9 @@ class _FakeClient:
         self.calls.append(("text", to, content))
         return self.resp
 
-    async def send_voice(self, to, b64):
+    async def send_voice(self, to, b64, **kwargs):
         self.calls.append(("voice", to, b64))
+        self.last_voice_kwargs = kwargs
         return self.resp
 
     async def send_file_v2(self, to, name, b64):
@@ -169,13 +170,35 @@ async def test_sender_quotes_when_asked() -> None:
 
 
 @_sync
+async def test_sender_passes_real_voice_duration(monkeypatch, tmp_path) -> None:
+    """VoiceTime=0 会被厂商 Code=-2 拒收（2026-10-19 实测）⇒ 必须带真实毫秒数。"""
+    from plugin.platform import silk_encoder
+
+    async def _b64(_path):
+        return "SILK"
+
+    async def _duration(_path):
+        return 2376
+
+    monkeypatch.setattr(silk_encoder, "encode_to_silk_fitting", _b64)
+    monkeypatch.setattr(silk_encoder, "probe_duration_ms", _duration)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3")
+    client = _FakeClient()
+    sender = WppOutboundSender("acct", lambda: client)
+    await sender.send_voice(dm_key("acct", "u1"), str(audio))
+    assert client.calls[0][0] == "voice"
+    assert client.last_voice_kwargs == {"voice_time": 2376}
+
+
+@_sync
 async def test_sender_degrades_voice_to_file_without_silk(monkeypatch, tmp_path) -> None:
     from plugin.platform import silk_encoder
 
     async def _none(_path):
         return None
 
-    monkeypatch.setattr(silk_encoder, "encode_to_silk", _none)
+    monkeypatch.setattr(silk_encoder, "encode_to_silk_fitting", _none)
     audio = tmp_path / "a.mp3"
     audio.write_bytes(b"ID3")
     client = _FakeClient()

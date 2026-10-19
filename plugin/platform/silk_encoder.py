@@ -39,6 +39,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 import shutil
 import tempfile
 
@@ -53,7 +54,23 @@ MAX_SILK_BYTES = 60_000
 #: 微信语音时长上限（TS ``MAX_VOICE_DURATION_MS``）
 MAX_VOICE_DURATION_MS = 60_000
 
+#: 分段时主动留 5 秒余量（编码/容器取整会让 60.0s 变成 60.1s ⇒ 厂商拒收）。
+MAX_VOICE_SEGMENT_MS = MAX_VOICE_DURATION_MS - 5_000
+
+#: 超限时依次尝试的 SILK 码率。默认 25 kbps 下 60 KB 只够 ~19 秒；语音消息
+#: 本身是低码率场景，12/8 kbps 能把 55 秒的段压进厂商 60 KB 的字节闸，
+#: 避免一条 1 分钟的话被切成 4 条气泡。
+_SILK_FALLBACK_RATES = (None, 12_000, 8_000)
+
 _ENCODE_TIMEOUT = 60
+
+
+class SilkTooLarge(Exception):
+    """SILK 编码结果超过厂商上限（内部信号，不对外抛出）。"""
+
+
+class SilkUnavailable(Exception):
+    """本机缺少 ffmpeg / encoder 二进制（内部信号，不对外抛出）。"""
 
 
 def unavailable_reason() -> str | None:
@@ -71,21 +88,197 @@ def is_available() -> bool:
     return unavailable_reason() is None
 
 
-async def encode_to_silk(ref: str) -> str | None:
-    """本地音频文件 → SILK 的 **base64**；不可用/失败一律 ``None``（调用方降级发文件）。
+async def probe_duration_ms(ref: str) -> int:
+    """本地音频时长（毫秒）。探测失败返回 ``0``。
 
-    ``ref`` 必须是**本地路径** —— URL 在 :func:`plugin.platform.outbound.resolve_to_base64`
-    阶段已被 SSRF 校验并落地，这里不再处理远程。
+    ⚠️ ``/Msg/SendVoice`` 的 ``VoiceTime`` **不能传 0**：2026-10-19 实测 2.4 秒的
+    SILK 传 0 被厂商以 ``Code=-2`` 拒收（文案仍是误导性的 INVALID_CREDENTIAL），
+    传 ``2376`` 立即 ``Code=0 成功``。TS 侧一直传的是 ``voiceDurationMs``。
     """
+    src = os.path.expanduser(str(ref or ""))
+    if not os.path.isfile(src):
+        return 0
+    try:
+        if src.lower().endswith(".silk"):
+            # 解码成 24kHz/mono/16bit PCM：48000 字节/秒 ⇒ 48 字节/毫秒
+            from ..inbound import stt
+
+            with open(src, "rb") as fh:
+                pcm = await stt.decode_silk_to_pcm(fh.read())
+            return int(round(len(pcm) / 48)) if pcm else 0
+        import asyncio
+
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", src,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode != 0:
+            return 0
+        return int(round(float(out.decode("ascii", "ignore").strip() or 0) * 1000))
+    except Exception as exc:  # noqa: BLE001 —— 时长只是展示字段，探测失败不能挡发送
+        log.debug("[SILK] 时长探测失败 %s: %s", src, exc)
+        return 0
+
+
+def plan_segments(duration_ms: int, silences: list[tuple[float, float]] | None = None,
+                  max_ms: int = MAX_VOICE_SEGMENT_MS) -> list[tuple[float, float]]:
+    """把总时长切成 ≤ ``max_ms`` 的若干段（纯函数，便于单测）。
+
+    优先在**静音结束点**切：TTS 的句号/逗号处通常有 0.2–0.8s 静音，切在那里
+    听感最自然；找不到合适静音才退化为硬切。返回 ``[(start_s, end_s), …]``。
+    """
+    duration = max(0.0, float(duration_ms) / 1000.0)
+    limit_s = max(1.0, float(max_ms) / 1000.0)
+    if duration <= 0:
+        return []
+    if duration <= limit_s:
+        return [(0.0, duration)]
+
+    ends = sorted({float(end) for _start, end in (silences or []) if end and end > 0})
+    out: list[tuple[float, float]] = []
+    start = 0.0
+    while duration - start > limit_s + 0.05:
+        hard_limit = start + limit_s
+        # 至少留 1 秒，避免静音点过密切出碎片
+        candidates = [end for end in ends if start + 1.0 <= end <= hard_limit]
+        cut = max(candidates) if candidates else hard_limit
+        out.append((start, cut))
+        start = cut
+    if duration - start > 0.05:
+        out.append((start, duration))
+    return out
+
+
+async def _detect_silences(src: str, timeout: float = 60.0) -> list[tuple[float, float]]:
+    """``ffmpeg silencedetect`` 找静音区间；失败返回空列表（调用方硬切）。"""
+    try:
+        import asyncio
+
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-nostats", "-i", src,
+            "-af", "silencedetect=noise=-35dB:d=0.30", "-f", "null", "-",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        text = (err or b"").decode("utf-8", "ignore")
+        starts: list[float] = []
+        pairs: list[tuple[float, float]] = []
+        for line in text.splitlines():
+            m = re.search(r"silence_start:\s*(-?\d+(?:\.\d+)?)", line)
+            if m:
+                starts.append(float(m.group(1)))
+                continue
+            m = re.search(r"silence_end:\s*(-?\d+(?:\.\d+)?)", line)
+            if m and starts:
+                pairs.append((starts.pop(0), float(m.group(1))))
+        return pairs
+    except Exception as exc:  # noqa: BLE001 —— 只是切点优化，失败就硬切
+        log.debug("[SILK] silencedetect 失败 %s: %s", src, exc)
+        return []
+
+
+async def _silk_to_wav(src: str, out_path: str) -> bool:
+    """``.silk`` → 24kHz mono wav（分段前先解码；失败返回 False）。"""
+    try:
+        import wave
+
+        from ..inbound import stt
+
+        with open(src, "rb") as fh:
+            pcm = await stt.decode_silk_to_pcm(fh.read())
+        if not pcm:
+            return False
+        with wave.open(out_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(24000)
+            wf.writeframes(pcm)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[SILK] 解码 .silk 失败，无法分段: %s", exc)
+        return False
+
+
+async def _cut_segment(src: str, start_s: float, end_s: float, out_path: str) -> bool:
+    try:
+        import asyncio
+
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-loglevel", "error", "-i", src,
+            "-ss", f"{start_s:.3f}", "-t", f"{max(0.05, end_s - start_s):.3f}",
+            "-vn", "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", out_path,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _out, err = await asyncio.wait_for(proc.communicate(), timeout=_ENCODE_TIMEOUT)
+        if proc.returncode != 0:
+            log.warning("[SILK] 分段失败 %.1f-%.1f: %s",
+                        start_s, end_s, (err or b"")[:200])
+            return False
+        return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[SILK] 分段异常 %.1f-%.1f: %s", start_s, end_s, exc)
+        return False
+
+
+async def split_audio(ref: str, max_ms: int = MAX_VOICE_SEGMENT_MS) -> list[str]:
+    """把超过微信语音上限的音频切成多段，返回本地路径列表。
+
+    * 未超限 / 探测不到时长 / ffmpeg 不可用 ⇒ 原样返回 ``[ref]``；
+    * 切点优先落在静音处（见 :func:`plan_segments`）；
+    * 返回的临时文件用 :func:`cleanup_segments` 清理。
+    """
+    src = os.path.expanduser(str(ref or ""))
+    if not os.path.isfile(src):
+        return [src]
+    duration_ms = await probe_duration_ms(src)
+    if duration_ms <= 0 or duration_ms <= max_ms:
+        return [src]
+
+    tmpdir = tempfile.mkdtemp(prefix="wpp-voice-split-")
+    source = src
+    if src.lower().endswith(".silk"):
+        converted = os.path.join(tmpdir, "source.wav")
+        if not await _silk_to_wav(src, converted):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return [src]
+        source = converted
+
+    try:
+        silences = await _detect_silences(source)
+        plan = plan_segments(duration_ms, silences, max_ms=max_ms)
+        if len(plan) <= 1:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return [src]
+        out: list[str] = []
+        for idx, (start_s, end_s) in enumerate(plan):
+            path = os.path.join(tmpdir, f"part-{idx + 1:02d}.wav")
+            if not await _cut_segment(source, start_s, end_s, path):
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                return [src]
+            out.append(path)
+        log.info("[SILK] 语音 %.1fs 超过 %.1fs，切为 %d 段",
+                 duration_ms / 1000.0, max_ms / 1000.0, len(out))
+        return out
+    except Exception:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+
+
+def cleanup_segments(paths: list[str] | None) -> None:
+    """删除 :func:`split_audio` 产生的临时目录（原始文件不动）。"""
+    for path in paths or []:
+        folder = os.path.dirname(os.path.abspath(str(path or "")))
+        if os.path.basename(folder).startswith("wpp-voice-split-"):
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+async def _encode_silk_bytes(src: str, bitrate: int | None = None) -> bytes:
+    """编码成 SILK 原始字节。失败抛异常（由公开包装函数降级成 ``None``）。"""
     reason = unavailable_reason()
     if reason:
-        log.info("[SILK] 跳过编码（%s）—— 出站语音将降级为文件", reason)
-        return None
-
-    src = os.path.expanduser(ref)
-    if not os.path.isfile(src):
-        log.warning("[SILK] 源文件不存在: %s", src)
-        return None
+        raise SilkUnavailable(reason)
 
     pcm_path = silk_path = ""
     try:
@@ -103,34 +296,28 @@ async def encode_to_silk(ref: str) -> str | None:
         )
         _, err = await asyncio.wait_for(proc.communicate(), timeout=_ENCODE_TIMEOUT)
         if proc.returncode != 0:
-            log.warning("[SILK] ffmpeg 转 PCM 失败: %s", (err or b"")[:300])
-            return None
+            raise RuntimeError(f"ffmpeg 转 PCM 失败: {(err or b'')[:300]!r}")
 
-        # 2. PCM → silk（TS: -tencent -quiet）
+        # 2. PCM → silk（TS: -tencent -quiet）；超限时用 -rate 降码率再试
+        cmd = [SILK_ENCODER_PATH, pcm_path, silk_path, "-tencent", "-quiet"]
+        if bitrate:
+            cmd += ["-rate", str(int(bitrate))]
         proc = await asyncio.create_subprocess_exec(
-            SILK_ENCODER_PATH, pcm_path, silk_path, "-tencent", "-quiet",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )
         _, err = await asyncio.wait_for(proc.communicate(), timeout=_ENCODE_TIMEOUT)
         if proc.returncode != 0 or not os.path.isfile(silk_path):
-            log.warning("[SILK] encoder 失败: %s", (err or b"")[:300])
-            return None
+            raise RuntimeError(f"encoder 失败: {(err or b'')[:300]!r}")
 
         with open(silk_path, "rb") as fh:
             data = fh.read()
 
-        # 3. 尺寸闸：超限直接放弃 ⇒ 让调用方发文件，别让厂商用误导性的 -2 拒收
+        # 3. 尺寸闸：超限抛专用信号，调用方换更低码率或分段
         if len(data) > MAX_SILK_BYTES:
-            log.warning("[SILK] silk 过大 %d B > %d B —— 降级发文件（厂商会以 Code=-2 拒收）",
-                        len(data), MAX_SILK_BYTES)
-            return None
+            raise SilkTooLarge(f"{len(data)} B > {MAX_SILK_BYTES} B")
         if not data.startswith(b"\x02"):
-            log.warning("[SILK] encoder 输出不是 SILK 头（首字节 %r）", data[:2])
-            return None
-        return base64.b64encode(data).decode()
-    except Exception as exc:  # noqa: BLE001 — 编码失败绝不能冒泡成「发送失败」
-        log.warning("[SILK] 编码异常: %s", exc)
-        return None
+            raise RuntimeError(f"encoder 输出不是 SILK 头（首字节 {data[:2]!r}）")
+        return data
     finally:
         for path in (pcm_path, silk_path):
             if path:
@@ -138,3 +325,52 @@ async def encode_to_silk(ref: str) -> str | None:
                     os.unlink(path)
                 except OSError:
                     pass
+
+
+async def encode_to_silk(ref: str, bitrate: int | None = None) -> str | None:
+    """本地音频文件 → SILK 的 **base64**；不可用/失败一律 ``None``（调用方降级发文件）。
+
+    ``ref`` 必须是**本地路径** —— URL 在 :func:`plugin.platform.outbound.resolve_to_base64`
+    阶段已被 SSRF 校验并落地，这里不再处理远程。
+    """
+    src = os.path.expanduser(ref)
+    if not os.path.isfile(src):
+        log.warning("[SILK] 源文件不存在: %s", src)
+        return None
+    try:
+        return base64.b64encode(await _encode_silk_bytes(src, bitrate)).decode()
+    except SilkUnavailable as exc:
+        log.info("[SILK] 跳过编码（%s）—— 出站语音将降级为文件", exc)
+    except SilkTooLarge as exc:
+        log.warning("[SILK] silk 过大 %s —— 降级发文件（厂商会以 Code=-2 拒收）", exc)
+    except Exception as exc:  # noqa: BLE001 — 编码失败绝不能冒泡成「发送失败」
+        log.warning("[SILK] 编码异常: %s", exc)
+    return None
+
+
+async def encode_to_silk_fitting(ref: str) -> str | None:
+    """优先 25 kbps；超厂商 60 KB 字节闸时依次降到 12/8 kbps。
+
+    60 KB 是**字节**上限，不是 60 秒：25 kbps 下只够 ~19 秒。降码率让
+    30–55 秒的段仍能作为一条语音气泡发出，避免过度切碎。
+    """
+    src = os.path.expanduser(ref)
+    if not os.path.isfile(src):
+        log.warning("[SILK] 源文件不存在: %s", src)
+        return None
+    last: Exception | None = None
+    for bitrate in _SILK_FALLBACK_RATES:
+        try:
+            return base64.b64encode(await _encode_silk_bytes(src, bitrate)).decode()
+        except SilkUnavailable as exc:
+            log.info("[SILK] 跳过编码（%s）—— 出站语音将降级为文件", exc)
+            return None
+        except SilkTooLarge as exc:
+            last = exc
+            log.info("[SILK] %s kbps 仍超限（%s），尝试更低码率",
+                     (bitrate or 25_000) // 1000, exc)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[SILK] 编码异常: %s", exc)
+            return None
+    log.warning("[SILK] 降码率后仍超过 %d B（%s）", MAX_SILK_BYTES, last)
+    return None
