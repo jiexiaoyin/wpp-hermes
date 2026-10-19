@@ -67,6 +67,13 @@ else
     }
 fi
 
+# 测试里 import plugin.platform.adapter 需要 Hermes 的 gateway 包（框架契约）。
+# 不设这条，test_handle_one_gates / test_adapter_webhook_runtime 会在收集阶段
+# 报 ModuleNotFoundError，看起来像"测试文件坏了"。
+if [ -d /root/.hermes/hermes-agent ]; then
+    export PYTHONPATH="/root/.hermes/hermes-agent${PYTHONPATH:+:$PYTHONPATH}"
+fi
+
 FAILED=""
 NPASS=0
 NSKIP=0
