@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
+from dataclasses import dataclass
 
 from plugin.inbound.debounce import InboundDebouncer, merge_text_batch
 from plugin.inbound.parser import MT_IMAGE, MT_TEXT, WppMessage
+from plugin.neutral.inbound_merge import merge_text_batch as neutral_merge
 
 
 def _sync(coro_fn):
@@ -88,6 +90,33 @@ def test_single_message_is_returned_as_a_copy() -> None:
     batch = [_msg("m1", "只有一条")]
     out = merge_text_batch(batch)
     assert len(out) == 1 and out[0] is batch[0]
+
+
+# ============================================================ 中立层（非 WPP 类型）
+
+@dataclass
+class _PlainMsg:
+    """与 WPP 无关的通道消息：只靠字段形状被中立合并接受。"""
+    msg_id: str
+    content: str
+    timestamp: int
+    raw: dict
+
+
+def test_neutral_merge_accepts_a_non_wpp_dataclass() -> None:
+    batch = [_PlainMsg("m1", "我明天", 1, {}), _PlainMsg("m2", "下午三点", 2, {})]
+    out = neutral_merge(batch, is_text_message=lambda m: True)
+    assert len(out) == 1
+    assert out[0].content == "我明天下午三点"
+    assert out[0].msg_id == "m2"
+    assert [m["msgId"] for m in out[0].raw["_merged"]] == ["m1", "m2"]
+    assert batch[1].raw == {}                          # 原对象不被改
+
+
+def test_neutral_merge_predicate_rejection_disables_merging() -> None:
+    batch = [_PlainMsg("m1", "看这个", 1, {}), _PlainMsg("m2", "[图]", 2, {})]
+    out = neutral_merge(batch, is_text_message=lambda m: m.msg_id != "m2")
+    assert out == batch
 
 
 # ============================================================ 聚合器接线

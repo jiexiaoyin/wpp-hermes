@@ -69,9 +69,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from typing import Any
 
+from ..neutral.inbound_merge import merge_text_batch as _merge_text_batch_neutral
 from .parser import MT_REVOKE, MT_SYSTEM, MT_TEXT, MT_VOICE, WppMessage
 
 log = logging.getLogger(__name__)
@@ -95,58 +95,20 @@ __all__ = [
     "merge_text_batch",
 ]
 
-#: 句末标点：上一段以这些结尾 ⇒ 合并时换行（是两句完整的话）；
-#: 否则视为被拆断的一句话，直接拼接（"我明天" + "下午三点去" → "我明天下午三点去"）。
-_TERMINAL_PUNCT: tuple[str, ...] = ("。", "！", "？", "…", "!", "?", ".", "~", "～")
-
-
-def _ends_sentence(text: str) -> bool:
-    return text.rstrip().endswith(_TERMINAL_PUNCT)
+def _is_mergeable_text(msg: WppMessage) -> bool:
+    """WPP 口径的"纯文本"：正文类型 + 无媒体 + 无引用（合并的硬前提）。"""
+    return msg.msg_type == MT_TEXT and not msg.media and not msg.reply_to
 
 
 def merge_text_batch(batch: list[WppMessage], *, max_chars: int = 2000) -> list[WppMessage]:
-    """把同 key 的一批**纯文本**消息合并成一条合成消息（轻量合并）。
+    """WPP 适配层：把 WPP 的"纯文本"口径注入中立合并函数。
 
-    调用方（:class:`InboundDebouncer`）已经用注入的谓词判过"该不该合"（私聊 /
-    群里 @ 了机器人），这里只做**纯文本拼接**：
-
-    * 批里只要有一条非文本（图片/语音/引用/文件）⇒ 整批**不合并**（媒体各自有
-      富化与落库路径，混进来会丢掉附件）；
-    * 以句末标点分段：完整句子之间换行，被拆断的半句直接拼接；
-    * 合并后超过 ``max_chars`` ⇒ 不合并（宁可多派发一次，也不截断用户的话）；
-    * 合成消息取**最后一条**的元数据（msg_id / 时间 / 引用），原文进
-      ``raw["_merged"]`` 便于排查。原消息对象**不改**（``replace`` 造新对象）。
-
-    返回长度为 1（合并）或原样 ``list(batch)``（不合并）。
+    纯逻辑（拼接、句末标点、超长不合并、``_merged`` 元数据）在
+    :mod:`plugin.neutral.inbound_merge`；本函数只负责判定哪些消息算纯文本。
     """
-    if len(batch) < 2:
-        return list(batch)
-    texts: list[str] = []
-    for msg in batch:
-        if msg.msg_type != MT_TEXT or msg.media or msg.reply_to:
-            return list(batch)
-        text = (msg.content or "").strip()
-        if not text:
-            return list(batch)
-        texts.append(text)
-
-    merged = texts[0]
-    for text in texts[1:]:
-        merged += ("\n" if _ends_sentence(merged) else "") + text
-    try:
-        limit = max(1, int(max_chars))
-    except (TypeError, ValueError):
-        limit = 2000
-    if len(merged) > limit:
-        return list(batch)
-
-    last = batch[-1]
-    raw = dict(last.raw)
-    raw["_merged"] = [
-        {"msgId": m.msg_id, "content": m.content, "timestamp": m.timestamp}
-        for m in batch
-    ]
-    return [replace(last, content=merged, raw=raw)]
+    return _merge_text_batch_neutral(
+        batch, max_chars=max_chars, is_text_message=_is_mergeable_text,
+    )
 
 
 def debounce_key(msg: WppMessage) -> str:
