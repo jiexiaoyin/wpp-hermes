@@ -427,10 +427,26 @@ class MediaMixin:
                                   error_kind="bad_format")
 
             name = file_name or os.path.basename(ref) or f"{kind}.bin"
+            voice_segments_persisted = False
             if kind == "image":
                 resp = await client.send_image(to_wxid=peer_id, image_base64=b64)
             elif kind == "voice":
-                resp = await self._send_voice_media(client, peer_id, ref, name, b64)
+                # 多段语音每段都是独立气泡、独立 msg_id：逐段落库，否则历史里只剩
+                # 最后一段（2026-10-19 审阅发现）。回调用 **本账号的 acct** 闭包钉住。
+                async def _persist_voice_segment(resp, *, index, total, kind, name):
+                    marker = ("[语音]" if kind == "voice" else f"[文件] {name}")
+                    if total > 1:
+                        marker += f" ({index + 1}/{total})"
+                    from .adapter import _persist_outbound_record
+                    await _persist_outbound_record(
+                        acct, peer_id, marker, outbound.extract_outbound_msg_ids(resp),
+                        msg_type=kind if kind in ("image", "voice", "video", "file") else "file",
+                        raw_payload=resp)
+
+                voice_segments_persisted = True
+                resp = await self._send_voice_media(
+                    client, peer_id, ref, name, b64,
+                    on_segment=_persist_voice_segment)
             elif kind == "video":
                 thumb = await self._video_thumb(ref)
                 if not thumb:
@@ -447,13 +463,14 @@ class MediaMixin:
             # 与 live send() 同口径：媒体也要落库（TS ``dispatch/outbound.ts`` 的
             # persistOutbound 覆盖 image/file/voice/video）。这里原先只发不记，
             # "按群查历史"看不到任何媒体出站。
-            marker = {"image": "[图片]", "voice": "[语音]", "video": "[视频]"}.get(
-                kind, f"[文件] {name}")
-            from .adapter import _persist_outbound_record  # 循环导入：延迟到调用期
-            await _persist_outbound_record(
-                acct, peer_id, marker, outbound.extract_outbound_msg_ids(resp),
-                msg_type=kind if kind in ("image", "voice", "video", "file") else "file",
-                raw_payload=resp)
+            if not voice_segments_persisted:
+                marker = {"image": "[图片]", "voice": "[语音]", "video": "[视频]"}.get(
+                    kind, f"[文件] {name}")
+                from .adapter import _persist_outbound_record  # 循环导入：延迟到调用期
+                await _persist_outbound_record(
+                    acct, peer_id, marker, outbound.extract_outbound_msg_ids(resp),
+                    msg_type=kind if kind in ("image", "voice", "video", "file") else "file",
+                    raw_payload=resp)
             media_id = outbound.extract_msg_id(resp)
             # ★ 2026-10-19：caption 原先被完全丢掉。Hermes 的
             #   ``_media_caption_split`` 会把「一张图 + 短文案」合成一次媒体发送，
@@ -484,7 +501,7 @@ class MediaMixin:
 
     @staticmethod
     async def _send_voice_media(client: WppClient, peer_id: str, ref: str, name: str,
-                                b64: str) -> dict:
+                                b64: str, *, on_segment=None) -> dict:
         """发语音。**只有 SILK 能进 ``/Msg/SendVoice``**，其余一律降级发文件。
 
         为什么不能「原样塞 voice_type=4」：厂商对非 SILK / 超限 silk 会**静默拒收**
@@ -534,6 +551,20 @@ class MediaMixin:
             except OSError:
                 return b64
 
+        async def _note(resp: dict, idx: int, total: int, seg_kind: str,
+                        seg_name: str) -> None:
+            """每成功发出一条，交给调用方落库（多段各一条记录）。
+
+            回调失败只 warn —— 消息已经在微信里了，不能因为记账失败再把发送判成失败。
+            """
+            if on_segment is None or not outbound.send_ok(resp):
+                return
+            try:
+                await on_segment(resp, index=idx, total=total,
+                                 kind=seg_kind, name=seg_name)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[WPP] 语音分段落库失败（消息已发出）: %s", exc)
+
         try:
             if not os.path.isfile(src):
                 temp_dir = tempfile.mkdtemp(prefix="wpp-voice-split-")
@@ -565,13 +596,16 @@ class MediaMixin:
                         log.warning("[WPP] 语音发送被拒（%s）—— 降级发文件", exc)
                         resp = {"Code": -2, "Message": str(exc)}
                     if outbound.send_ok(resp):
+                        await _note(resp, 0, 1, "voice", send_name)
                         return resp
                     log.warning("[WPP] 语音发送被拒（%s）—— 降级发文件",
                                 outbound.send_error_text(resp))
                 else:
                     log.warning("[WPP] 无法确认 SILK 时长（VoiceTime=0 必被拒）—— 降级发文件")
-                return await client.send_file_v2(
+                resp = await client.send_file_v2(
                     to_wxid=peer_id, file_name=send_name, file_base64=b64)
+                await _note(resp, 0, 1, "file", send_name)
+                return resp
 
             stem = os.path.splitext(send_name)[0] or "voice"
             for idx, seg in enumerate(segments):
@@ -584,6 +618,7 @@ class MediaMixin:
                     last_resp = await client.send_file_v2(
                         to_wxid=peer_id, file_name=seg_name,
                         file_base64=_seg_b64(seg))
+                    await _note(last_resp, idx, len(segments), "file", seg_name)
                     continue
 
                 voice_ms = (await silk_encoder.probe_duration_ms(seg)
@@ -594,6 +629,7 @@ class MediaMixin:
                     last_resp = await client.send_file_v2(
                         to_wxid=peer_id, file_name=seg_name,
                         file_base64=_seg_b64(seg))
+                    await _note(last_resp, idx, len(segments), "file", seg_name)
                     continue
                 try:
                     resp = await client.send_voice(
@@ -605,12 +641,14 @@ class MediaMixin:
                     resp = {"Code": -2, "Message": str(exc)}
                 last_resp = resp
                 if outbound.send_ok(resp):
+                    await _note(resp, idx, len(segments), "voice", seg_name)
                     continue
                 log.warning("[WPP] 第 %d/%d 段语音被拒（%s）—— 降级发文件",
                             idx + 1, len(segments), outbound.send_error_text(resp))
                 last_resp = await client.send_file_v2(
                     to_wxid=peer_id, file_name=seg_name,
                     file_base64=_seg_b64(seg))
+                await _note(last_resp, idx, len(segments), "file", seg_name)
             return last_resp or {"Code": -1, "Message": "语音无可发送内容"}
         finally:
             silk_encoder.cleanup_segments(segments)

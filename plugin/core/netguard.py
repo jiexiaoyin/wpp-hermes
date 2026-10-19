@@ -224,10 +224,13 @@ def is_local_read_allowed(path: str) -> bool:
 # ------------------------------------------------------------------------ SSRF
 
 
-def assert_public_url(url: str) -> str:
-    """校验 URL 不指向内网/保留地址。返回原 URL 或 raise ``GuardError``。
+def _resolve_public_targets(url: str) -> tuple[str, int, list[tuple[int, str]]]:
+    """解析 URL 并**一次性**返回校验过的 ``(host, port, [(family, ip), …])``。
 
-    **解析 DNS 后逐 IP 校验** —— 只看域名字符串挡不住 DNS rebinding。
+    2026-10-19 审阅修复：只校验不固定 IP 是典型的 DNS rebinding TOCTOU ——
+    ``assert_public_url`` 解析一次、``aiohttp`` 连接时再解析一次，攻击者让第一次
+    返回公网 IP、第二次返回 ``127.0.0.1`` 就绕过了。调用方必须拿这里返回的 IP
+    **直连**（见 :class:`_PinnedResolver`），不能再让底层重新解析。
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -235,14 +238,18 @@ def assert_public_url(url: str) -> str:
     host = parsed.hostname or ""
     if not host:
         raise GuardError(f"URL 无主机名: {url[:60]}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
     try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise GuardError(f"URL 域名无法解析: {host}") from exc
 
+    targets: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
     for info in infos:
-        raw_ip = info[4][0]
+        family, _socktype, _proto, _canon, sockaddr = info
+        raw_ip = str(sockaddr[0])
         try:
             ip = ipaddress.ip_address(raw_ip.split("%")[0])   # 去掉 IPv6 zone id
         except ValueError:
@@ -254,7 +261,74 @@ def assert_public_url(url: str) -> str:
         if (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
             raise GuardError(f"SSRF 拦截: 拒绝内网/保留 IP {raw_ip}（host={host}）")
+        key = (int(family), raw_ip.split("%")[0])
+        if key not in seen:
+            seen.add(key)
+            targets.append(key)
+    if not targets:
+        raise GuardError(f"URL 域名没有可用 IP: {host}")
+    return host, port, targets
+
+
+def assert_public_url(url: str) -> str:
+    """校验 URL 不指向内网/保留地址。返回原 URL 或 raise ``GuardError``。
+
+    **解析 DNS 后逐 IP 校验** —— 只看域名字符串挡不住 DNS rebinding。
+    ⚠️ 真正抓取必须用 :func:`safe_fetch_url`：它把这里解析出的 IP 固定进连接，
+    避免"校验一次、连接再解析一次"的 TOCTOU。
+    """
+    _resolve_public_targets(url)
     return url
+
+
+def _norm_host(host: str) -> str:
+    """主机名归一化：小写、去尾点、Unicode → IDNA。
+
+    aiohttp/yarl 在调 resolver 前会把非 ASCII 域名转成 punycode，而
+    ``urlparse().hostname`` 给的是原文 —— 不归一化会让中文域名被误判成
+    "未固定主机"并拒连。
+    """
+    host = str(host or "").lower().rstrip(".")
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
+class _PinnedResolver:
+    """aiohttp 的自定义解析器：只返回已校验的 IP，绝不再查 DNS。
+
+    ``resolve(host, port, family)`` 的返回形状见 ``aiohttp.abc.AbstractResolver``。
+    ``hostname`` 保留原域名，aiohttp 仍用它做 SNI / 证书校验与 Host 头 ——
+    我们只把"连到哪个 IP"钉死。
+    """
+
+    def __init__(self, host: str, port: int, targets: list[tuple[int, str]]) -> None:
+        self._host = _norm_host(host)
+        self._port = port
+        self._targets = tuple(targets)
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_UNSPEC):
+        if _norm_host(host) != self._host:
+            raise OSError(f"解析器拒绝未固定主机: {host}")
+        out = []
+        for fam, ip in self._targets:
+            if family not in (socket.AF_UNSPEC, 0, fam):
+                continue
+            out.append({
+                "hostname": host,
+                "host": ip,
+                "port": port or self._port,
+                "family": fam,
+                "proto": 0,
+                "flags": 0,
+            })
+        if not out:
+            raise OSError(f"固定主机 {host} 没有匹配 family={family} 的地址")
+        return out
+
+    async def close(self) -> None:
+        return None
 
 
 def assert_endpoint_public(url: str) -> str:
@@ -305,9 +379,13 @@ async def safe_fetch_url(url: str, *, timeout: int = 30,
     import aiohttp
 
     current = url
-    async with aiohttp.ClientSession() as sess:
-        for hop in range(_MAX_REDIRECTS + 1):
-            assert_public_url(current)
+    for hop in range(_MAX_REDIRECTS + 1):
+        # ★ 每跳解析一次，并把解析结果**固定**进这一跳的 connector：
+        #   aiohttp 不再自行 getaddrinfo ⇒ 校验与连接看到的是同一个 IP。
+        host, port, targets = _resolve_public_targets(current)
+        connector = aiohttp.TCPConnector(
+            resolver=_PinnedResolver(host, port, targets), use_dns_cache=False)
+        async with aiohttp.ClientSession(connector=connector) as sess:
             async with sess.get(
                 current, allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=timeout),

@@ -631,6 +631,21 @@ def test_the_cache_is_per_account(adapter) -> None:
     assert client.calls == [SENDER, SENDER], "换账号必须重新查"
 
 
+def test_the_nickname_cache_has_a_hard_size_bound(adapter, monkeypatch) -> None:
+    """只有 TTL 没有上限 = 长跑进程里按联系人数量无限涨（与 session_title 同款）。
+
+    命中价值集中在近期（30 分钟），所以到顶后按插入顺序淘汰最老的是安全的。
+    """
+    client = _Client({"Data": {"ContactList": [{"NickName": {"string": "张三"}}]}})
+    ad = _shell(adapter)
+    ad._name_cache_max = 4
+    for i in range(10):
+        asyncio.run(ad._resolve_display_name(ACCT, client, f"wxid_{i}"))
+    assert len(ad._name_cache) <= 4, "昵称缓存无上限 ⇒ 内存随联系人数量增长"
+    assert f"{ACCT.id}:wxid_0" not in ad._name_cache, "最老条目应被淘汰"
+    assert f"{ACCT.id}:wxid_9" in ad._name_cache, "最新条目必须保留"
+
+
 def test_a_group_id_never_reaches_the_vendor(adapter) -> None:
     client = _Client({"Data": {}})
     ad = _shell(adapter)

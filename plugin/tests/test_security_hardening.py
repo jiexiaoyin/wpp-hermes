@@ -217,6 +217,27 @@ def test_public_url_guard_resolves_dns(monkeypatch):
         netguard.assert_public_url("http://127.0.0.1/x")
 
 
+def test_the_resolver_pins_the_validated_ip_and_refuses_other_hosts(monkeypatch):
+    """校验与连接必须看到同一批 IP（不然 DNS rebinding 仍能换到 127.0.0.1）。
+
+    ``resolve`` 只回放已校验的 IP；换成另一个主机名必须拒 —— 那是重定向/绕过的信号。
+    """
+    from plugin.core import netguard
+
+    monkeypatch.setattr(netguard.socket, "getaddrinfo", _fake_getaddrinfo)
+    host, port, targets = netguard._resolve_public_targets("https://例子.中国/x")
+    assert (host, port) == ("例子.中国", 443)
+    assert targets == [(socket.AF_INET, "93.184.216.34")]
+
+    resolver = netguard._PinnedResolver(host, port, targets)
+    puny = "例子.中国".encode("idna").decode("ascii")
+    got = asyncio.run(resolver.resolve(puny, 443))
+    assert got[0]["host"] == "93.184.216.34", "连接目标必须是校验过的 IP"
+    assert got[0]["hostname"] == puny, "SNI / 证书校验仍用原域名"
+    with pytest.raises(OSError):
+        asyncio.run(resolver.resolve("evil.example", 443))
+
+
 def test_redirect_to_loopback_is_revalidated(monkeypatch):
     """★ 旧实现用 ``allow_redirects=True``：初始 URL 合法，302 到内网就绕过了。"""
     from plugin.core import netguard
@@ -240,6 +261,9 @@ def test_redirect_to_loopback_is_revalidated(monkeypatch):
     fetched: list[str] = []
 
     class _Sess:
+        def __init__(self, connector=None):
+            pass
+
         async def __aenter__(self):
             return self
 
@@ -251,7 +275,8 @@ def test_redirect_to_loopback_is_revalidated(monkeypatch):
             return _Resp(302, {"Location": "http://127.0.0.1:8062/mcp"})
 
     fake = types.SimpleNamespace(ClientSession=_Sess,
-                                 ClientTimeout=lambda **kw: None)
+                                 ClientTimeout=lambda **kw: None,
+                                 TCPConnector=lambda **kw: None)
     monkeypatch.setitem(sys.modules, "aiohttp", fake)
 
     with pytest.raises(netguard.GuardError) as ei:
@@ -280,6 +305,9 @@ def test_declared_content_length_over_cap_is_rejected(monkeypatch):
             raise AssertionError("声明超限还在读 body")
 
     class _Sess:
+        def __init__(self, connector=None):
+            pass
+
         async def __aenter__(self):
             return self
 
@@ -291,7 +319,8 @@ def test_declared_content_length_over_cap_is_rejected(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "aiohttp",
                         types.SimpleNamespace(ClientSession=_Sess,
-                                              ClientTimeout=lambda **kw: None))
+                                              ClientTimeout=lambda **kw: None,
+                                              TCPConnector=lambda **kw: None))
     with pytest.raises(netguard.GuardError):
         asyncio.run(netguard.safe_fetch_url("http://example.com/x", max_bytes=100))
 

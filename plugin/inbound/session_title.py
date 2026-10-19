@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 PLATFORM = "wechatpadpro"
 MAX_TITLE_CHARS = 100  # 与 hermes_state.SessionDB.MAX_TITLE_LENGTH 一致
 _CACHE_TTL_SEC = 300.0
+#: 缓存上限（2026-10-19 审阅）：只有 TTL 没有上限 = 长跑进程里群/联系人越多越大。
+#: 384 个群 × 成员规模轻松上万条；命中价值集中在近期，超出按插入顺序淘汰最老。
+_NAME_CACHE_MAX = 2048
 _NAME_CACHE: dict[tuple[str, ...], tuple[float, str]] = {}
 
 def _clean(value: Any) -> str:
@@ -66,6 +69,12 @@ def _cached(key: tuple[str, ...], loader) -> str:
     except Exception as exc:  # noqa: BLE001 —— 名字取不到只影响标题，不能影响消息
         log.debug("[WPP] 名称解析失败 %s: %s", key, exc)
         value = ""
+    if len(_NAME_CACHE) >= _NAME_CACHE_MAX:
+        # 先清过期项；仍满则按插入顺序淘汰最老（Python 3.7 dict 保序）。
+        for stale in [k for k, (exp, _v) in _NAME_CACHE.items() if exp <= now]:
+            _NAME_CACHE.pop(stale, None)
+        while len(_NAME_CACHE) >= _NAME_CACHE_MAX:
+            _NAME_CACHE.pop(next(iter(_NAME_CACHE)), None)
     _NAME_CACHE[key] = (now + _CACHE_TTL_SEC, value)
     return value
 

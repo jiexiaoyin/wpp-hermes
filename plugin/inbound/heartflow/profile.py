@@ -979,7 +979,7 @@ def _load_sample_lines(account_id: str, group_id: str, limit: int) -> list[str]:
         if m.get("direction") != "inbound":
             continue
         body = hf_caption_sample_line(
-            re.sub(r"\s+", " ", m.get("content") or "").strip(), caps)
+            re.sub(r"\s+", " ", m.get("content") or "").strip(), caps, account_id)
         if not body or len(body) < 2:
             continue
         who = (m.get("from_wxid") or "")[:6] + "**"

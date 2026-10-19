@@ -221,12 +221,18 @@ async def _send_voice_bubble(client, account_id: str, to_wxid: str, out_path: st
     with open(out_path, "rb") as f:
         b64 = _b64.b64encode(f.read()).decode()
     name = _os.path.basename(out_path) or "voice.mp3"
-    resp = await MediaMixin._send_voice_media(client, to_wxid, out_path, name, b64)
+
+    async def _persist_segment(resp, *, index, total, kind, name):
+        # 多段各落一条：历史/身份卡才能看到完整语音，而不是只剩最后一段。
+        marker = "[语音]" if kind == "voice" else f"[文件] {name}"
+        if total > 1:
+            marker += f" ({index + 1}/{total})"
+        _persist_tool_outbound(account_id, to_wxid, marker, resp, msg_type=kind)
+
+    resp = await MediaMixin._send_voice_media(
+        client, to_wxid, out_path, name, b64, on_segment=_persist_segment)
     data = resp.get("Data") or {}
-    payload = _send_payload(resp, msg_id=data.get("Msgid"), voice_path=out_path)
-    if payload.get("ok"):
-        _persist_tool_outbound(account_id, to_wxid, "[语音]", resp, msg_type="voice")
-    return payload
+    return _send_payload(resp, msg_id=data.get("Msgid"), voice_path=out_path)
 
 
 async def _maybe_auto_voice(adapter, account_id: str, client, to_wxid: str,
@@ -708,23 +714,23 @@ def register_msg_tools(ctx, adapter_getter) -> None:
 
     # sendVoice: 发送语音
     async def send_voice(**params):
+        import base64 as _b64
+        import os as _os
+        import tempfile as _tf
+
         adapter = adapter_getter()
         to_wxid = params["toWxid"]
         voice = params.get("voiceUrl") or params.get("voiceBase64") or ""
-        duration = params.get("duration", 0)
         aid, client = acct(adapter, params)
         if not voice:
             return {"error": "voiceUrl/voiceBase64 至少给一个（厂商不收空语音）"}
-        try:
-            if int(duration or 0) > 60_000:
-                return {"error": "微信语音单条上限 60 秒，请分段发送（AI 语音可用 wpp_send_ai_voice 自动分段）"}
-        except (TypeError, ValueError):
-            pass
         # 非 base64 尝试下载（安全：SSRF 防护）
         base64_str = (await _resolve_to_base64(voice)
                       if voice.startswith(("http", "/", "~", "data:")) else voice)
-        # 厂商 /Msg/SendVoice **只收 SILK**（Type=4）。mp3 等其它格式没有转码器时
-        # 降级成文件消息（TS v1.3.53 VOICE-DEGRADE 同口径），绝不把 mp3 当语音发。
+        # 2026-10-19 审阅修复：不再对 >60s **直接报错**。微信单条语音上限 60s，
+        # 「超了就拒绝」等于把分段能力挡在工具外面（模型只能自己切，通常不会）。
+        # 现在统一落到 :func:`_send_voice_bubble` → ``_send_voice_media``：它按真实
+        # 时长切段（55s/段）、逐段编码 SILK、超字节闸再降码率，mp3 也会转成语音气泡。
         from ..platform import silk_encoder
 
         no_query = voice.split("?")[0].lower()
@@ -733,34 +739,23 @@ def register_msg_tools(ctx, adapter_getter) -> None:
                    # 2026-10-19 审阅修复：模型直接传裸 SILK base64 时也要认得，
                    # 否则明明能发语音却被降级成文件。
                    or silk_encoder.looks_like_silk_base64(base64_str))
-        if not is_silk:
-            fname = voice.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "voice.mp3"
-            resp = await client.send_file_via_app(to_wxid, fname, base64_str)
-            data = resp.get("Data") or {}
-            data.get("BaseResponse") or {}
-            payload = _send_payload(resp, msg_id=data.get("Msgid"), degraded="file")
-            if payload.get("ok"):
-                _persist_tool_outbound(aid, to_wxid, f"[文件] {fname}", resp, msg_type="file")
-            return payload
-        # VoiceTime 必须是**真实毫秒且非 0**（0 会被厂商以误导性的 Code=-2 拒收）。
-        # duration 是可选参数 ⇒ 缺省时从 SILK 本身算；算不出来就拒绝，别发必败请求。
+        suffix = ".silk" if is_silk else (_os.path.splitext(no_query)[1] or ".mp3")
+        if suffix not in (".silk", ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".amr", ".flac"):
+            suffix = ".mp3"
+        tmp_path = ""
         try:
-            duration_ms = int(duration or 0)
-        except (TypeError, ValueError):
-            duration_ms = 0
-        if duration_ms <= 0:
-            duration_ms = await silk_encoder.probe_silk_base64_ms(base64_str)
-        if duration_ms <= 0:
-            return {"error": "无法确认语音时长：请传 duration（毫秒，>0）；"
-                             "VoiceTime=0 会被厂商拒收"}
-        try:
-            resp = await client.send_voice(to_wxid, base64_str, 4, duration_ms)
+            with _tf.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+                fh.write(_b64.b64decode(base64_str or "", validate=False))
+                tmp_path = fh.name
+            return await _send_voice_bubble(client, aid, to_wxid, tmp_path)
         except Exception as exc:  # noqa: BLE001 —— 统一转成工具错误，别冒泡成 unknown
             return {"error": f"语音发送失败: {exc}"}
-        payload = _send_payload(resp, code=resp.get("Code"))
-        if payload.get("ok"):
-            _persist_tool_outbound(aid, to_wxid, "[语音]", resp, msg_type="voice")
-        return payload
+        finally:
+            if tmp_path:
+                try:
+                    _os.remove(tmp_path)
+                except OSError:
+                    pass
 
     # sendVideo: 发送视频
     async def send_video(**params):

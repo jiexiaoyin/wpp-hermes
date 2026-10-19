@@ -58,6 +58,18 @@ def names(monkeypatch):
     T.clear_name_cache()
 
 
+def test_name_cache_is_bounded(monkeypatch):
+    """长跑进程里群/成员只会越来越多：缓存必须有上限，不能只靠 5 分钟 TTL。"""
+    monkeypatch.setattr(T, "_NAME_CACHE_MAX", 8)
+    T.clear_name_cache()
+    for i in range(50):
+        T._cached(("member", "a", "g", f"w{i}"), lambda i=i: f"name{i}")
+    assert len(T._NAME_CACHE) <= 8, "名称缓存无上限 ⇒ 内存随联系人数量增长"
+    assert ("member", "a", "g", "w0") not in T._NAME_CACHE, "最老的条目应被淘汰"
+    assert ("member", "a", "g", "w49") in T._NAME_CACHE, "最新条目必须保留"
+    T.clear_name_cache()
+
+
 def test_group_title_is_just_the_group_name(names):
     """一个群一条会话 ⇒ 标题不带发送者，否则同群不同成员的会话会撞名。"""
     assert T.build_session_title(_origin()) == GROUP_NAME

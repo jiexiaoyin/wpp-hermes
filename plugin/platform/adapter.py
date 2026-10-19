@@ -330,8 +330,11 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         #: 已从 DB 预热过黑话含义的 ``(account_id, group_id)``。每组只读一次库；
         #: 预热是 fire-and-forget（不阻塞收信），首条消息来不及读到就从下一条开始生效。
         self._jargon_loaded: set[tuple[str, str]] = set()
-        #: 昵称缓存（引用回复用），{wxid: (name, at)}
+        #: 昵称缓存（引用回复用），{account:wxid: (name, at)}。
+        #: 只有 30 分钟 TTL、没有容量上限时，长跑进程会随联系人/群成员数量无限增长
+        #: （2026-10-19 审阅）—— 到上限先清过期，再按插入顺序淘汰最老。
         self._name_cache: dict[str, tuple[str, float]] = {}
+        self._name_cache_max = 2048
         #: 临时禁言（SpectreCore 的 ``/mute`` 轻量版）：``(account_id, chatroom_id)``
         #: → 到期时间（epoch 秒）。**内存态**，重启即失效 —— 主动静音是临时运维动作，
         #: 不该因为一次重启变成"这个群永远不理人"。过期条目在读取时顺手清掉。
@@ -869,7 +872,11 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                 # 拉回来的条目与 WS 帧**同形**（TS 也是把 raw 交给同一个回调：
                 # ``ws-client.ts:243`` 的 ``onInboundMessage(raw)``）⇒ 走同一个入口，
                 # 幂等由 ``wpp_messages`` 唯一键 + 内存去重兜。
-                on_message=lambda item, a=acct: self._on_raw(a, item),
+                # ★ 2026-10-19 审阅修复：**不能走 _on_raw** —— 它只把消息塞进聚合器就
+                #   返回，而 SyncFallback 拿到返回就推进游标。进程在 500ms 聚合窗口内
+                #   退出时这批消息既没落库也没处理，游标却已越过 ⇒ 永久丢失。
+                #   兜底通道本来就是"补 WS 漏掉的"，必须等下游真正走完再动游标。
+                on_message=lambda item, a=acct: self._on_sync_raw(a, item),
                 is_connected=lambda w=ws: bool(w is not None and w.connected),
             )
             sync.start()
@@ -1202,6 +1209,25 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             # 现场只是"有些人说话机器人永远不理"，日志里连一行 WARN 都不会有。
             if db is None or not db.enqueue(msg):
                 await self._dispatch_one(acct, msg, pipeline)
+
+    async def _on_sync_raw(self, acct: accounts_mod.Account, payload: dict) -> None:
+        """增量兜底的派发入口：**绕开聚合器，等 ``_handle_one`` 真正返回**。
+
+        与 :meth:`_on_raw` 的差别只有"什么时候算派发完成"：WS/webhook 可以入队就返回，
+        因为它们有后续的重放兜底（``/Msg/Sync``）；而这里**就是兜底本身** ——
+        ``SyncFallback.trigger`` 在 ``on_message`` 返回后立刻推进游标，若只入队，
+        进程在聚合窗口内退出就再也拉不回这批消息。
+
+        代价：兜底回放会逐条串行处理（含 LLM 调用），比 WS 路径慢；但兜底只在 WS
+        漏帧/重连窗口触发，正确性优先。去重仍由 ``_handle_one`` 的 ``msg_id`` 闸兜住。
+        """
+        acct = self._accounts.get(acct.id, acct)
+        pipeline = self._pipelines.get(acct.id)
+        if pipeline is None:
+            log.warning("[WPP:%s SYNC] 兜底消息到达但管线未就绪（未连接？），丢弃", acct.id)
+            return
+        for msg in pipeline.extract(payload):
+            await self._dispatch_one(acct, msg, pipeline)
 
     async def _dispatch_one(self, acct: accounts_mod.Account, msg: WppMessage,
                             pipeline: InboundPipeline) -> None:
@@ -2505,6 +2531,15 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                 name = found
         except Exception as exc:  # noqa: BLE001 —— 查不到昵称不该挡住发送
             log.debug("[WPP:%s] 查昵称失败 %s: %s", acct.id, wxid, exc)
+        # getattr: 测试会绕过 __init__ 直接构造适配器；上限不是业务状态，缺失时用默认值。
+        cap = getattr(self, "_name_cache_max", 2048)
+        if len(self._name_cache) >= cap:
+            now = time.time()
+            for stale in [k for k, (_v, at) in self._name_cache.items()
+                          if now - at >= 1800]:
+                self._name_cache.pop(stale, None)
+            while len(self._name_cache) >= cap:
+                self._name_cache.pop(next(iter(self._name_cache)), None)
         self._name_cache[f"{acct.id}:{wxid}"] = (name, time.time())
         return name
 

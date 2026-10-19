@@ -110,12 +110,36 @@ def resolve_hf_caption_cfg(cfg: Mapping[str, Any] | None) -> HfCaptionConfig:
 # ================================================================ 纯函数
 
 
-def hf_caption_hash(url: str) -> str:
-    """幂等键：``sha1(图片 URL)`` 十六进制。
+def hf_caption_hash(url: str, account_id: str = "") -> str:
+    """幂等键：``sha1(账号 + 图片 URL)`` 十六进制。
 
     URL 是 OSS 直链（内容 hash 已在文件名里，但 URL 字符串本身是稳定标识）。
+
+    ⚠️ **必须带 ``account_id``**（2026-10-19 审阅修复）：表的主键是 ``url_hash``，
+    不带账号时同一 URL 在两个账号下会抢同一行 —— 先写入的 ``account_id`` 永远不改，
+    另一个账号按 ``WHERE account_id=?`` 查不到自己那行，upsert 又撞主键 ⇒ 配文
+    永远不可见，失败计数还会串到别的账号。把账号编进 hash（长度前缀，避免
+    ``("a","bc")`` 与 ``("ab","c")`` 撞）即可在不改表结构的前提下按账号隔离。
+
+    不传 ``account_id`` 时保留旧的纯 URL hash（只为兼容单测/历史调用；生产路径
+    必须传账号）。
     """
-    return hashlib.sha1(str(url).encode("utf-8")).hexdigest()
+    if account_id:
+        raw = f"{len(account_id)}:{account_id}\n{url}"
+    else:
+        raw = str(url)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def hf_caption_hashes(url: str, account_id: str = "") -> tuple[str, str]:
+    """返回 ``(账号隔离 hash, 旧纯 URL hash)``。
+
+    旧 hash 只用于**读**：2026-10-19 之前落的配文行都按纯 URL 算主键，直接换新
+    hash 会让它们全部"查不到" ⇒ 同一张图被重复配文（白花 LLM 预算）。查询时把
+    两个 hash 都带上（SQL 仍按 ``account_id`` 过滤，不会串号），命中旧行就继续用。
+    新写入一律用新 hash。
+    """
+    return hf_caption_hash(url, account_id), hf_caption_hash(url, "")
 
 
 @dataclass(frozen=True)
@@ -141,6 +165,7 @@ def select_hf_caption_tasks(
     *,
     max_tasks: int,
     max_fails: int,
+    account_id: str = "",
 ) -> list[HfCaptionTask]:
     """从图片消息行挑出「还没配文且没试死」的 URL（纯函数，可单测）。
 
@@ -155,11 +180,12 @@ def select_hf_caption_tasks(
         if not content:
             continue
         for url in _extract_urls(content, 4):
-            h = hf_caption_hash(url)
+            h, legacy = hf_caption_hashes(url, account_id)
             if h in seen:
                 continue
             seen.add(h)
-            row = rows.get(h)
+            # 旧行（纯 URL hash）也认：否则换 hash 后历史配文全部失效。
+            row = rows.get(h) or (rows.get(legacy) if legacy != h else None)
             if row is not None:
                 if row.get("caption") is not None:
                     continue
@@ -177,7 +203,9 @@ def clean_hf_caption(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()[:60]
 
 
-def hf_caption_sample_line(body: str, captions_by_hash: Mapping[str, str]) -> str:
+def hf_caption_sample_line(
+    body: str, captions_by_hash: Mapping[str, str], account_id: str = "",
+) -> str:
     """画像样本行装配（纯函数）：图片占位体换配文。
 
     - 有配文：``[图] <配文>``（URL 噪声一并清掉 —— 它对归纳毫无价值还吃截断预算）
@@ -188,7 +216,7 @@ def hf_caption_sample_line(body: str, captions_by_hash: Mapping[str, str]) -> st
         return body
     urls = _extract_urls(body, 1)
     first = urls[0] if urls else None
-    cap = captions_by_hash.get(hf_caption_hash(first)) if first else None
+    cap = captions_by_hash.get(hf_caption_hash(first, account_id)) if first else None
     return f"[图] {cap}" if cap else "收到一张图片"
 
 
@@ -235,17 +263,20 @@ async def caption_pending_hf_images(
         if not content:
             continue
         for url in _extract_urls(content, 4):
-            h = hf_caption_hash(url)
+            h, legacy = hf_caption_hashes(url, account_id)
             if h in seen:
                 continue
             seen.add(h)
             hashes.append(h)
+            if legacy != h:
+                hashes.append(legacy)
     if not hashes:
         return out
     existing = repo_hf.get_hf_captions_by_hashes(account_id, hashes)
 
     tasks = select_hf_caption_tasks(
-        msgs, existing, max_tasks=cfg.per_group_max, max_fails=cfg.max_fails)
+        msgs, existing, max_tasks=cfg.per_group_max, max_fails=cfg.max_fails,
+        account_id=account_id)
     out.tasks = len(tasks)
 
     for t in tasks:
@@ -298,15 +329,21 @@ def load_hf_captions_for_bodies(
     try:
         hashes: list[str] = []
         seen: set[str] = set()
+        #: 查询 hash → 新 hash 的别名（旧纯 URL 行读回来后仍按新 hash 装配）。
+        alias: dict[str, str] = {}
         for b in bodies:
             if not b or "[图片]" not in b:
                 continue
             for url in _extract_urls(b, 4):
-                h = hf_caption_hash(url)
+                h, legacy = hf_caption_hashes(url, account_id)
                 if h in seen:
                     continue
                 seen.add(h)
                 hashes.append(h)
+                alias[h] = h
+                if legacy != h:
+                    hashes.append(legacy)
+                    alias[legacy] = h
         if not hashes:
             return map_
         from ...data import repo_hf
@@ -314,7 +351,8 @@ def load_hf_captions_for_bodies(
         for r in rows:
             cap = r.get("caption")
             if cap:
-                map_[str(r.get("url_hash") or "")] = str(cap)
+                stored = str(r.get("url_hash") or "")
+                map_[alias.get(stored, stored)] = str(cap)
     except Exception as exc:  # noqa: BLE001 —— 查不到配文 ≠ 画像生成失败
         log.warning("[WPP HF] caption lookup failed (样本退回旧形态): %s", exc)
     return map_

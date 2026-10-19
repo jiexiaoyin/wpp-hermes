@@ -525,7 +525,10 @@ DECLARED_AST_DIFFS: dict[str, dict[str, str]] = {
             "③ 2026-10-19 群发收口：``toIds`` 在 handler 内去重并限制 64 个目标"
             "（schema 的 maxItems 只是提示，不能当运行期约束）；④ 2026-10-19 TTS："
             "``send_ai_voice`` 从 ``mmx`` 改为 Hermes ``tts`` 注册表 + 情绪路由，"
-            "``send_text`` 末尾可选补发一条自动语音（``tts.autoVoice``，默认 0）。"
+            "``send_text`` 末尾可选补发一条自动语音（``tts.autoVoice``，默认 0）；"
+            "⑤ 2026-10-19 语音分段：``send_voice`` 不再对 >60s 直接报错，统一走 "
+            "``_send_voice_bubble``（按真实时长 55s 切段、逐段编码 SILK、超字节闸"
+            "降码率），mp3 等格式也转成语音气泡而非文件。"
         ),
         "send_group_mass_text": (
             "2026-10-19 安全加固：群发一次请求打 N 个群且撤不回，旧实现把模型给的"
@@ -610,9 +613,10 @@ DECLARED_REGISTRATION_DIFFS: dict[str, dict[str, str]] = {
             "data URI / SILK base64」（模型可直接传裸 SILK），新增可选 ``formatHint`` "
             "与 ``duration``（VoiceTime 必须是真实毫秒，缺省时从 SILK 自动探测），"
             "``required`` 从 ``toWxid + voiceUrl`` 放宽为 ``toWxid``（改用 "
-            "``voiceBase64`` 或格式提示发 SILK 时不再被 schema 拦下）。handler 对 >60s "
-            "的 ``duration`` 明确拒绝并提示用 ``wpp_send_ai_voice`` 自动分段。toolset "
-            "未变。"
+            "``voiceBase64`` 或格式提示发 SILK 时不再被 schema 拦下）。2026-10-19 "
+            "进一步去掉 >60s 的硬拒绝：handler 统一走 ``_send_voice_media`` 自动"
+            "分段（55s/段，逐段降码率），非 SILK 音频也转语音气泡。schema 不变；"
+            "``duration`` 仍可选（真实时长以音频探测为准）。toolset 未变。"
         ),
     },
     "jargon": {

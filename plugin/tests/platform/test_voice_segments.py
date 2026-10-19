@@ -115,6 +115,48 @@ def test_send_voice_media_sends_each_segment_as_a_bubble(stubbed, monkeypatch) -
     assert cleaned == [segments], "临时分段文件必须清理"
 
 
+def test_send_voice_media_reports_every_segment_for_persistence(stubbed, monkeypatch,
+                                                                tmp_path) -> None:
+    """每段语音是独立气泡/独立 msg_id ⇒ 必须逐段回调落库。
+
+    旧实现只把最后一段的响应交给调用方，历史里永远缺前几段。
+    """
+    from plugin.platform.adapter_media import MediaMixin
+
+    segments = [str(tmp_path / "part-01.wav"), str(tmp_path / "part-02.wav")]
+    for seg in segments:
+        with open(seg, "wb") as fh:
+            fh.write(b"RIFF")
+
+    async def _split(_ref, max_ms=silk_encoder.MAX_VOICE_SEGMENT_MS):
+        return list(segments)
+
+    async def _encode(_ref):
+        return "SILK"
+
+    async def _duration(_ref):
+        return 10_000
+
+    monkeypatch.setattr(silk_encoder, "split_audio", _split)
+    monkeypatch.setattr(silk_encoder, "encode_to_silk_fitting", _encode)
+    monkeypatch.setattr(silk_encoder, "probe_duration_ms", _duration)
+    monkeypatch.setattr(silk_encoder, "cleanup_segments", lambda _p: None)
+
+    seen: list[dict] = []
+
+    async def _on_segment(_resp, **kw):
+        seen.append(kw)
+
+    client = _FakeClient()
+    asyncio.run(MediaMixin._send_voice_media(
+        client, "peer", "/tmp/long.mp3", "long.mp3", "QjY0",
+        on_segment=_on_segment))
+
+    assert [s["index"] for s in seen] == [0, 1]
+    assert [s["total"] for s in seen] == [2, 2]
+    assert [s["kind"] for s in seen] == ["voice", "voice"]
+
+
 def test_send_voice_media_degrades_only_the_failed_segment(stubbed, monkeypatch,
                                                            tmp_path) -> None:
     from plugin.platform.adapter_media import MediaMixin

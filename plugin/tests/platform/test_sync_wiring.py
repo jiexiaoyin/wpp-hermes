@@ -275,9 +275,9 @@ def test_a1_the_fallback_is_built_outside_the_ws_try_and_not_gated_on_it():
 def test_a2_the_fallback_dispatch_and_connection_state_are_wired_correctly():
     """三根线接对：``on_message`` / ``is_connected`` / 那个 api 是**该账号的 client**。
 
-    * ``on_message`` 必须回到 ``_on_raw``（TS 也是把 raw 交给**同一个**回调：
-      ``ws-client.ts:243`` 的 ``onInboundMessage(raw)``）—— 拉回来的条目与 WS 帧同形，
-      走同一个入口才谈得上"靠 msgId 幂等去重"。
+    * ``on_message`` 必须是 ``_on_sync_raw``（**不是** ``_on_raw``）：拉回来的条目与 WS
+      帧同形，去重仍靠 msgId；但兜底回调返回后 ``SyncFallback`` 就推进游标，而
+      ``_on_raw`` 只入聚合器就返回 ⇒ 聚合窗口内进程退出会永久丢这批消息。
     * ``is_connected`` 必须**现读** ``ws.connected``（存成 bool 会让断线后照样发心跳）。
     ``is_connected=lambda: ws.connected`` 这种写法必须是**默认参数闭包**
     （``w=ws``），否则循环里所有账号会共用最后一个 ws。
@@ -289,7 +289,10 @@ def test_a2_the_fallback_dispatch_and_connection_state_are_wired_correctly():
     kw = {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
 
     assert "on_message" in kw, "拉回来的条目没人派发"
-    assert "_on_raw(" in kw["on_message"], f"on_message 必须回到统一入口：{kw['on_message']}"
+    assert "_on_sync_raw(" in kw["on_message"], \
+        f"on_message 必须走「处理完才返回」的同步入口：{kw['on_message']}"
+    assert "_on_raw(" not in kw["on_message"].replace("_on_sync_raw(", ""), \
+        f"不能退回只入聚合器的 _on_raw：{kw['on_message']}"
     assert "item" in kw["on_message"], f"派发的必须是拉回来的那一条：{kw['on_message']}"
 
     assert "is_connected" in kw, "心跳没接连接态 ⇒ 断线后照样发 HTTP 心跳"
@@ -303,6 +306,22 @@ def test_a2_the_fallback_dispatch_and_connection_state_are_wired_correctly():
     assert ast.unparse(calls[0].args[0]) == "acct.id"
     assert ast.unparse(calls[0].args[1]) == "client", \
         f"第二个位置参数必须是本账号的 vendor client：{ast.unparse(calls[0].args[1])}"
+
+
+def test_a2b_sync_dispatch_waits_for_the_handler_instead_of_the_debouncer():
+    """★ 兜底派发必须**直接 await ``_dispatch_one``**，不能只 ``enqueue``。
+
+    ``SyncFallback.trigger`` 拿到 ``on_message`` 返回就推进游标；聚合器 ``enqueue``
+    只是放进 500ms 缓冲。若这里走 ``_on_raw``，停机/崩溃窗口内那批消息游标已过、
+    却从未落库 ⇒ 永久丢失。判据：源码里有 ``_dispatch_one(``、没有 ``enqueue(``。
+    """
+    fn = _fn("_on_sync_raw")
+    src = _code(fn)
+    assert "_dispatch_one(" in src, "兜底派发没有走到处理出口"
+    assert "enqueue(" not in src, \
+        "兜底派发又走聚合器了 —— 游标会早于下游处理推进（停机丢消息）"
+    assert "await self._dispatch_one(" in src, \
+        "必须 await 处理完成再返回，否则 SyncFallback 会提前推进游标"
 
 
 def test_a3_the_ws_event_hook_is_spawn_only_and_maps_open_to_reason_open():

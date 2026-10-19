@@ -97,6 +97,15 @@ def test_hash_is_sha1_of_url():
     assert len(C.hf_caption_hash("x")) == 40
 
 
+def test_the_same_url_under_two_accounts_gets_different_keys():
+    """表 PK 只有 ``url_hash`` ⇒ 账号必须编进 key，否则另一账号永远读不到自己那行。"""
+    a = C.hf_caption_hash(IMG, "acc1")
+    b = C.hf_caption_hash(IMG, "acc2")
+    assert a != b and len(a) == len(b) == 40
+    # 长度前缀防拼接歧义
+    assert C.hf_caption_hash("bc", "a") != C.hf_caption_hash("c", "ab")
+
+
 def test_select_tasks_skips_captioned_and_exhausted():
     msgs = [img_msg(url=IMG), img_msg(url=IMG2)]
     existing = [
@@ -148,6 +157,7 @@ class FakeCaptionIo:
         self.calls: list[dict] = []
         self.upserts: list[dict] = []
         self.listed: list[tuple] = []
+        self.queried: list[str] = []
 
     # ---- 数据层
     def list_hf_image_msgs(self, account_id, group_ids, since_sec, limit=150, conn=None):
@@ -155,6 +165,7 @@ class FakeCaptionIo:
         return [dict(m) for m in self.msgs]
 
     def get_hf_captions_by_hashes(self, account_id, hashes, conn=None):
+        self.queried.extend(hashes)
         hs = set(hashes)
         return [dict(r) for r in self.existing if r["url_hash"] in hs]
 
@@ -197,7 +208,8 @@ def test_caption_pass_calls_vision_and_stores(monkeypatch):
     assert call["images"] == [IMG], "必须把图交给视觉端点（不是只发文字）"
     assert call["timeout_ms"] == 8000 and call["max_tokens"] == 120
     up = io.upserts[0]
-    assert up["url_hash"] == C.hf_caption_hash(IMG)
+    assert up["url_hash"] == C.hf_caption_hash(IMG, "acc1"), \
+        "配文键必须带账号（否则另一账号的同 URL 会抢同一行）"
     assert up["caption"] == "晒单: 手机 1999 元" and up["fail_delta"] == 0
     assert up["url_sample"] == IMG and up["model"] == "m1"
 
@@ -231,19 +243,31 @@ def test_caption_failure_is_loud_and_records_fail_delta(monkeypatch, caplog):
 def test_already_captioned_image_is_not_recalled(monkeypatch):
     io = FakeCaptionIo(
         msgs=[img_msg()],
-        existing=[{"url_hash": C.hf_caption_hash(IMG), "caption": "旧配文", "fail_count": 0}],
+        existing=[{"url_hash": C.hf_caption_hash(IMG, "acc1"), "caption": "旧配文", "fail_count": 0}],
     ).install(monkeypatch)
     r = run_caption(io)
     assert r.tasks == 0 and io.calls == [] and io.upserts == []
 
 
+def test_a_legacy_pure_url_row_still_counts_as_already_captioned(monkeypatch):
+    """换账号隔离 hash 前的历史行（纯 URL sha1）必须继续命中，否则旧图会被重配一遍。"""
+    io = FakeCaptionIo(
+        msgs=[img_msg()],
+        existing=[{"url_hash": C.hf_caption_hash(IMG), "caption": "旧配文", "fail_count": 0}],
+    ).install(monkeypatch)
+    r = run_caption(io)
+    assert r.tasks == 0 and io.calls == [], "旧行命中 ⇒ 不重复调用视觉模型"
+    legacy = C.hf_caption_hash(IMG)
+    assert legacy in io.queried, "查询必须同时带上旧 hash"
+
+
 def test_load_captions_maps_bodies_and_swallows_db_failure(monkeypatch):
     io = FakeCaptionIo(
-        existing=[{"url_hash": C.hf_caption_hash(IMG), "caption": "晒单", "fail_count": 0}],
+        existing=[{"url_hash": C.hf_caption_hash(IMG, "acc1"), "caption": "晒单", "fail_count": 0}],
     )
     monkeypatch.setattr(repo_hf, "get_hf_captions_by_hashes", io.get_hf_captions_by_hashes)
     caps = C.load_hf_captions_for_bodies("acc1", [f"收到一张图片\n[图片] {IMG}", "纯文本"])
-    assert caps == {C.hf_caption_hash(IMG): "晒单"}
+    assert caps == {C.hf_caption_hash(IMG, "acc1"): "晒单"}
 
     def boom(*a, **kw):
         raise RuntimeError("DB 炸了")
@@ -251,6 +275,17 @@ def test_load_captions_maps_bodies_and_swallows_db_failure(monkeypatch):
     monkeypatch.setattr(repo_hf, "get_hf_captions_by_hashes", boom)
     assert C.load_hf_captions_for_bodies("acc1", [f"[图片] {IMG}"]) == {}, \
         "查配文失败 ⇒ 空 Map ⇒ 样本退回旧形态（增强件不是依赖件）"
+
+
+def test_load_captions_maps_a_legacy_row_onto_the_account_scoped_key(monkeypatch):
+    """旧行读回来必须挂到**新** hash 上 —— 调用方（画像样本）只按新 hash 查。"""
+    io = FakeCaptionIo(
+        existing=[{"url_hash": C.hf_caption_hash(IMG), "caption": "旧晒单", "fail_count": 0}],
+    )
+    monkeypatch.setattr(repo_hf, "get_hf_captions_by_hashes", io.get_hf_captions_by_hashes)
+    caps = C.load_hf_captions_for_bodies("acc1", [f"[图片] {IMG}"])
+    assert caps == {C.hf_caption_hash(IMG, "acc1"): "旧晒单"}
+    assert C.hf_caption_hash(IMG) in io.queried
 
 
 # ===== 4. 与画像生成主路径的接线 =====
