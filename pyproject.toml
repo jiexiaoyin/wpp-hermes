@@ -18,7 +18,10 @@ dependencies = [
 dev = [
   "pytest>=8,<10",
   "pytest-asyncio>=0.23,<2",
-  "ruff>=0.6,<1",
+  # ⚠️ 下限必须是 0.15：下面 [tool.ruff.lint] 用了 ASYNC240（0.13.2 引入，
+  #    0.15.0 才从 preview 转正）。旧下限 0.6 会装到无法解析本配置的版本
+  #    （实测：ruff 0.6 报 "Unknown rule selector: ASYNC240" 直接退出）。
+  "ruff>=0.15,<1",
 ]
 
 [tool.ruff]

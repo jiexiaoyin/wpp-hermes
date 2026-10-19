@@ -112,12 +112,31 @@ run "注册探针（真跑 register()，对账 provides_tools）" "$PY" tools/pr
 run "LLM 层 judge（双格式/凭证链/关思考/空正文抛错/看图）" "$PY" tools/verify_judge.py
 
 # lint：配置在 pyproject.toml（规则集与豁免理由都写在那里）。
-# 缺席就跳过 —— 生产机上不一定有 ruff，Lint 不该成为部署的硬前置；
-# 但**装了就必须绿**，否则等于没接。
+# **硬门禁**：缺席不再静默跳过 —— 旧写法在没装 ruff 的机器上直接放行，
+# lint 可以悄悄失守而全部门禁仍报绿。现在两种调用方式都认：
+#   ① 当前解释器带 ruff 模块（仓库 dev 依赖的常规姿势）；
+#   ② PATH 上的 ruff 二进制（系统 Python 常被 PEP 668 管理，装不进 site-packages，
+#      但 `uv tool install ruff` / pipx 的二进制可用）。
+# 两者都没有 ⇒ 记失败，并打印可照抄的安装命令。
+RUFF_MOD=0
+RUFF_BIN=""
 if "$PY" -m ruff --version >/dev/null 2>&1; then
+    RUFF_MOD=1
+elif command -v ruff >/dev/null 2>&1; then
+    RUFF_BIN=$(command -v ruff)
+fi
+if [ "$RUFF_MOD" = "1" ]; then
     run "lint（ruff，规则集见 pyproject.toml）" "$PY" -m ruff check plugin tools --no-cache
+elif [ -n "$RUFF_BIN" ]; then
+    run "lint（ruff，规则集见 pyproject.toml）" "$RUFF_BIN" check plugin tools --no-cache
 else
-    printf '\n\033[1m── lint（ruff）\033[0m\n  ⏭  跳过：当前解释器没有 ruff（pip install ruff 后自动生效）\n'
+    printf '\n\033[1m── lint（ruff）\033[0m\n'
+    printf '\033[31m   ❌ 找不到 ruff：lint 是硬门禁，不再静默跳过\033[0m\n'
+    printf '      安装（二选一）：\n'
+    printf '        %s -m pip install "ruff>=0.15,<1"\n' "$PY"
+    printf '        uv tool install ruff        # 系统 Python 受 PEP 668 管理时\n'
+    FAILED="$FAILED
+  - lint（ruff 缺失）"
 fi
 
 # TS 差分要 node + 部署目录的 dist。**缺席就跳过**（本地没参照物不该挡住干活），
