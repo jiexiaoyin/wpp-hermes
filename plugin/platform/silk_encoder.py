@@ -58,9 +58,13 @@ MAX_VOICE_DURATION_MS = 60_000
 MAX_VOICE_SEGMENT_MS = MAX_VOICE_DURATION_MS - 5_000
 
 #: 超限时依次尝试的 SILK 码率。默认 25 kbps 下 60 KB 只够 ~19 秒；语音消息
-#: 本身是低码率场景，12/8 kbps 能把 55 秒的段压进厂商 60 KB 的字节闸，
+#: 本身是低码率场景，12/8/6 kbps 能把 55 秒的段压进厂商 60 KB 的字节闸，
 #: 避免一条 1 分钟的话被切成 4 条气泡。
-_SILK_FALLBACK_RATES = (None, 12_000, 8_000)
+#:
+#: 2026-10-19 实测：纯音 55 秒 @8 kbps = 60,696 B（**仍超** 60 KB，silk 帧头/
+#: 容器有固定开销，不是简单的 ``码率×时长``）；@6 kbps = 51,724 B 才留出余量。
+#: 所以 6 kbps 这档不能删，否则 55 秒无静音段会整段降级成文件。
+_SILK_FALLBACK_RATES = (None, 12_000, 8_000, 6_000)
 
 _ENCODE_TIMEOUT = 60
 
@@ -386,7 +390,7 @@ async def encode_to_silk(ref: str, bitrate: int | None = None) -> str | None:
 
 
 async def encode_to_silk_fitting(ref: str) -> str | None:
-    """优先 25 kbps；超厂商 60 KB 字节闸时依次降到 12/8 kbps。
+    """优先 25 kbps；超厂商 60 KB 字节闸时依次降到 12/8/6 kbps。
 
     60 KB 是**字节**上限，不是 60 秒：25 kbps 下只够 ~19 秒。降码率让
     30–55 秒的段仍能作为一条语音气泡发出，避免过度切碎。

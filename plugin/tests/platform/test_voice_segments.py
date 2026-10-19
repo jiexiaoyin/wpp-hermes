@@ -44,6 +44,30 @@ def test_plan_segments_ignores_silence_too_close_to_the_start() -> None:
     ]
 
 
+def test_encode_fitting_falls_back_to_6_kbps_when_8_kbps_still_overflows(
+        monkeypatch, tmp_path) -> None:
+    """55 秒无静音段是真实边界：实测 8 kbps 仍 60,696 B > 60 KB，只有 6 kbps
+    （51,724 B）能过闸。旧的三档 fallback 会让整段降级成文件。"""
+    src = tmp_path / "part.wav"
+    src.write_bytes(b"RIFF")
+    tried: list[int | None] = []
+    silk = b"\x02#!SILK_V3" + b"\x00" * 32
+
+    async def _encode(_src, bitrate=None):
+        tried.append(bitrate)
+        if bitrate != 6_000:
+            raise silk_encoder.SilkTooLarge(f"{bitrate} 超限")
+        return silk
+
+    monkeypatch.setattr(silk_encoder, "_encode_silk_bytes", _encode)
+
+    b64 = asyncio.run(silk_encoder.encode_to_silk_fitting(str(src)))
+
+    assert base64.b64decode(b64) == silk
+    assert tried == [None, 12_000, 8_000, 6_000], \
+        "必须一直降到 6 kbps，不能在第 8 kbps 档就放弃"
+
+
 class _FakeClient:
     def __init__(self) -> None:
         self.voice_calls: list[tuple] = []

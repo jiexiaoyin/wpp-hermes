@@ -547,7 +547,7 @@ class MediaMixin:
                     to_wxid=peer_id, file_name=send_name, file_base64=b64)
 
             # 微信单条语音上限 60s；厂商实际还卡 SILK **字节**上限（60 KB），
-            # 所以先按 55s 切段，再对每段做「25→12→8 kbps」码率自适应。
+            # 所以先按 55s 切段，再对每段做「25→12→8→6 kbps」码率自适应。
             segments = await silk_encoder.split_audio(src)
             if (is_silk and len(segments) == 1
                     and len(data_bytes) <= silk_encoder.MAX_SILK_BYTES):
