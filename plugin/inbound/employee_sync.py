@@ -44,8 +44,9 @@ log = logging.getLogger(__name__)
 #: 厂商查群成员详情（只读）。返回 ``Data.NewChatroomData.ChatRoomMember``。
 MEMBER_ENDPOINT = "/Group/GetChatRoomMemberDetail"
 
-#: 默认每 6 小时同步一轮（与群名同步同频；员工变动不需要更灵敏）。
-SYNC_INTERVAL_SEC = 6 * 3600.0
+#: 老板 2026-10-19 定：每 30 天同步一轮（人员变动不频繁；启动时仍会先跑一轮，
+#: 需要立刻刷新用 ``/user sync``）。注意别和群名同步（6h）共用一个频率。
+SYNC_INTERVAL_SEC = 30 * 24 * 3600.0
 
 #: 微信的系统号 / 机器人，不是员工。
 _NON_PERSON = frozenset({

@@ -235,3 +235,11 @@ def test_outbound_is_an_alias_of_whitelist_status(monkeypatch):
     monkeypatch.setattr(commands, "_handle_whitelist",
                         lambda _aid, _args, adapter=None: "ALIAS")
     assert commands.handle_command("acct", "/outbound", adapter=None) == "ALIAS"
+
+
+def test_employee_sync_interval_is_30_days():
+    """老板 2026-10-19 定：全员群每 30 天同步一轮。
+
+    启动时仍会立即跑第一轮；要立刻刷新用 ``/user sync``。
+    """
+    assert employee_sync.SYNC_INTERVAL_SEC == 30 * 24 * 3600

@@ -34,7 +34,7 @@ allowFrom = 手工名单（/user add|del）
 - 生产当前：`44971342037@chatroom` =「✊🏻益融数码全员群」，36 人（含机器人）。
 - 拉取端点：`/Group/GetChatRoomMemberDetail`（只读）。
 - 排除：机器人自己（`selfWxid`）、群 id、公众号 `gh_*`、系统号。
-- 频率：连接后立即一轮，之后每 6 小时；命令 `/user sync` 可立即触发。
+- 频率：连接后立即一轮，之后每 30 天（老板 2026-10-19 定）；命令 `/user sync` 可立即触发。
 - 写回：`allowFrom` 与 `employeeAllowFrom` **一次原子写**，备份在 `/data/wpp-account-backups/`。
 - **失败整轮不写**：任一全员群拉取失败，就保留上一轮名单，绝不因厂商抖动误删员工。
 
