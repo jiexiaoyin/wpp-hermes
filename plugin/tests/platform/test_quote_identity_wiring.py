@@ -41,7 +41,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 ADAPTER_REL = "plugin/platform/adapter.py"
 ADAPTER_CLS = "WppAdapter"
-QUOTE_REF_REL = "plugin/inbound/quote_ref.py"
+QUOTE_REF_REL = "plugin/neutral/quote_ref.py"
 
 
 # ============================================================ 源码工具（AST）
