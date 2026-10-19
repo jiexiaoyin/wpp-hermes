@@ -2402,6 +2402,120 @@ def check_wechatpadpro_requirements() -> bool:
     return True
 
 
+# ------------------------------------------------------------------ standalone 发送
+#
+# 这一段原来全在 ``_standalone_send`` 里（157 行 / CC 46）：四个 kind 的发送是
+# if/elif 叠在一起的，加一种 kind 就要再往那个大函数里塞一条分支。现在拆成
+# 「每个 kind 一个函数 + 一张分派表 + 三个阶段函数」，每块都能单独测。
+
+
+async def _send_image_media(client, peer_id, path, name, b64):
+    """图片：UploadImg 上传即发送。"""
+    return await client.send_image(to_wxid=peer_id, image_base64=b64)
+
+
+async def _send_voice_media_standalone(client, peer_id, path, name, b64):
+    """语音：silk 编码 + 专用上传（复用 live 的 ``_send_voice_media``）。"""
+    return await WppAdapter._send_voice_media(client, peer_id, path, name, b64)
+
+
+async def _send_video_media(client, peer_id, path, name, b64):
+    """视频：抽一帧当缩略图；抽不到也照发（vendor 可能拒收，只告警）。"""
+    thumb = await WppAdapter._video_thumb(path)
+    if not thumb:
+        log.warning("[WPP] standalone 视频无缩略图（vendor 可能拒收）: %s", name)
+    return await client.send_video(to_wxid=peer_id, video_base64=b64, thumb_base64=thumb)
+
+
+async def _send_file_media(client, peer_id, path, name, b64):
+    """文件：``send_file_v2``（v1 缺 appID/attachId 那条路已废）。"""
+    return await client.send_file_v2(to_wxid=peer_id, file_name=name, file_base64=b64)
+
+
+#: kind → 发送实现。``outbound.media_kind`` 只产 image/voice/video/file；
+#: 未知 kind 按文件发（"发错类型" 好过 "发不出去"）。
+_STANDALONE_SENDERS = {
+    "image": _send_image_media,
+    "voice": _send_voice_media_standalone,
+    "video": _send_video_media,
+    "file": _send_file_media,
+}
+
+
+def _parse_media_item(item: Any) -> tuple[str, bool] | None:
+    """``[(路径, is_voice), …]`` 或裸字符串 → ``(path, is_voice)``；解析不了返 None。"""
+    if isinstance(item, str):
+        return item, False
+    try:
+        return str(item[0] or ""), bool(item[1])
+    except (TypeError, ValueError, IndexError):
+        log.warning("[WPP] standalone 跳过无法解析的媒体项: %r", item)
+        return None
+
+
+def _partial_or_error(err: str, sent: int, message_id: str | None,
+                      media_sent: int | None = None) -> dict:
+    """统一的失败上报：已经发出过内容时**必须**标 partial（微信撤不回）。
+
+    文本段失败原来不带 ``sent_media``、附件段带 —— 用 ``media_sent is None``
+    区分，保证返回的 key 集合与旧行为逐字一致。
+    """
+    if not (sent or (media_sent or 0)):
+        return {"error": err}
+    out = {"error": err, "partial": True, "sent_chunks": sent,
+           "message_id": message_id}
+    if media_sent is not None:
+        out["sent_media"] = media_sent
+    return out
+
+
+def _resolve_standalone_profile_home(acct: Any) -> str | None:
+    """进程外 cron 没有 adapter 的 connect 期捕获 ⇒ 按 profile 目录直接找。
+
+    否则 ``platform_gate_env`` 会回落根 ``.env``（2026-10-19 07:36 事故）。
+    """
+    try:
+        from agent.secret_scope import current_secret_scope_home
+        home = current_secret_scope_home()
+    except Exception:  # noqa: BLE001
+        home = None
+    if home:
+        return home
+    root_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    candidates = []
+    if os.environ.get("HERMES_PROFILE"):
+        candidates.append(os.path.join(root_home, "profiles",
+                                       os.environ["HERMES_PROFILE"]))
+    candidates.append(os.path.join(root_home, "profiles", acct.agent))
+    return next((c for c in candidates if os.path.isdir(c)), None)
+
+
+async def _standalone_send_text(client: Any, acct: Any, peer_id: str,
+                                chunks: list[str]) -> tuple[str | None, int, dict | None]:
+    """发文本分片，返回 ``(message_id, sent_chunks, error)``。
+
+    多片中途失败时前几片**已经发出**（微信撤不回）⇒ 必须按 partial 上报，
+    否则调用方重试会把第 1 片再发一遍（live 的 ``send()`` 早就这么记）。
+    """
+    message_id: str | None = None
+    sent = 0
+    for chunk in chunks:
+        resp = await client.send_text(to_wxid=peer_id, content=chunk)
+        if not outbound.send_ok(resp):
+            if sent:
+                log.warning("[WPP] standalone 多片发送中途失败：前 %d 片已发出"
+                            "（不可撤回）⇒ 按部分发出上报", sent)
+            return message_id, sent, _partial_or_error(
+                outbound.send_error_text(resp), sent, message_id)
+        sent += 1
+        ids = outbound.extract_outbound_msg_ids(resp)
+        message_id = ids.msg_id or message_id
+        # 与 live ``_send_chunk`` 同一套落库 —— 否则 cron 投递在 wpp_messages
+        # 里隐形，事后无法核"到底发没发/发给谁"。
+        await _persist_outbound_record(acct, peer_id, chunk, ids)
+    return message_id, sent, None
+
+
 async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
                            thread_id: str | None = None,
                            media_files: list | None = None,
@@ -2436,7 +2550,7 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
         if refusal:
             return {"error": f"账号 {acct.id} 不可连接：{refusal}"}
 
-        # 出站 @self 闸 —— 与 live ``send()`` 同一道（cron 路径不许绕过，见那处注释）
+        # 出站 @self 闸 —— 与 live ``send()`` 同一道（cron 路径不许绕过）
         message = outbound.strip_self_mention(message or "", acct.self_wxid, acct.nickname)
         if outbound.is_rejection_phrase(message):
             if not has_media:
@@ -2447,55 +2561,23 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
                 return {"success": True, "message_id": None}
             message = ""
 
-        # 进程外 cron 没有 adapter 的 connect 期捕获；这里按 profile 目录直接读
-        # 白名单。否则 platform_gate_env 会回落根 .env（2026-10-19 07:36 事故）。
-        profile_home = None
-        try:
-            from agent.secret_scope import current_secret_scope_home
-            profile_home = current_secret_scope_home()
-        except Exception:  # noqa: BLE001
-            profile_home = None
-        if not profile_home:
-            root_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
-            candidates = []
-            if os.environ.get("HERMES_PROFILE"):
-                candidates.append(os.path.join(root_home, "profiles",
-                                               os.environ["HERMES_PROFILE"]))
-            candidates.append(os.path.join(root_home, "profiles", acct.agent))
-            profile_home = next((c for c in candidates if os.path.isdir(c)), None)
+        profile_home = _resolve_standalone_profile_home(acct)
         send_allowlist = outbound.netguard.send_allowlist(profile_home=profile_home)
         outbound.assert_outbound_allowed(peer_id, acct.id, allowed=send_allowlist)
         async with WppClient(base_url=acct.api_base_url, authcode=acct.authcode,
                              account_id=acct.id, timeout=30,
                              send_allowlist=send_allowlist) as client:
-            message_id = None
-            sent = 0
             chunks = outbound.chunk_text(message)
             if not chunks and not has_media:
                 # ★ 什么都发不出去时**不许**回 success（``message_id=None``）——
                 #   调用方会把它记成"已投递"，实际群里一条都没有。空输入是调用方
-                #   的问题，如实报错（带附件时允许文本为空，见下面的附件段）。
+                #   的问题，如实报错（带附件时允许文本为空）。
                 return {"error": "空消息：没有可发送的文本或附件"}
-            for chunk in chunks:
-                resp = await client.send_text(to_wxid=peer_id, content=chunk)
-                if not outbound.send_ok(resp):
-                    # ★ 多片消息中途失败时，前几片**已经发出**（微信撤不回）。旧实现只
-                    #   回 {"error": ...}，调用方按失败重试就会把第 1 片再发一遍 ——
-                    #   live 路径的 send() 早就按"部分发出"记账（见那里 B5 的注释），
-                    #   cron 这条漏了。这里显式带上 sent_chunks/partial。
-                    if sent:
-                        log.warning("[WPP] standalone 多片发送中途失败：前 %d 片已发出"
-                                    "（不可撤回）⇒ 按部分发出上报", sent)
-                        return {"error": outbound.send_error_text(resp),
-                                "partial": True, "sent_chunks": sent,
-                                "message_id": message_id}
-                    return {"error": outbound.send_error_text(resp)}
-                sent += 1
-                ids = outbound.extract_outbound_msg_ids(resp)
-                message_id = ids.msg_id or message_id
-                # ★ 与 live ``_send_chunk`` 同一套落库 —— 否则 cron 投递在
-                #   ``wpp_messages`` 里隐形，事后无法核"到底发没发/发给谁"。
-                await _persist_outbound_record(acct, peer_id, chunk, ids)
+
+            message_id, sent, err = await _standalone_send_text(
+                client, acct, peer_id, chunks)
+            if err:
+                return err
 
             # ── 附件（2026-10-19）─────────────────────────────────────────
             # Hermes cron/send_message 的 ``standalone_sender_fn`` 契约里
@@ -2504,49 +2586,26 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
             # （等于"发了"的假账）。这里按扩展名走与 live ``_send_media`` 同一条链路。
             media_sent = 0
             for item in (media_files or []):
-                if isinstance(item, str):
-                    media_path, is_voice = item, False
-                else:
-                    try:
-                        media_path, is_voice = item[0], bool(item[1])
-                    except (TypeError, ValueError, IndexError):
-                        log.warning("[WPP] standalone 跳过无法解析的媒体项: %r", item)
-                        continue
-                path = str(media_path or "")
+                parsed = _parse_media_item(item)
+                if parsed is None:
+                    continue
+                path, is_voice = parsed
                 if not path:
                     continue
                 kind = outbound.media_kind(path, is_voice=is_voice,
                                            force_document=force_document)
                 b64 = await outbound.resolve_to_base64(path)
                 if not b64:
-                    err = f"媒体内容不可用: {path[:120]}"
-                    if sent or media_sent:
-                        return {"error": err, "partial": True, "sent_chunks": sent,
-                                "sent_media": media_sent, "message_id": message_id}
-                    return {"error": err}
+                    return _partial_or_error(f"媒体内容不可用: {path[:120]}",
+                                             sent, message_id, media_sent)
                 name = os.path.basename(path) or f"{kind}.bin"
-                if kind == "image":
-                    resp = await client.send_image(to_wxid=peer_id, image_base64=b64)
-                elif kind == "voice":
-                    resp = await WppAdapter._send_voice_media(client, peer_id, path, name, b64)
-                elif kind == "video":
-                    thumb = await WppAdapter._video_thumb(path)
-                    if not thumb:
-                        log.warning("[WPP] standalone 视频无缩略图（vendor 可能拒收）: %s",
-                                    name)
-                    resp = await client.send_video(to_wxid=peer_id, video_base64=b64,
-                                                   thumb_base64=thumb)
-                else:
-                    resp = await client.send_file_v2(to_wxid=peer_id, file_name=name,
-                                                     file_base64=b64)
+                resp = await _STANDALONE_SENDERS.get(kind, _send_file_media)(
+                    client, peer_id, path, name, b64)
                 if not outbound.send_ok(resp):
-                    err = outbound.send_error_text(resp)
-                    if sent or media_sent:
-                        log.warning("[WPP] standalone 附件中途失败：已发 %d 段文本 + %d 个附件"
-                                    "（不可撤回）⇒ 按部分发出上报", sent, media_sent)
-                        return {"error": err, "partial": True, "sent_chunks": sent,
-                                "sent_media": media_sent, "message_id": message_id}
-                    return {"error": err}
+                    log.warning("[WPP] standalone 附件中途失败：已发 %d 段文本 + %d 个附件"
+                                "（不可撤回）⇒ 按部分发出上报", sent, media_sent)
+                    return _partial_or_error(outbound.send_error_text(resp),
+                                             sent, message_id, media_sent)
                 media_sent += 1
                 ids = outbound.extract_outbound_msg_ids(resp)
                 message_id = ids.msg_id or message_id
