@@ -45,7 +45,7 @@ import math
 
 import pytest
 
-from plugin.inbound import jargon as J
+from plugin.neutral import jargon as J
 from plugin.inbound import jargon_mine as M
 
 
