@@ -35,13 +35,21 @@ import pytest
 
 from plugin.core.api_client import derive_business_url
 from plugin.core.webhook_paths import (
-    WebhookPaths, derive_webhook_paths, token_is_in_path,
+    WebhookPaths,
+    derive_webhook_paths,
+    token_is_in_path,
 )
 from plugin.platform.inbound_webhook import WEBHOOK_BODY_LIMIT, WppWebhookServer
 
 ROOT = Path(__file__).resolve().parents[2]
-ADAPTER_REL = "plugin/platform/adapter.py"
-ADAPTER_CLS = "WppAdapter"
+#: 2026-10-19 webhook 注册三方法拆进 ``adapter_webhook.WebhookMixin``，
+#: 取方法表因此要跨两个类查（adapter.py 仍是 WppAdapter 主体）。
+ADAPTER_MODULES = (
+    ("plugin/platform/adapter.py", "WppAdapter"),
+    ("plugin/platform/adapter_webhook.py", "WebhookMixin"),
+)
+ADAPTER_REL = ADAPTER_MODULES[0][0]
+ADAPTER_CLS = ADAPTER_MODULES[0][1]
 
 #: 真机上 live-test 账号那组值（形状取自 ``accounts/live-test.json``）。
 LIVE_PATH = "/wechatpadpro/livetest/webhook"
@@ -49,13 +57,15 @@ LIVE_TOKEN = "aee409d9b64f4b533f2a947d"
 
 
 def _adapter_method(name: str) -> ast.AST:
-    src = (ROOT / ADAPTER_REL).read_text(encoding="utf-8")
-    for node in ast.parse(src).body:
-        if isinstance(node, ast.ClassDef) and node.name == ADAPTER_CLS:
-            for fn in node.body:
-                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name == name:
-                    return fn
-    raise AssertionError(f"{ADAPTER_REL} 里找不到 {ADAPTER_CLS}.{name} —— 改名/搬家了？")
+    for rel, cls_name in ADAPTER_MODULES:
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        for node in ast.parse(src).body:
+            if isinstance(node, ast.ClassDef) and node.name == cls_name:
+                for fn in node.body:
+                    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name == name:
+                        return fn
+    raise AssertionError(
+        f"{name} 在 {[r for r, _ in ADAPTER_MODULES]} 里都找不到 —— 改名/又搬家了？")
 
 
 def _adapter_code(name: str) -> str:
@@ -167,7 +177,7 @@ class _FakeConn:
         self.sent: list[tuple[int, bytes]] = []
         self._handler: type | None = None
 
-    def bind(self, handler: type) -> "_FakeConn":
+    def bind(self, handler: type) -> _FakeConn:
         """把生成出来的 handler 挂上 —— ``_handle`` 内部会 ``self._authorized(...)``。"""
         self._handler = handler
         return self
@@ -487,7 +497,7 @@ def test_malformed_body_is_rejected_with_400_not_dispatched():
 
 def test_add_path_remembers_the_token_and_is_idempotent():
     server = WppWebhookServer()
-    async def on_message(payload: dict) -> None:  # noqa: ARG001
+    async def on_message(payload: dict) -> None:
         return None
 
     server.add_path("/a", on_message, secret="", path_token="T")
