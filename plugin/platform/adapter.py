@@ -320,6 +320,9 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         #: 调用（1 次批量验证 + 5 个候选 × 3 步推断），``await`` 它等于把一整个 LLM
         #: 往返串进收信链路 —— 对齐 TS 的 ``void mineJargonForGroup(...).catch(warn)``。
         self._jargon_tasks: set[asyncio.Task] = set()
+        #: 已从 DB 预热过黑话含义的 ``(account_id, group_id)``。每组只读一次库；
+        #: 预热是 fire-and-forget（不阻塞收信），首条消息来不及读到就从下一条开始生效。
+        self._jargon_loaded: set[tuple[str, str]] = set()
         #: 昵称缓存（引用回复用），{wxid: (name, at)}
         self._name_cache: dict[str, tuple[str, float]] = {}
 
@@ -1380,6 +1383,10 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         sender = msg.from_wxid or ""
         content = msg.content or ""
 
+        # 含义缓存预热：每组每个进程只读一次库（重启后 ``_term_meanings`` 是空的，
+        # 不预热则要等下一轮挖掘才恢复注入能力）。fire-and-forget，不阻塞收信。
+        self._jargon_ensure_meanings(acct.id, group_id)
+
         # 采集面（TS 第一个循环）
         if msg.msg_type != MT_SYSTEM and content.strip():
             try:
@@ -1416,6 +1423,50 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         result = await jargon_mine.mine_jargon_for_group(group_id, cfg, None, store)
         if result.confirmed:
             log.info("[WPP:%s] 黑话入库 %d 条（群 %s）", account_id, result.confirmed, group_id)
+
+    def _jargon_ensure_meanings(self, account_id: str, group_id: str) -> None:
+        """把 DB 里已确认的黑话含义预热进进程内缓存（每组每进程一次）。
+
+        为什么需要预热：``jargon._term_meanings`` 只活在进程内存里，挖掘成功时才写。
+        重启后如果不预热，注入要到该群下一轮挖掘（可能几小时后）才恢复 —— 现象是
+        "明明库里有词，回复里就是不解释"。
+
+        该方法是**同步**的：只做一次 set 查重 + ``create_task``，绝不查库；
+        真正的 DB 读在 :meth:`_jargon_load_meanings`（线程池）。
+        """
+        key = (account_id, group_id)
+        if key in self._jargon_loaded:
+            return
+        self._jargon_loaded.add(key)
+        try:
+            task = asyncio.create_task(
+                asyncio.to_thread(self._jargon_load_meanings, account_id, group_id),
+                name=f"wpp-jargon-load-{account_id}")
+        except Exception as exc:  # noqa: BLE001 —— 预热失败不该影响收信
+            log.debug("[WPP:%s] 黑话含义预热任务创建失败: %s", account_id, exc)
+            return
+        self._jargon_tasks.add(task)
+        task.add_done_callback(self._jargon_done)
+
+    @staticmethod
+    def _jargon_load_meanings(account_id: str, group_id: str) -> None:
+        """从 ``wpp_jargon_terms`` 读该群已确认词条，灌进 ``jargon._term_meanings``。"""
+        try:
+            from ..data import repo_messages
+
+            rows = repo_messages.list_jargon(account_id, group_id, limit=500)
+        except Exception as exc:  # noqa: BLE001 —— 库不可用就保持空缓存（下次进程再试）
+            log.debug("[WPP JARGON] 含义预热读库失败（不影响收信）: %s", exc)
+            return
+        loaded = 0
+        for row in rows or []:
+            term = str(row.get("term") or "").strip()
+            meaning = str(row.get("meaning") or "").strip()
+            if term and meaning:
+                jargon_mod.remember_meaning(group_id, term, meaning)
+                loaded += 1
+        if loaded:
+            log.info("[WPP JARGON] 含义预热 %d 条（账号 %s 群 %s）", loaded, account_id, group_id)
 
     def _jargon_done(self, task: asyncio.Task) -> None:
         """收尾：丢句柄 + 把异常记成一行 warn。
@@ -1569,11 +1620,30 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             log.debug("[WPP:%s] 群画像注入失败（照常回复）: %s", acct.id, exc)
             return None
 
+    def _jargon_channel_prompt(self, acct: accounts_mod.Account,
+                               msg: WppMessage) -> str | None:
+        """当前消息命中的已知群黑话 → 临时 system prompt（回复侧）。
+
+        只读 ``jargon._term_meanings`` 进程内缓存，**热路径零 DB**。三道闸都在缓存读
+        之前：非群消息 / 黑话开关关着 / 缓存里没有该群含义 ⇒ ``None``。
+        """
+        if not getattr(msg, "is_group", False):
+            return None
+        try:
+            cfg = jargon_mine.resolve_jargon_cfg(acct.jargon)
+            if not cfg.enabled:
+                return None
+            group_id = msg.chatroom_id or msg.peer_id
+            return jargon_mod.build_jargon_channel_prompt(group_id, msg.content or "")
+        except Exception as exc:  # noqa: BLE001 —— 注入失败不阻塞消息
+            log.debug("[WPP:%s] 黑话注入失败（照常回复）: %s", acct.id, exc)
+            return None
+
     def _channel_prompt(self, acct: accounts_mod.Account,
                         msg: WppMessage) -> str | None:
-        """情绪 + 本群画像 → **一个** ``channel_prompt``（Hermes 这条缝只收一个字符串）。
+        """情绪 + 本群画像 + 已知黑话 → **一个** ``channel_prompt``（Hermes 这条缝只收一个字符串）。
 
-        两段都为空 ⇒ ``None``：保持"没开这两个功能时请求体逐字节相同"的既有判据。
+        所有段都为空 ⇒ ``None``：保持"没开这些功能时请求体逐字节相同"的既有判据。
         """
         parts: list[str] = []
         mood = self._mood_channel_prompt(acct, msg)
@@ -1582,6 +1652,9 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         profile = self._group_profile_channel_prompt(acct, msg)
         if profile:
             parts.append(profile)
+        jargon = self._jargon_channel_prompt(acct, msg)
+        if jargon:
+            parts.append(jargon)
         return "\n\n".join(parts) if parts else None
 
     def _intent_llm_cfg(self, acct: accounts_mod.Account) -> IntentLlmConfig | None:

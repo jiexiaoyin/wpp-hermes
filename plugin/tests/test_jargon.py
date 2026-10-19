@@ -21,9 +21,9 @@ meaning、有没有外呼），而不是"调用了哪个函数"。
 
 ## 两条要如实记下的现实（各有一条用例钉住，且**都没有**变异体）
 
-* ``should_filter_candidate`` 的 ``HARD_BLOCK_RE`` **含中文即拉黑** ⇒ 中文候选到不了 LLM，
-  能过去的只有 ASCII 缩写。**这是 TS 的原样**（``jargon.ts:323``），不放宽。
-  连带：``COMMON_BLOCK`` 每一条都含中文 ⇒ 那条分支不可达。
+* **2026-10-19 起中文候选不再被拉黑**（有意偏离 TS ``jargon.ts:323``）：``HARD_BLOCK_RE``
+  只拦 @提及/方括号/URL/空白。中文噪声由 ``COMMON_BLOCK``、可选 jieba 词典频率、
+  LLM 验证三道控制。§4 与 §12 各有一条判据钉住"候选确实到了 LLM 并落库"。
 * ``tokenize`` 的四道过滤里，**纯数字/纯标点两道不可达** —— ``ngram_tokens`` 只会吐出
   汉字段与 ASCII 字母段，两者都过不了那两条正则。留着是为了与 TS 逐字对齐。
 
@@ -441,16 +441,15 @@ def test_only_short_ascii_abbreviations_survive_the_filter() -> None:
     assert J.should_filter_candidate("abcdef") is False       # 6 个字母，勉强收
 
 
-def test_chinese_terms_are_hard_blocked_and_that_is_ts_behaviour() -> None:
-    """★ ``HARD_BLOCK_RE`` 含 ``[一-鿿]`` ⇒ **中文候选到不了 LLM**。
+def test_chinese_terms_survive_the_filter_after_the_2026_10_19_deviation() -> None:
+    """★ 中文候选现在**能到 LLM**（2026-10-19 老板拍板，有意偏离 TS）。
 
-    这条看着像 bug（挖的是"群黑话"，中文才是主战场），但它是 ``jargon.ts:323`` 的
-    原样。**不顺手放宽**：放宽了就与 TS 分叉，而且分叉的是"我们看着更合理"的那侧 ——
-    正是最容易被当成改进的那种。真机上"中文黑话学不到"的后果记在 W7-4 实施记录里；
-    §12 另有一条在编排层钉住这个后果。
+    TS 的 ``HARD_BLOCK_RE`` 含 ``[一-鿿]``，中文永远到不了 LLM；py2 原先照搬，
+    真机上等于"黑话插件开着，中文黑话永远学不到"。放宽后仍拦 @提及/方括号/URL/空白。
     """
-    assert J.HARD_BLOCK_RE.search("测试") is not None
-    assert J.should_filter_candidate("测试") is True
+    assert J.HARD_BLOCK_RE.search("测试") is None
+    assert J.should_filter_candidate("测试") is False
+    assert J.should_filter_candidate("真香") is False
     assert J.should_filter_candidate("yyds@") is True         # @ 提及残渣
     assert J.should_filter_candidate("[yyds]") is True        # 方括号
     assert J.should_filter_candidate("yy ds") is True         # 空白
@@ -473,17 +472,20 @@ def test_pure_digits_and_long_ascii_are_rejected() -> None:
     assert J.should_filter_candidate("abcdef") is False
 
 
-def test_common_block_is_dead_code_because_every_entry_contains_cjk() -> None:
-    """如实钉住一条**不可达**分支：``COMMON_BLOCK`` 的 22 条全含中文 ⇒ 它们**首先**
-    就被 ``HARD_BLOCK_RE`` 拦下。
+def test_common_block_is_reachable_and_blocks_common_words() -> None:
+    """中文放宽后 ``COMMON_BLOCK`` 从"不可达死码"变成**真正生效**的一道过滤。
 
-    保留它是因为它是 TS 原文（``jargon.ts:325-328``），删掉会让下一处对照看不见它；
-    但它**没有**专属变异体 —— 任何"忠实"的变异都是语义等价的。
+    保留 TS 原文的 22 条 + py2 补充的常用词；每一条都必须被过滤。这条是中文放宽后
+    防止"哈哈/今天/价格"这类标准词挤占候选名额的第一道闸。
     """
-    assert len(J.COMMON_BLOCK) == 22
-    assert all(J.HARD_BLOCK_RE.search(t) for t in J.COMMON_BLOCK)
+    assert len(J.COMMON_BLOCK) >= 22
     for t in J.COMMON_BLOCK:
         assert J.should_filter_candidate(t) is True
+    # 中文不再被 HARD_BLOCK 拦截 ⇒ 这些必须由 COMMON_BLOCK 拦下
+    assert J.HARD_BLOCK_RE.search("哈哈") is None
+    assert J.should_filter_candidate("哈哈") is True
+    assert J.should_filter_candidate("今天") is True
+    assert J.should_filter_candidate("价格") is True
 
 
 def test_the_common_block_check_sits_after_the_hard_block_check() -> None:
@@ -520,6 +522,37 @@ def test_later_meanings_overwrite_earlier_ones() -> None:
     J.remember_meaning("g1", "yyds", "旧")
     J.remember_meaning("g1", "yyds", "新")
     assert J.known_meaning("g1", "yyds") == "新"
+
+
+def test_build_jargon_channel_prompt_injects_only_matching_terms() -> None:
+    """只注入当前消息**命中**的词；没命中/没含义 ⇒ ``None``（请求体不变）。"""
+    J.remember_meaning("g1", "yyds", "永远的神")
+    J.remember_meaning("g1", "上车", "加入团购")
+    J.remember_meaning("g1", "xswl", "笑死我了")     # 本条消息没出现
+
+    text = J.build_jargon_channel_prompt("g1", "老板 yyds，我也要上车")
+    assert text is not None
+    assert "yyds：永远的神" in text
+    assert "上车：加入团购" in text
+    assert "xswl" not in text
+    assert text.startswith("[系统提示-本群黑话]")
+
+    assert J.build_jargon_channel_prompt("g1", "今天天气不错") is None
+    assert J.build_jargon_channel_prompt("g2", "老板 yyds") is None      # 按群隔离
+    assert J.build_jargon_channel_prompt("g1", "") is None
+
+
+def test_build_jargon_channel_prompt_caps_terms_and_meaning_length() -> None:
+    """硬上限防 prompt 膨胀：最多 ``max_terms`` 条、每条含义截断。"""
+    for i in range(8):
+        J.remember_meaning("g1", f"黑话{i}号", "含义" * 80)
+    text = J.build_jargon_channel_prompt("g1", "黑话0号 黑话1号 黑话2号 黑话3号 "
+                                              "黑话4号 黑话5号 黑话6号 黑话7号",
+                                         max_terms=3, max_meaning_chars=10)
+    assert text is not None
+    assert text.count("- 黑话") == 3
+    for line in text.splitlines()[1:]:
+        assert len(line.split("：", 1)[1]) <= 10
 
 
 def test_query_jargon_returns_none_below_the_threshold() -> None:
@@ -1127,21 +1160,43 @@ def test_mine_returns_empty_when_there_are_no_candidates(monkeypatch) -> None:
     assert store.saved == []
 
 
-def test_mine_never_sends_chinese_candidates_to_the_llm(monkeypatch) -> None:
-    """★ 含中文即拉黑（§4）在**编排层**的后果：一个纯中文的活跃群，
-    候选池会被 ``should_filter_candidate`` 清空 ⇒ **一次 LLM 调用都不发**。
+def test_mine_sends_chinese_candidates_to_the_llm_and_saves_them(monkeypatch) -> None:
+    """★ 编排层判据：纯中文的活跃群，候选**能**到 LLM 且确认后**落库**。
 
-    这条把"中文黑话学不到"从一条纯函数判据变成整条链路的判据 —— 真机上它就是
-    "jargon 开着、群里黑话很多、库里永远没有中文词条"的那个现象。"""
-    async def no_llm(*a, **kw):
-        raise AssertionError("中文候选不该到 LLM")
-
-    monkeypatch.setattr(M, "jargon_llm", no_llm)
+    这是 2026-10-19 放宽后的核心验收点 —— 对照旧行为（候选池被清空、零外呼、库里
+    永远没有中文词条）。编排层的 ``should_filter_candidate`` 与 §4 是同一道判据。
+    """
     _seed("g1", "测试一下", 6)          # 6 个中文 n-gram 候选，词频都够
     assert [c.term for c in J.get_jargon_candidates("g1")]      # 候选池不为空
+    store = _Store()
+    fake, calls = _scripted([
+        '["测试一下"]',                              # ② 批量验证
+        '{"meaning":"群内暗号"}', '{"meaning":"测试一下"}', '{"is_similar":false}',  # ③
+    ])
+    monkeypatch.setattr(M, "jargon_llm", fake)
+
     got = _sync(lambda: M.mine_jargon_for_group("g1", M.JargonCfg(model="m"), _Creds(),
-                                                _Store()))()
-    assert got == M.MineResult(extracted=0, confirmed=0)
+                                                store))()
+    assert got.confirmed == 1
+    assert len(calls) == 4                           # 1 次验证 + 3 步推断
+    (row,) = store.saved
+    assert row["content"] == "测试一下"
+    assert row["meaning"] == "群内暗号"
+    assert J.known_meaning("g1", "测试一下") == "群内暗号"
+
+
+def test_standard_vocabulary_is_dropped_before_top_k(monkeypatch) -> None:
+    """jieba 词典里的标准词在 top-K **之前**剔除，不能挤占黑话候选名额。
+
+    无 jieba 时 ``is_standard_vocabulary`` 恒 False（降级路径）；这里用 monkeypatch
+    钉住"有 jieba 时"的分支，避免测试机是否装了 jieba 让结果漂移。
+    """
+    _seed("g1", "价格", 6)
+    _seed("g1", "真香", 6)
+    monkeypatch.setattr(J, "is_standard_vocabulary", lambda t: t == "价格")
+    terms = [c.term for c in J.get_jargon_candidates("g1")]
+    assert "价格" not in terms
+    assert "真香" in terms
 
 
 def test_mine_writes_confirmed_terms_with_meanings(monkeypatch) -> None:

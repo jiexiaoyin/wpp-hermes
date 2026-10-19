@@ -35,12 +35,20 @@
   （不传 = ``time.time()``，与 TS 直接读 ``Date.now()`` 逐字等价）。没有它，
   burst 那半只能靠 mock 时间或"差不多"地断言。
 
-## ⚠️ 一条看着像 bug、其实是 TS 的现状
+## ★ 有意偏离 TS：中文候选不再被拉黑（2026-10-19 老板拍板）
 
-:func:`should_filter_candidate` 的 ``HARD_BLOCK_RE`` **含中文即拉黑**（``[@一-鿿]``）
-⇒ 中文候选在这里就被挡掉，真正能进 LLM 的只有 ASCII 缩写（``yyds``/``xswl``）。
-**这是 ``jargon.ts:323`` 的原样，不顺手放宽** —— 放宽了 py2 就与 TS 分叉，
-而且分叉的那侧恰好是"我们看着更合理"的那侧，最容易被当成改进。
+TS 的 ``HARD_BLOCK_RE`` 含 ``[一-鿿]`` ⇒ 中文候选到不了 LLM，只能学 ``yyds``/``xswl``
+这类 ASCII 缩写。py2 原先逐字照搬，真机上等于"黑话插件开着，中文黑话永远学不到"。
+
+现在**有意放宽**（这是与 TS 的一处分叉，方向是"把中文黑话这半个功能补完"）：
+
+* ``HARD_BLOCK_RE`` 只拦 @提及 / 方括号 / URL / 空白，**不再拦中文**；
+* 中文噪声由三道闸控制：① 停用词 + ``COMMON_BLOCK``（常用词）；② 可选 jieba
+  词典频率过滤（``is_standard_vocabulary``，无 jieba 时恒假）；③ LLM 批量验证；
+* 候选仍走 ``get_jargon_candidates`` 的 top-K + 上限，不会把 n-gram 全量送 LLM。
+
+⚠️ 放宽后 ``COMMON_BLOCK`` 从"不可达死码"变成**真正生效**的一道过滤 —— 它的每一条
+都是常用词，别删；新增词条前先确认它不是某个行业/群里的黑话。
 """
 
 from __future__ import annotations
@@ -48,8 +56,10 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -95,17 +105,13 @@ STOPWORDS = frozenset([
     "图片", "表情", "语音", "视频", "文件", "链接",
 ])
 
-# ===== 分词（**只有 n-gram 降级那半**，见下）=====
+# ===== 分词（n-gram 为底；jieba 可选增强）=====
 #
 # TS 会先试 ``require("@node-rs/jieba")``（可选增强），失败才降级 n-gram
-# （``jargon.ts:77-108``）。py2 **不装 jieba**（它不在 ``plugin.yaml`` 的
-# ``python_dependencies`` 里，也不该加 —— 纯为分词装一个带原生扩展的包不值），
-# 所以这里实现的是 TS 的**降级路径**，行为与"TS 侧 jieba 加载失败"逐字一致。
-#
-# ⚠️ 少掉的那截是 ``isStandardVocabulary``（jieba 词典频率 > 100 视为标准词）：
-#    jieba 缺席时 TS 的它**恒返回 False**（``jargon.ts:102`` 第一行就 return false）
-#    ⇒ 两边在这一路径上等价，不是缺口。真装了 jieba 的 TS 会多一道过滤 ⇒
-#    py2 的候选里可能多出标准词，但下游还有 ``should_filter_candidate`` 与 LLM 验证两道。
+# （``jargon.ts:77-108``）。py2 同样把 jieba 当**可选依赖**：
+#   装了 ⇒ 用词典频率做 ``is_standard_vocabulary``（与 TS 的 jieba 路径同判据）；
+#   没装 ⇒ 恒返回 False，回到纯 n-gram，与 TS 的降级路径逐字等价。
+# 分词本身仍是 n-gram（TS 的 jieba 路径只用词典频率过滤，不改变候选来源）。
 _CJK = "一-鿿"
 _AT_RE = re.compile(r"@\S+")
 _URL_RE = re.compile(r"https?://\S+")
@@ -117,6 +123,58 @@ _ASCII_ALPHA_RE = re.compile(r"^[a-zA-Z]+$")
 _PURE_DIGITS_RE = re.compile(r"^[0-9\s]+$")
 #: 纯标点（**显式 ASCII ``\w``**：`[^\w一-鿿]+` 的 Python 写法）
 _PURE_PUNCT_RE = re.compile(rf"^[^A-Za-z0-9_{_CJK}]+$")
+
+#: jieba 词典频率阈值：> 100 视为标准词（TS ``jargon.ts:102`` 同口径）。
+JIEBA_STANDARD_FREQ = 100
+
+_jieba_mod: Any = None
+_jieba_loaded = False
+_jieba_lock = threading.Lock()
+
+
+def _get_jieba() -> Any:
+    """懒加载 jieba（可选依赖）。失败/未安装 ⇒ ``None``，调用方回退 n-gram。
+
+    懒加载的两个理由：① 插件启动时不付 ~0.5s 的词典加载成本；② jieba 在
+    Python 3.14 导入时会发一条无害的 ``SyntaxWarning``，放在首条群消息之后
+    再加载，启动日志干净。
+    """
+    global _jieba_mod, _jieba_loaded
+    if _jieba_loaded:
+        return _jieba_mod
+    with _jieba_lock:
+        if _jieba_loaded:
+            return _jieba_mod
+        try:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                import jieba  # type: ignore[import-not-found]
+
+            jieba.setLogLevel(logging.WARNING)
+            jieba.initialize()
+            _jieba_mod = jieba
+        except Exception as exc:  # noqa: BLE001 —— 可选增强失败不影响主链路
+            log.debug("[WPP JARGON] jieba 不可用，走 n-gram 降级: %s", exc)
+            _jieba_mod = None
+        _jieba_loaded = True
+    return _jieba_mod
+
+
+def is_standard_vocabulary(term: str) -> bool:
+    """``term`` 是否是 jieba 词典里的标准词（``jargon.ts:102``）。
+
+    jieba 缺席 ⇒ **恒 False**（TS 的降级路径就是这样）。这只影响候选池噪声，
+    不影响正确性：标准词即使漏过来，还会被 ``COMMON_BLOCK`` 与 LLM 验证两道拦。
+    """
+    jieba = _get_jieba()
+    if jieba is None:
+        return False
+    try:
+        return int(jieba.dt.FREQ.get(term, 0)) > JIEBA_STANDARD_FREQ
+    except Exception:  # noqa: BLE001 —— 词典形状异常按"不是标准词"处理
+        return False
 
 
 def ngram_tokens(text: str) -> list[str]:
@@ -258,6 +316,37 @@ def known_meaning(group_id: str, term: str) -> str:
     return _term_meanings.get(group_id, {}).get(term, "")
 
 
+def build_jargon_channel_prompt(
+    group_id: str, text: str, max_terms: int = 5, max_meaning_chars: int = 60,
+) -> str | None:
+    """当前消息命中的已知黑话 → Hermes ``channel_prompt`` 片段（**热路径零 DB**）。
+
+    只读进程内缓存 ``_term_meanings``（挖掘成功时写入；启动后由适配器预热一次）。
+    没有命中 / 命中词没有含义 ⇒ 返回 ``None``，调用方不追加任何内容 ——
+    "没开这个功能"时请求体逐字节不变。
+
+    注入的是**含义**而不是候选词：模型看到"yyds"时本来就能猜，看到某个群内部
+    谐音梗时才真正需要一句解释。长词优先，避免同一段文本里的长短词重复占用名额。
+    """
+    if not group_id or not text:
+        return None
+    meanings = _term_meanings.get(group_id) or {}
+    if not meanings:
+        return None
+    hits: list[tuple[str, str]] = []
+    for term, meaning in meanings.items():
+        if not term or not meaning or term not in text:
+            continue
+        clean = " ".join(str(meaning).split())[:max_meaning_chars]
+        if clean:
+            hits.append((term, clean))
+    if not hits:
+        return None
+    hits.sort(key=lambda kv: (-len(kv[0]), kv[0]))
+    lines = [f"- {term}：{meaning}" for term, meaning in hits[:max_terms]]
+    return "[系统提示-本群黑话]\n" + "\n".join(lines)
+
+
 def update_from_message(content: str, group_id: str, sender_id: str) -> None:
     """统计一条群消息的词频（``jargon.ts:199-230``）。
 
@@ -362,6 +451,10 @@ def get_jargon_candidates(
             continue
         if term in exclude:
             continue
+        # jieba 词典里的标准词（"今天""价格"这类）不参与打分 —— 在 top-K **之前**
+        # 剔掉，否则标准词会挤占候选名额，真正的黑话进不了前 50。无 jieba 时恒 False。
+        if is_standard_vocabulary(term):
+            continue
 
         # IDF：跨群稀有度（在越少的群里出现，越可能是"这个群的内部话"）
         groups_containing = 0
@@ -408,13 +501,24 @@ def get_group_stats(group_id: str) -> dict[str, int]:
     }
 
 
-# ===== 黑话硬编码过滤（``jargon.ts:322-338``；**含中文即拉黑**，见模块 docstring 末节）=====
-HARD_BLOCK_RE = re.compile(rf"[@{_CJK}]|[\[\]]|https?://|[\s　]")
+# ===== 黑话硬编码过滤（``jargon.ts:322-338`` + 2026-10-19 中文放宽）=====
+#: 只拦 @提及 / 方括号 / URL / 空白。**不再含中文** —— 见模块 docstring 末节
+#: "有意偏离 TS"。中文噪声由 COMMON_BLOCK、jieba 词典频率、LLM 验证三道控制。
+HARD_BLOCK_RE = re.compile(r"[@\[\]]|https?://|[\s　]")
 #: ⚠️ ``[\s　]``：``　``（全角空格）在 JS 与 Python 的 ``\s`` 里**都是**空白
 #: ⇒ 这一项两边都冗余。**保留**它是因为它是 TS 原文的一部分，删掉会让下一处对照看不见它。
 COMMON_BLOCK = frozenset([
+    # TS 原文的 22 条（``jargon.ts:325-328``）
     "哈哈", "哈哈哈", "呵呵", "嘻嘻", "啊啊", "嗯嗯", "谢谢", "感谢", "好的", "可以", "不错",
     "收到", "明白", "知道", "看看", "这个", "那个", "什么", "怎么", "真的", "确实", "其实",
+    # 中文放宽后补充的常用词（py2 独有）：不从这张表里删条目，只增。
+    # 判据是"普通聊天里天天出现、含义明确" —— 行业黑话（如"上车""下车""报水"）不要加。
+    "今天", "明天", "昨天", "现在", "时候", "刚才", "以后", "以前", "上午", "下午", "晚上",
+    "大家", "我们", "你们", "他们", "自己", "别人", "老板", "客户", "朋友", "同事",
+    "手机", "电脑", "价格", "多少钱", "发货", "收货", "快递", "微信", "电话", "地址",
+    "东西", "事情", "问题", "地方", "工作", "公司", "时间", "一下", "一点", "有点",
+    "还是", "就是", "但是", "因为", "所以", "如果", "然后", "已经", "可能", "应该",
+    "需要", "喜欢", "感觉", "觉得", "麻烦", "直接", "马上", "谢谢啦", "不客气",
 ])
 
 
@@ -424,7 +528,7 @@ def should_filter_candidate(term: str) -> bool:
         return True
     if len(term) < 2 or len(term) > 8:
         return True
-    if HARD_BLOCK_RE.search(term):   # 含中文/方括号/URL/空白
+    if HARD_BLOCK_RE.search(term):   # @提及/方括号/URL/空白（中文已放行）
         return True
     if re.match(r"^[0-9]+$", term):
         return True

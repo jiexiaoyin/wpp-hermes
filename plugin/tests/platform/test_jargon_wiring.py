@@ -412,3 +412,52 @@ def test_the_mine_module_keeps_the_config_error_exported() -> None:
                 isinstance(t, ast.Name) and t.id == "__all__" for t in n.targets):
             exported = {e.value for e in n.value.elts if isinstance(e, ast.Constant)}
     assert {"JargonConfigError", "RepoJargonStore", "mine_jargon_for_group"} <= exported, exported
+
+
+# ============================================================ 判据 6：回复侧注入（2026-10-19）
+
+
+def test_jargon_meaning_is_injected_into_the_reply_side_channel_prompt() -> None:
+    """★ 学到的含义必须进**回复侧**，而不只是 ``wpp_jargon_query`` 工具。
+
+    注入点必须是 ``_channel_prompt`` 的组合列表里（``channel_prompt`` 只收一个字符串）；
+    直接覆盖会让 W2 情绪 / 群画像静默消失。
+    """
+    combined = ast.unparse(_methods()["_channel_prompt"])
+    assert "_jargon_channel_prompt" in combined
+    assert "_mood_channel_prompt" in combined and "_group_profile_channel_prompt" in combined
+    assert "if parts else None" in combined
+
+    fn = _methods()["_jargon_channel_prompt"]
+    src = ast.unparse(fn)
+    assert "jargon_mod.build_jargon_channel_prompt" in src
+    assert "resolve_jargon_cfg(acct.jargon)" in src
+
+
+def test_the_reply_side_jargon_lookup_never_touches_the_db() -> None:
+    """热路径只读进程内缓存 —— 本方法里出现 ``repo_`` / ``list_jargon`` 就是每条消息一次库读。"""
+    src = ast.unparse(_methods()["_jargon_channel_prompt"])
+    assert "repo_" not in src and "list_jargon" not in src
+
+    # 三道闸都在缓存读之前：非群 / 开关关 / 缓存无命中
+    fn = _methods()["_jargon_channel_prompt"]
+    gate_group = _if(fn, "not getattr(msg, 'is_group', False)")
+    call = _calls(fn, "build_jargon_channel_prompt")[0]
+    assert not _is_inside(call, gate_group), "群消息闸必须在缓存读之前返回"
+    assert "enabled" in src and src.find("enabled") < src.find("build_jargon_channel_prompt")
+
+
+def test_the_db_meanings_are_preheated_once_per_group_after_restart() -> None:
+    """重启后 ``_term_meanings`` 是空的 ⇒ 必须有一次性预热，否则注入要等下一轮挖掘。"""
+    fn = _methods()["_jargon_ensure_meanings"]
+    src = ast.unparse(fn)
+    assert "self._jargon_loaded" in src
+    assert "create_task" in src and "to_thread" in src, "读库必须进线程池，不能卡收信"
+    assert any(k.arg == "name" for c in _calls(fn, "create_task") for k in c.keywords)
+
+    loader = _methods()["_jargon_load_meanings"]
+    lsrc = ast.unparse(loader)
+    assert "list_jargon" in lsrc
+    assert "remember_meaning" in lsrc
+    init_src = ast.unparse(_methods()["__init__"])
+    assert "_jargon_loaded" in init_src
