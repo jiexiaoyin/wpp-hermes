@@ -101,6 +101,19 @@ def test_wpp_store_maps_repo_rows_to_message_rows(monkeypatch) -> None:
                     MessageRow("outbound", 20, "在", "u1")]
 
 
+def test_wpp_store_normalizes_db_inbound_to_contract_incoming(monkeypatch) -> None:
+    """``wpp_messages.direction`` 是 ``inbound/outbound``（见 ``persist.db_direction``），
+    而主动消息策略按契约读 ``incoming``。原样透传 ⇒ 真库上永远 ``not eligible``，
+    且完全静默（reason=ok, sent=0）。缓存/读库两侧都必须归一。"""
+    from plugin.data import repo_messages
+
+    monkeypatch.setattr(repo_messages, "list_messages_by_peer",
+                        lambda *a, **k: [_row("inbound", 10, "在吗"),
+                                         _row("outbound", 20, "在")])
+    rows = WppConversationStore("acct").recent(dm_key("acct", "u1"), 5)
+    assert [r.direction for r in rows] == ["incoming", "outbound"]
+
+
 def test_wpp_store_ignores_other_platforms_or_accounts(monkeypatch) -> None:
     from plugin.data import repo_messages
 

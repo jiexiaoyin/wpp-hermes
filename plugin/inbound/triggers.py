@@ -80,6 +80,7 @@ DENY_REASONS = frozenset({
     "group_blacklist",        # ⑥ 群黑名单
     "group_disabled",         # ⑥ 群策略 disabled
     "group_closed",           # ⑥ 群策略 closed
+    "group_policy_unknown",   # ⑥ 拼错/未知取值（fail-closed，不能当 open）
     "group_not_allowlisted",  # ⑥ 空名单也算（fail-closed）
     "dm_not_allowlisted",     # ⑫ 私聊白名单外
     "dm_fail_closed",         # ⑫ 空白名单（fail-closed）
@@ -202,7 +203,12 @@ def _decide_group(msg: WppMessage, cfg: dict, content: str,
     if chatroom_id and chatroom_id in (cfg.get("blacklistGroups") or []):
         return False, "group_blacklist"
 
-    policy = cfg.get("groupPolicy") or "open"
+    policy = str(cfg.get("groupPolicy") or "open").strip().lower()
+    # 未知取值 **fail-closed**：拼错（"Disabled"/"disable"/"Allowlist"）时不能落进
+    # 后面的 @/心流路由，否则"我想把这个群静音"反而变成照常回复。
+    # ``accounts.py`` 已在解析时小写归一；这里再兜一层，覆盖直接构造 cfg 的调用方。
+    if policy not in ("open", "disabled", "closed", "allowlist"):
+        return False, "group_policy_unknown"
     if policy == "disabled":
         return False, "group_disabled"
     if policy == "closed":

@@ -603,7 +603,15 @@ def build_prompt(inp: HfJudgeInput, cfg: Mapping[str, Any] | None) -> str:
         '需要结合机器人角色特点进行分析，特别说明与上次回复的关联性"'
         if _bool_or(c.get("includeReasoning"), HF_DEFAULTS["includeReasoning"]) else ""
     )
-    last_reply_str = inp.last_bot_reply or "暂无上次回复记录"
+    # 输入全部来自群聊原文 ⇒ 长度不可控（一条长文/链接可以有几万字）。
+    # 不设上限时 prompt 费用与延迟随单条消息走，还会把 judge 自己的输出预算挤掉
+    # （输出只有 300 token）。画像文本已由 profile 层按 max_prompt_chars 截断，
+    # 这里只钳其余四个字段。
+    def _clip(value: str, limit: int) -> str:
+        text = str(value or "")
+        return text if len(text) <= limit else text[:limit] + "…"
+
+    last_reply_str = _clip(inp.last_bot_reply, 500) or "暂无上次回复记录"
     since_min: Any = (round(inp.seconds_since_last_reply / 60.0)
                       if inp.seconds_since_last_reply > 0 else "从未回复")
     profile_part = (f"\n\n## 本群画像 (系统按历史消息自动归纳，供你应景参考)\n{inp.group_profile}"
@@ -624,14 +632,14 @@ def build_prompt(inp: HfJudgeInput, cfg: Mapping[str, Any] | None) -> str:
 {inp.chat_context}{profile_part}
 
 ## 最近{ctx_count}条对话历史
-{inp.recent_messages}
+{_clip(inp.recent_messages, 4000)}
 
 ## 上次机器人回复
 {last_reply_str}
 
 ## 待判断消息
-发送者: {inp.sender_name}
-内容: {inp.content}
+发送者: {_clip(inp.sender_name, 100)}
+内容: {_clip(inp.content, 2000)}
 时间: {time.strftime("%H:%M:%S", time.localtime())}
 
 ## 评估要求

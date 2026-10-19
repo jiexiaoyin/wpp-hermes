@@ -88,6 +88,43 @@ def is_available() -> bool:
     return unavailable_reason() is None
 
 
+def looks_like_silk_bytes(data: bytes) -> bool:
+    """SILK 原始字节判定（``0x02#!SILK_V3`` 头）。
+
+    2026-10-19 审阅补的：``wpp_send_voice`` 只看文件名/``data:audio/silk``，
+    模型直接传裸 SILK base64 时会被当成 mp3 降级成文件（语音能力"明明有却没用上"）。
+    """
+    return bool(data) and data[:1] == b"\x02" and b"SILK" in data[:10]
+
+
+def looks_like_silk_base64(b64: str) -> bool:
+    try:
+        raw = base64.b64decode((b64 or "").strip(), validate=False)[:16]
+    except Exception:  # noqa: BLE001
+        return False
+    return looks_like_silk_bytes(raw)
+
+
+async def probe_silk_base64_ms(b64: str) -> int:
+    """从 SILK base64 直接算时长（毫秒）。
+
+    ``probe_duration_ms`` 只认本地文件；URL/base64 入参在落地前没有路径可用。
+    SILK 解码后是 24kHz/mono/s16 ⇒ 48 字节/毫秒。失败返回 0（调用方必须降级，
+    **不能**把 0 传给厂商 —— 实测 ``VoiceTime=0`` 必被 ``Code=-2`` 拒收）。
+    """
+    try:
+        raw = base64.b64decode((b64 or "").strip(), validate=False)
+        if not looks_like_silk_bytes(raw):
+            return 0
+        from ..inbound import stt
+
+        pcm = await stt.decode_silk_to_pcm(raw)
+        return int(round(len(pcm) / 48)) if pcm else 0
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[SILK] base64 时长探测失败: %s", exc)
+        return 0
+
+
 async def probe_duration_ms(ref: str) -> int:
     """本地音频时长（毫秒）。探测失败返回 ``0``。
 
@@ -358,19 +395,34 @@ async def encode_to_silk_fitting(ref: str) -> str | None:
     if not os.path.isfile(src):
         log.warning("[SILK] 源文件不存在: %s", src)
         return None
-    last: Exception | None = None
-    for bitrate in _SILK_FALLBACK_RATES:
-        try:
-            return base64.b64encode(await _encode_silk_bytes(src, bitrate)).decode()
-        except SilkUnavailable as exc:
-            log.info("[SILK] 跳过编码（%s）—— 出站语音将降级为文件", exc)
+    # 2026-10-19 审阅修复：>60 KB 的 .silk 以前直接走 ``ffmpeg -i .silk``，而 ffmpeg
+    # 不认 SILK（本机没有 libsilk）⇒ 编码失败 ⇒ 降级成**发一个打不开的 .silk 附件**。
+    # 先用自带 decoder 解成 24k mono wav，再走正常的降码率重编码。
+    tmpdir = ""
+    if src.lower().endswith(".silk"):
+        tmpdir = tempfile.mkdtemp(prefix="wpp-voice-silk-")
+        wav = os.path.join(tmpdir, "source.wav")
+        if not await _silk_to_wav(src, wav):
+            shutil.rmtree(tmpdir, ignore_errors=True)
             return None
-        except SilkTooLarge as exc:
-            last = exc
-            log.info("[SILK] %s kbps 仍超限（%s），尝试更低码率",
-                     (bitrate or 25_000) // 1000, exc)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[SILK] 编码异常: %s", exc)
-            return None
-    log.warning("[SILK] 降码率后仍超过 %d B（%s）", MAX_SILK_BYTES, last)
-    return None
+        src = wav
+    try:
+        last: Exception | None = None
+        for bitrate in _SILK_FALLBACK_RATES:
+            try:
+                return base64.b64encode(await _encode_silk_bytes(src, bitrate)).decode()
+            except SilkUnavailable as exc:
+                log.info("[SILK] 跳过编码（%s）—— 出站语音将降级为文件", exc)
+                return None
+            except SilkTooLarge as exc:
+                last = exc
+                log.info("[SILK] %s kbps 仍超限（%s），尝试更低码率",
+                         (bitrate or 25_000) // 1000, exc)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[SILK] 编码异常: %s", exc)
+                return None
+        log.warning("[SILK] 降码率后仍超过 %d B（%s）", MAX_SILK_BYTES, last)
+        return None
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)

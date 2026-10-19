@@ -163,6 +163,19 @@ class MediaMixin:
                 if data:
                     # 转写要在返回**之前**写进 msg.media：正文由 prepare_text 稍后读它
                     await self._fill_voice_transcript(acct.id, msg.media, data)
+                    # 2026-10-19 审阅修复：转写只写进 media 还不够 —— 落库（④z）、
+                    # 心流缓冲（④a）、judge 与 intent 都在 prepare_text 之前/之外读
+                    # ``msg.content``，于是未 @ 的语音在这些消费者眼里只剩
+                    # ``[语音] <oss-url>``，等于"说了话但裁判从没看见"。
+                    # 在这里把转写并进正文（早于 ④z/④a），并让 prepare_text 去重。
+                    from ..inbound.media import voice_transcript
+
+                    transcript = voice_transcript(msg.media)
+                    if transcript:
+                        line = f"[转写] {transcript}"
+                        if line not in (msg.content or ""):
+                            msg.content = (f"{msg.content}\n{line}"
+                                           if (msg.content or "").strip() else line)
                     # SILK 头是 b"\x02#"；其余当 AMR（vendor 只出这两种）
                     ext = ".silk" if data[:2] == b"\x02#" else ".amr"
                     # ⚠️ 传上去的是**原始 silk/amr**，不是 TS 那种 mp3：TS 的 ``voice.ts``
@@ -488,58 +501,121 @@ class MediaMixin:
 
         返回的是最终那次响应的原样 dict，交给调用方统一判 :func:`outbound.send_ok`。
         """
+        import shutil
+        import tempfile
+
         ext = os.path.splitext(name)[1].lower()
-        # 微信单条语音上限 60s；厂商实际还卡 SILK **字节**上限（60 KB），
-        # 所以先按 55s 切段，再对每段做「25→12→8 kbps」码率自适应。
-        segments = await silk_encoder.split_audio(ref)
+        src = os.path.expanduser(str(ref or ""))
+        temp_dir = ""
+        segments: list[str] = []
         last_resp: dict = {}
+
+        # 2026-10-19 审阅修复：``ref`` 可能是 URL / data URI / 裸 base64（live 的
+        # ``send()`` 只把 b64 解析出来，ref 保持原样）。旧实现把它们直接交给
+        # ``split_audio``（不是文件 ⇒ 原样返回），再在降级分支 ``open(seg)`` ⇒
+        # FileNotFoundError，整条语音发送失败。这里先把 b64 落地成临时文件，
+        # 后续分段/探测/降级都只面对本地路径。
         try:
-            if (ext == ".silk" and len(segments) == 1
-                    and len(b64) * 3 // 4 <= silk_encoder.MAX_SILK_BYTES):
+            data_bytes = base64.b64decode(b64 or "", validate=False)
+        except Exception:  # noqa: BLE001
+            data_bytes = b""
+        is_silk = ext == ".silk" or silk_encoder.looks_like_silk_bytes(data_bytes)
+        if is_silk:
+            ext = ".silk"
+        send_name = name
+        if is_silk and not send_name.lower().endswith(".silk"):
+            send_name = f"{os.path.splitext(send_name)[0] or 'voice'}.silk"
+
+        def _seg_b64(path: str) -> str:
+            """优先读本地分段；极端情况下（临时文件被清）退回原始 b64。"""
+            try:
+                with open(path, "rb") as fh:
+                    return base64.b64encode(fh.read()).decode()
+            except OSError:
+                return b64
+
+        try:
+            if not os.path.isfile(src):
+                temp_dir = tempfile.mkdtemp(prefix="wpp-voice-split-")
+                src = os.path.join(
+                    temp_dir, f"{os.path.splitext(name)[0] or 'voice'}{ext or '.bin'}")
+                with open(src, "wb") as fh:
+                    fh.write(data_bytes)
+            if not os.path.isfile(src) or os.path.getsize(src) <= 0:
+                log.warning("[WPP] 语音内容为空/不可落地 —— 降级发文件")
+                return await client.send_file_v2(
+                    to_wxid=peer_id, file_name=send_name, file_base64=b64)
+
+            # 微信单条语音上限 60s；厂商实际还卡 SILK **字节**上限（60 KB），
+            # 所以先按 55s 切段，再对每段做「25→12→8 kbps」码率自适应。
+            segments = await silk_encoder.split_audio(src)
+            if (is_silk and len(segments) == 1
+                    and len(data_bytes) <= silk_encoder.MAX_SILK_BYTES):
                 # Type=4 = SILK（微信默认；0=AMR 是**入站**才见到的格式，厂商出站不收）
                 # VoiceTime 必须是**毫秒且非 0**：2026-10-19 实测传 0 会被 Code=-2 拒收
                 # （错误文案是误导性的 INVALID_CREDENTIAL），传真实时长立即成功。
-                voice_ms = await silk_encoder.probe_duration_ms(ref)
-                resp = await client.send_voice(to_wxid=peer_id, voice_base64=b64,
-                                               voice_type=4, voice_time=voice_ms)
-                if outbound.send_ok(resp):
-                    return resp
-                log.warning("[WPP] 语音发送被拒（%s）—— 降级发文件",
-                            outbound.send_error_text(resp))
-                return await client.send_file_v2(to_wxid=peer_id, file_name=name,
-                                                 file_base64=b64)
+                voice_ms = (await silk_encoder.probe_duration_ms(segments[0])
+                            or await silk_encoder.probe_silk_base64_ms(b64))
+                if voice_ms > 0:
+                    try:
+                        resp = await client.send_voice(
+                            to_wxid=peer_id, voice_base64=b64,
+                            voice_type=4, voice_time=voice_ms)
+                    except WppApiError as exc:  # 厂商拒收是 raise，不是返回
+                        log.warning("[WPP] 语音发送被拒（%s）—— 降级发文件", exc)
+                        resp = {"Code": -2, "Message": str(exc)}
+                    if outbound.send_ok(resp):
+                        return resp
+                    log.warning("[WPP] 语音发送被拒（%s）—— 降级发文件",
+                                outbound.send_error_text(resp))
+                else:
+                    log.warning("[WPP] 无法确认 SILK 时长（VoiceTime=0 必被拒）—— 降级发文件")
+                return await client.send_file_v2(
+                    to_wxid=peer_id, file_name=send_name, file_base64=b64)
 
-            stem = os.path.splitext(name)[0] or "voice"
+            stem = os.path.splitext(send_name)[0] or "voice"
             for idx, seg in enumerate(segments):
                 silk_b64 = await silk_encoder.encode_to_silk_fitting(seg)
+                seg_name = send_name if len(segments) == 1 else \
+                    f"{stem}-{idx + 1}{os.path.splitext(seg)[1] or '.wav'}"
                 if not silk_b64:
                     # 该段无法转 SILK ⇒ 只降级这一段，别把已发出去的前几段重发
-                    seg_name = name if len(segments) == 1 else \
-                        f"{stem}-{idx + 1}{os.path.splitext(seg)[1] or '.wav'}"
                     log.info("[WPP] 语音段非 SILK 且无法转码 —— 该段降级发文件: %s", seg_name)
-                    with open(seg, "rb") as fh:
-                        last_resp = await client.send_file_v2(
-                            to_wxid=peer_id, file_name=seg_name,
-                            file_base64=base64.b64encode(fh.read()).decode())
+                    last_resp = await client.send_file_v2(
+                        to_wxid=peer_id, file_name=seg_name,
+                        file_base64=_seg_b64(seg))
                     continue
 
-                voice_ms = await silk_encoder.probe_duration_ms(seg)
-                resp = await client.send_voice(to_wxid=peer_id, voice_base64=silk_b64,
-                                               voice_type=4, voice_time=voice_ms)
+                voice_ms = (await silk_encoder.probe_duration_ms(seg)
+                            or await silk_encoder.probe_silk_base64_ms(silk_b64))
+                if voice_ms <= 0:
+                    log.warning("[WPP] 第 %d/%d 段无法确认时长（VoiceTime=0 必被拒）"
+                                "—— 该段降级发文件", idx + 1, len(segments))
+                    last_resp = await client.send_file_v2(
+                        to_wxid=peer_id, file_name=seg_name,
+                        file_base64=_seg_b64(seg))
+                    continue
+                try:
+                    resp = await client.send_voice(
+                        to_wxid=peer_id, voice_base64=silk_b64,
+                        voice_type=4, voice_time=voice_ms)
+                except WppApiError as exc:  # 厂商拒收是 raise，不是返回
+                    log.warning("[WPP] 第 %d/%d 段语音被拒（%s）—— 降级发文件",
+                                idx + 1, len(segments), exc)
+                    resp = {"Code": -2, "Message": str(exc)}
                 last_resp = resp
                 if outbound.send_ok(resp):
                     continue
                 log.warning("[WPP] 第 %d/%d 段语音被拒（%s）—— 降级发文件",
                             idx + 1, len(segments), outbound.send_error_text(resp))
-                seg_name = name if len(segments) == 1 else \
-                    f"{stem}-{idx + 1}{os.path.splitext(seg)[1] or '.wav'}"
-                with open(seg, "rb") as fh:
-                    last_resp = await client.send_file_v2(
-                        to_wxid=peer_id, file_name=seg_name,
-                        file_base64=base64.b64encode(fh.read()).decode())
+                last_resp = await client.send_file_v2(
+                    to_wxid=peer_id, file_name=seg_name,
+                    file_base64=_seg_b64(seg))
             return last_resp or {"Code": -1, "Message": "语音无可发送内容"}
         finally:
             silk_encoder.cleanup_segments(segments)
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------ _video_thumb
 

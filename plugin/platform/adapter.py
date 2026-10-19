@@ -668,13 +668,18 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                     merge_max_chars=_merge_cfg.get("maxChars") or 2000,
                 )
 
-            if not self._start_webhook(connectable):
+            webhook_ok = self._start_webhook(connectable)
+            if not webhook_ok:
                 # webhook 起不来不是致命的（WS 仍是主通道），但要说清楚
                 log.warning("[WPP] webhook 未启动（WS 通道不受影响）")
-
-            # vendor 侧 webhook 自动注册（``autoSetWebhook``，默认 true）。必须排在
-            # 监听起好之后：先有本地口，再告诉厂商往哪推。
-            self._start_vendor_webhooks(connectable)
+            else:
+                # vendor 侧 webhook 自动注册（``autoSetWebhook``，默认 true）。必须排在
+                # 监听起好之后：先有本地口，再告诉厂商往哪推。
+                # 2026-10-19 审阅修复：本地监听 bind 失败时旧代码仍然把 URL 推给厂商
+                # ⇒ 消息被推到死端口，表现为"webhook 配置成功但收不到消息"。只对
+                # **真正注册了路由的账号**推送。
+                self._start_vendor_webhooks(
+                    [a for a in connectable if a.id in self._webhook_accounts])
 
             for acct in connectable:
                 self._start_ws(acct)

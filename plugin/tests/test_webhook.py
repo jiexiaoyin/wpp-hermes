@@ -448,6 +448,18 @@ def test_start_webhook_errors_when_nothing_can_be_registered():
         "一个路由都注册不上时不该还起一个空监听（白开端口）"
 
 
+def test_vendor_webhook_registration_waits_for_the_local_listener():
+    """本地 bind 失败时**不许**把 URL 推给厂商（否则消息全推到死端口，日志还显示成功）。
+
+    只对 ``_webhook_accounts`` 里（真正 add_path 成功的）账号推送。
+    """
+    code = _adapter_code("connect")
+    assert "webhook_ok = self._start_webhook(connectable)" in code
+    assert "else:" in code and "_start_vendor_webhooks(" in code
+    assert "if a.id in self._webhook_accounts" in code, \
+        "vendor 注册必须只覆盖本地真的注册了路由的账号"
+
+
 # ===== 5. 调度出去的 future：异常必须有人看 =====
 
 

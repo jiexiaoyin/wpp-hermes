@@ -322,13 +322,18 @@ class InboundDebouncer:
 
         之后 ``enqueue`` 一律返 ``False``（把消息交回调用方，而不是塞进一个再也不会
         被 flush 的缓冲里）。
+
+        ⚠️ ``_stopped`` 必须在 ``await flush_all()`` **之前**置位：flush 是异步的，
+        等待期间到达的消息若还被接收入缓冲，会落在 ``flush_all`` 的快照之外，随后
+        被下面的 ``clear()`` 静默丢掉。提前置位后它们走 ``enqueue → False`` 的直通
+        路径，由调用方自己派发（与"已停机还收到消息"同一契约）。
         """
+        self._stopped = True
         total = await self.flush_all() if flush else 0
         for handle in self._timers.values():
             handle.cancel()
         self._timers.clear()
         self._buffers.clear()
-        self._stopped = True
         return total
 
     def clear(self) -> None:

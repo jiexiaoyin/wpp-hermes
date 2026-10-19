@@ -107,14 +107,24 @@ async def _send_message_router(client, params: dict,
                 int((params.get("durationMs") or 0) / 1000) or 10)
         elif mtype == "voice":
             # 厂商只收 SILK（Type=4）；非 silk 降级为文件（TS v1.3.53 同口径）
+            from ..platform import silk_encoder
+
             b64 = await _resolve_to_base64(content)
             no_query = content.split("?")[0].lower()
-            if not (content.startswith("data:audio/silk") or no_query.endswith(".silk")):
+            is_silk = (content.startswith("data:audio/silk") or no_query.endswith(".silk")
+                       or silk_encoder.looks_like_silk_base64(b64))
+            if not is_silk:
                 fname = content.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "voice.mp3"
                 resp = await client.send_file_via_app(to_wxid, fname, b64)
             else:
-                resp = await client.send_voice(
-                    to_wxid, b64, 4, int((params.get("durationMs") or 0) / 1000))
+                # VoiceTime 是毫秒（TS 同名参数 voiceDurationMs），别再除 1000。
+                # 缺省时从 SILK 算；算不出来必须拒绝，VoiceTime=0 会被厂商拒收。
+                duration_ms = int(params.get("durationMs") or 0)
+                if duration_ms <= 0:
+                    duration_ms = await silk_encoder.probe_silk_base64_ms(b64)
+                if duration_ms <= 0:
+                    return {"ok": False, "error": "无法确认语音时长（durationMs 必须 >0）"}
+                resp = await client.send_voice(to_wxid, b64, 4, duration_ms)
         elif mtype == "file":
             # TS sendFile = 下载 → /Tools/UploadFile → /Msg/ShareLink Type=6
             resp = await client.send_file_via_app(

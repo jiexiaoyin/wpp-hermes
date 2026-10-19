@@ -225,3 +225,37 @@ def test_sweep_survives_db_failure(monkeypatch) -> None:
         raise RuntimeError("DB down")
     monkeypatch.setattr(repo_messages, "list_messages_by_peer", _boom)
     assert asyncio.run(pa.maybe_send_once(adapter, "acct", NOW))["sent"] == 0
+
+
+def test_sweep_daily_cap_uses_full_count_not_the_truncated_window() -> None:
+    """历史窗口里看不到 outbound，不代表今天没聊过。
+
+    窗口只有 ``historyLimit`` 条：对方连续刷屏把今天的出站挤出窗口后，
+    ``is_eligible`` 会误判"可以主动关心"。执行侧必须以全量计数兜底。
+    """
+    rows = [_row("incoming", 30)]
+
+    class _Store:
+        platform = "wechatpadpro"
+
+        def recent(self, conv, limit=20):
+            return rows
+
+        def count_outbound_since(self, conv, since_sec):
+            return 3          # 今天已经发过 3 条，只是都不在窗口里
+
+    class _Sender:
+        platform = "wechatpadpro"
+
+        async def send_text(self, conv, text, *, quote_id=None):
+            raise AssertionError("日预算已满，不该再发")
+
+    cfg = pa.ProactiveConfig(
+        enabled=True, allow_from=("u1",), quiet_hours=(0, 0),
+        min_idle_hours=20, max_per_day=1,
+    )
+    result = asyncio.run(pa.maybe_send_once(
+        account_id="acct", now=NOW, cfg=cfg, store=_Store(), sender=_Sender(),
+        key_for=lambda peer: pa.ConversationKey("wechatpadpro", "acct", "dm", peer),
+    ))
+    assert result == {"sent": 0, "reason": "ok"}

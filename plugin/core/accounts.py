@@ -461,7 +461,9 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         auto_set_webhook=_as_bool(cfg.get("autoSetWebhook"), True),
         set_webhook_retries=_as_int(cfg.get("setWebhookRetries"), 3),
         allow_from=_as_str_tuple(cfg.get("allowFrom")),
-        group_policy=str(cfg.get("groupPolicy") or "open").strip(),
+        # 2026-10-19 审阅修复：大小写必须归一。triggers/access_policy 按小写字面量比较，
+        # 而这里原先只 strip ⇒ 写 "Disabled"/"Allowlist" 会在触发层整条绕过群策略。
+        group_policy=str(cfg.get("groupPolicy") or "open").strip().lower(),
         group_allow_from=_as_str_tuple(cfg.get("groupAllowFrom")),
         admin_users=_as_str_tuple(cfg.get("adminUsers")),
         blacklist_groups=_as_str_tuple(cfg.get("blacklistGroups")),

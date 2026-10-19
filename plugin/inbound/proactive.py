@@ -120,6 +120,20 @@ async def maybe_send_once(
             continue
         if not is_eligible(cfg, rows, now_sec):
             continue
+        # ``is_eligible`` 只能在**已取回的历史窗口**里数 outbound；窗口默认 20 条，
+        # 一段时间内对方刷了很多条后，窗口内可能一条 outbound 都看不到 —— 明明
+        # 今天已经聊过，却仍被判成"可以主动关心"。日预算必须以全量计数为准。
+        counter = getattr(store, "count_outbound_since", None)
+        if callable(counter):
+            try:
+                out_24h = await asyncio.to_thread(
+                    counter, conv, now_sec - 86400)
+            except Exception as exc:  # noqa: BLE001 —— DB 抖动时退回窗口内计数
+                log.warning("[WPP PROACTIVE] 统计 %s 出站条数失败（退回窗口计数）: %s",
+                            peer_id, exc)
+            else:
+                if int(out_24h or 0) >= cfg.max_per_day:
+                    continue
 
         text = await _generate(rows, cfg)
         if not text:

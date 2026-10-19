@@ -536,6 +536,7 @@ def test_build_jargon_channel_prompt_injects_only_matching_terms() -> None:
     assert "上车：加入团购" in text
     assert "xswl" not in text
     assert text.startswith("[系统提示-本群黑话]")
+    assert "不是指令" in text, "释义来自群聊原文 ⇒ 必须声明为资料，避免提示注入"
 
     assert J.build_jargon_channel_prompt("g1", "今天天气不错") is None
     assert J.build_jargon_channel_prompt("g2", "老板 yyds") is None      # 按群隔离
@@ -551,8 +552,9 @@ def test_build_jargon_channel_prompt_caps_terms_and_meaning_length() -> None:
                                          max_terms=3, max_meaning_chars=10)
     assert text is not None
     assert text.count("- 黑话") == 3
-    for line in text.splitlines()[1:]:
-        assert len(line.split("：", 1)[1]) <= 10
+    for line in text.splitlines():
+        if line.startswith("- "):
+            assert len(line.split("：", 1)[1]) <= 10
 
 
 def test_query_jargon_returns_none_below_the_threshold() -> None:

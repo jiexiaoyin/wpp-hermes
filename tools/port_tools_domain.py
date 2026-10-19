@@ -605,6 +605,15 @@ DECLARED_REGISTRATION_DIFFS: dict[str, dict[str, str]] = {
             "schema 新增可选 ``emotion`` / ``speed``，``voice`` 描述改为按情绪/账号配置"
             "取值。toolset 未变。"
         ),
+        "wpp_send_voice": (
+            "2026-10-19 语音链路修复：``voiceUrl`` 的描述扩展到「URL / 本地路径 / "
+            "data URI / SILK base64」（模型可直接传裸 SILK），新增可选 ``formatHint`` "
+            "与 ``duration``（VoiceTime 必须是真实毫秒，缺省时从 SILK 自动探测），"
+            "``required`` 从 ``toWxid + voiceUrl`` 放宽为 ``toWxid``（改用 "
+            "``voiceBase64`` 或格式提示发 SILK 时不再被 schema 拦下）。handler 对 >60s "
+            "的 ``duration`` 明确拒绝并提示用 ``wpp_send_ai_voice`` 自动分段。toolset "
+            "未变。"
+        ),
     },
     "jargon": {
         "wpp_jargon_query": (

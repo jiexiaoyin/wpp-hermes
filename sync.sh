@@ -47,8 +47,13 @@ echo "=============================================="
 if [ "$MODE" = "rollback" ]; then
     [ -d "$BK/plugin" ] || { echo "❌ 备份里没有 plugin/: $BK"; exit 1; }
     echo "回滚 plugin ← $BK/plugin"
-    rsync -a --delete "$BK/plugin/" "$PLUGIN_DEPLOY/"
-    echo "✅ 已回滚。重启网关后才生效（命令见 DEVELOPMENT_RULES §部署）。"
+    # ⚠️ ``accounts/`` 是**生产运行数据**（账号配置/凭据），不是代码产物：
+    #   备份里的那份可能过期，直接 --delete 会把上线后新增的账号删掉/把新配置回退。
+    #   回滚只回代码；账号配置永远保留现场。
+    rsync -a --delete --exclude 'accounts/' --exclude '__pycache__/' \
+          --exclude '*.pyc' --exclude '*.log' \
+          "$BK/plugin/" "$PLUGIN_DEPLOY/"
+    echo "✅ 已回滚（accounts/ 保留生产现状）。重启网关后才生效（命令见 DEVELOPMENT_RULES §部署）。"
     exit 0
 fi
 

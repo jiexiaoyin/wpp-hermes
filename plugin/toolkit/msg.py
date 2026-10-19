@@ -247,10 +247,18 @@ async def _maybe_auto_voice(adapter, account_id: str, client, to_wxid: str,
         clean = tts_emotion.clean_voice_text(text, cfg.max_chars)
         mood = tts_emotion.get_chat_mood(account_id, to_wxid)
         out_path = _voice_output_path(account_id)
-        await tts_emotion.synthesize_to_file_async(clean, out_path, cfg, mood=mood)
-        payload = await _send_voice_bubble(client, account_id, to_wxid, out_path)
-        if not payload.get("ok"):
-            log.warning("[WPP:%s] 自动语音发送失败: %s", account_id, payload.get("error"))
+        try:
+            await tts_emotion.synthesize_to_file_async(clean, out_path, cfg, mood=mood)
+            payload = await _send_voice_bubble(client, account_id, to_wxid, out_path)
+            if not payload.get("ok"):
+                log.warning("[WPP:%s] 自动语音发送失败: %s", account_id, payload.get("error"))
+        finally:
+            # 临时 MP3 只服务这一次发送：不删会在 /tmp 里按消息条数无限堆积。
+            try:
+                import os as _os
+                _os.remove(out_path)
+            except OSError:
+                pass
     except Exception as exc:  # noqa: BLE001 —— 语音是附加，不许影响已发出的文本
         log.warning("[WPP:%s] 自动语音合成/发送失败（文本已发出）: %s", account_id, exc)
 
@@ -401,7 +409,15 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             )
         except Exception as e:  # noqa: BLE001 —— 合成失败必须让模型看见（别发空文件）
             return {"error": f"语音合成失败: {e}"}
-        return await _send_voice_bubble(client, aid, to_wxid, out_path)
+        try:
+            return await _send_voice_bubble(client, aid, to_wxid, out_path)
+        finally:
+            # 临时 MP3 只服务这一次发送：不删会在 /tmp 里按消息条数无限堆积。
+            try:
+                import os as _os
+                _os.remove(out_path)
+            except OSError:
+                pass
 
     # sendLocation: 发送定位卡片（/Msg/ShareLocation, Type 48）
     # 对齐原 wpp sendLocation: X=纬度, Y=经度, Label/Poiname/Scale/Infourl
@@ -709,9 +725,14 @@ def register_msg_tools(ctx, adapter_getter) -> None:
                       if voice.startswith(("http", "/", "~", "data:")) else voice)
         # 厂商 /Msg/SendVoice **只收 SILK**（Type=4）。mp3 等其它格式没有转码器时
         # 降级成文件消息（TS v1.3.53 VOICE-DEGRADE 同口径），绝不把 mp3 当语音发。
+        from ..platform import silk_encoder
+
         no_query = voice.split("?")[0].lower()
         is_silk = (voice.startswith("data:audio/silk") or no_query.endswith(".silk")
-                   or params.get("formatHint") == "silk")
+                   or params.get("formatHint") == "silk"
+                   # 2026-10-19 审阅修复：模型直接传裸 SILK base64 时也要认得，
+                   # 否则明明能发语音却被降级成文件。
+                   or silk_encoder.looks_like_silk_base64(base64_str))
         if not is_silk:
             fname = voice.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "voice.mp3"
             resp = await client.send_file_via_app(to_wxid, fname, base64_str)
@@ -721,7 +742,21 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             if payload.get("ok"):
                 _persist_tool_outbound(aid, to_wxid, f"[文件] {fname}", resp, msg_type="file")
             return payload
-        resp = await client.send_voice(to_wxid, base64_str, 4, int(duration))
+        # VoiceTime 必须是**真实毫秒且非 0**（0 会被厂商以误导性的 Code=-2 拒收）。
+        # duration 是可选参数 ⇒ 缺省时从 SILK 本身算；算不出来就拒绝，别发必败请求。
+        try:
+            duration_ms = int(duration or 0)
+        except (TypeError, ValueError):
+            duration_ms = 0
+        if duration_ms <= 0:
+            duration_ms = await silk_encoder.probe_silk_base64_ms(base64_str)
+        if duration_ms <= 0:
+            return {"error": "无法确认语音时长：请传 duration（毫秒，>0）；"
+                             "VoiceTime=0 会被厂商拒收"}
+        try:
+            resp = await client.send_voice(to_wxid, base64_str, 4, duration_ms)
+        except Exception as exc:  # noqa: BLE001 —— 统一转成工具错误，别冒泡成 unknown
+            return {"error": f"语音发送失败: {exc}"}
         payload = _send_payload(resp, code=resp.get("Code"))
         if payload.get("ok"):
             _persist_tool_outbound(aid, to_wxid, "[语音]", resp, msg_type="voice")
@@ -1001,11 +1036,17 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             "type": "object",
             "properties": {
                 "toWxid": {"type": "string"},
-                "voiceUrl": {"type": "string", "description": "语音 URL 或 base64"},
-                "duration": {"type": "integer", "description": "时长毫秒"},
+                "voiceUrl": {"type": "string",
+                             "description": "语音 URL / 本地路径 / data URI / SILK base64"},
+                "voiceBase64": {"type": "string",
+                                "description": "SILK base64（与 voiceUrl 二选一）"},
+                "formatHint": {"type": "string",
+                               "description": "格式提示；已知是 SILK 时传 silk"},
+                "duration": {"type": "integer",
+                             "description": "时长毫秒（可选；缺省从 SILK 自动计算）"},
                 "account_id": {"type": "string"},
             },
-            "required": ["toWxid", "voiceUrl"],
+            "required": ["toWxid"],
         }, send_voice),
         ("wpp_send_video", "发送视频到微信", {
             "type": "object",

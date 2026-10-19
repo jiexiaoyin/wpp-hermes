@@ -173,6 +173,23 @@ def test_group_policy_off_switches(policy, reason):
                             _cfg(groupPolicy=policy)) == (False, reason)
 
 
+@pytest.mark.parametrize("policy", ["Disabled", "DISABLED", " disabled ", "Closed"])
+def test_group_policy_is_case_and_space_insensitive(policy):
+    """配置里写成 ``Disabled``/带空格时**不能**掉进后面的 mentions/心流分支。
+
+    旧实现只 ``strip()`` 不 ``lower()`` ⇒ 大小写不符的"关闭"静默变成"放行"。
+    """
+    reason = "group_disabled" if policy.strip().lower() == "disabled" else "group_closed"
+    assert T.should_process(_group(content="@测试小助理 在吗"),
+                            _cfg(groupPolicy=policy)) == (False, reason)
+
+
+def test_unknown_group_policy_fails_closed():
+    """拼错/未知取值必须按"关"处理（``unknown`` 是会返回的原因串），不能当作开放。"""
+    assert T.should_process(_group(content="@测试小助理 在吗"),
+                            _cfg(groupPolicy="disable")) == (False, "group_policy_unknown")
+
+
 def test_group_blacklist_beats_everything_including_mention():
     """群黑名单**一票否决**，@bot 也不放行（黑名单是"这个群别说话"的最终决定）。"""
     cfg = _cfg(blacklistGroups=["12345@chatroom"])

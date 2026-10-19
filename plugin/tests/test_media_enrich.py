@@ -229,6 +229,18 @@ def test_the_enriched_voice_text_matches_ts_byte_for_byte(A):
     assert _pipeline().prepare_text(msg) == "[语音] https://oss/v.silk\n[转写] 今天下午三点开会"
 
 
+def test_prepare_text_does_not_duplicate_an_enriched_transcript(A):
+    """适配器已把 ``[转写]`` 并进 ``msg.content``（落库/心流要能看到），
+    ``prepare_text`` 再补时必须去重，否则正文里出现两行转写。"""
+    msg = _msg(msg_type=MT_VOICE,
+               content="[语音] https://oss/v.silk\n[转写] 今天下午三点开会",
+               media={"oss_url": "https://oss/v.silk",
+                      "stt_text": "今天下午三点开会"})
+    text = _pipeline().prepare_text(msg)
+    assert text.count("[转写]") == 1, text
+    assert text.endswith("[转写] 今天下午三点开会")
+
+
 def test_the_enriched_file_line_does_not_get_a_file_prefix(A):
     msg = _msg(msg_type=MT_APP)
     A._inject_media_enrich_line(msg, A.KIND_FILES, "https://oss/f.xlsx",

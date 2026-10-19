@@ -724,9 +724,12 @@ class InboundPipeline:
         # 语音转写接在标记之后，记号 ``\n[转写] `` **逐字对齐 TS v1.3.22**——
         # 技能/提示词按这个记号认（见 skills/wpp-history），改它等于改对外协议。
         # ⚠️ 转写为空**不写这一行**：``[转写] `` 后面跟空串，模型会当成"语音内容是空的"。
+        # 2026-10-19：媒体富化阶段已把转写并进 ``msg.content``（落库/心流也要看得到，
+        # 见 adapter_media 的 MT_VOICE 分支）⇒ 这里只在尚未出现时补，避免模型看到两行。
         transcript = voice_transcript(msg.media)
-        if transcript:
-            text = f"{text}\n[转写] {transcript}"
+        line = f"[转写] {transcript}" if transcript else ""
+        if line and line not in text:
+            text = f"{text}\n{line}"
         return text
 
     @staticmethod

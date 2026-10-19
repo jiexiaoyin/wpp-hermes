@@ -281,6 +281,8 @@ def test_the_two_real_gates_cover_the_expected_tools():
     assert set(policy.FRIEND_CIRCLE_PUBLISH_GATE.tools) == {
         "wpp_fc_publish_images", "wpp_fc_publish_video",
         "wpp_fc_publish_text", "wpp_fc_publish_ai",
+        # 2026-10-19：评论/点赞同样是公开写入
+        "wpp_fc_comment",
     }
     #: ``wpp_fc_publish_raw`` 是**撤注册**那条路（原始 XML 发布），不在门禁名单里 ——
     #: 它连 AI 的能力面都不在，不需要门禁。两个机制别混。
@@ -305,8 +307,12 @@ def test_irreversible_write_tools_are_behind_the_admin_gate():
         "wpp_group_set_name",
         "wpp_group_set_announcement",
         "wpp_group_set_access_verify",
+        "wpp_group_del_member",
+        "wpp_group_operate_admin",
         "wpp_friend_send_request",
         "wpp_finder_send_dm",
+        "wpp_tenpay_create_redpacket",
+        "wpp_tenpay_create_pre_transfer",
         "wpp_tenpay_confirm_pre_transfer",
         "wpp_wxapp_js_login",
         "wpp_oa_auth_mp_login",

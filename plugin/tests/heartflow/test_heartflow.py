@@ -557,6 +557,22 @@ def test_prompt_context_count_comes_from_config():
     assert "## 最近5条对话历史" in p0
 
 
+def test_prompt_clips_untrusted_chat_text():
+    """群聊原文长度不可控：单条长文能把 judge prompt 撑到几万 token。
+
+    输出预算只有 300 token —— prompt 不设上限时，费用随群友的一条消息走。
+    """
+    p = HF.build_prompt(HF.HfJudgeInput(
+        chat_id="g1", content="长" * 5000, sender_name="名" * 500,
+        recent_messages="史" * 9000, last_bot_reply="回" * 900,
+    ), cfg_on())
+    assert "长" * 2000 + "…" in p
+    assert "长" * 2001 not in p
+    assert "史" * 4000 + "…" in p
+    assert "回" * 500 + "…" in p
+    assert "名" * 100 + "…" in p
+
+
 # ===== 8. parse_response =====
 
 

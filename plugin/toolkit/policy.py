@@ -1407,6 +1407,10 @@ FRIEND_CIRCLE_PUBLISH_GATE = RuntimeGate(
         "wpp_fc_publish_video",
         "wpp_fc_publish_text",
         "wpp_fc_publish_ai",
+        # 2026-10-19 审阅补齐：评论/点赞同样是**公开发布**（所有人都看得到），
+        # 且生产 friendCirclePublishEnabled=true。此前它不在任何门禁里，
+        # 一条 prompt injection 就能让 bot 在好友朋友圈下留任意文字/钓鱼链接。
+        "wpp_fc_comment",
     ),
     source="src/dispatch/agent-tools/friendcircle-meta.ts:45-47（TS 侧已整体撤出 AI 工具面）",
     caller_allow_key="friendCirclePublishAllowFrom",
@@ -1489,6 +1493,14 @@ ADMIN_TOOLS_GATE = RuntimeGate(
         "wpp_group_set_name",
         "wpp_group_set_announcement",
         "wpp_group_set_access_verify",
+        # 2026-10-19 审阅补齐：踢人 / 设管理员 / 转让群主都是**不可撤销**的群管理写操作。
+        # 此前只挡了 wpp_group_quit / wpp_group_transfer_owner，这两条漏网。
+        "wpp_group_del_member",
+        "wpp_group_operate_admin",
+        # 2026-10-19 审阅补齐：资金类此前只挡了「确认转账」，创建红包/创建转账预订单
+        # 同样能产生真实资金动作（红包创建即发出，拦不住）。整组一起挡。
+        "wpp_tenpay_create_redpacket",
+        "wpp_tenpay_create_pre_transfer",
         "wpp_tenpay_confirm_pre_transfer",
         "wpp_wxapp_js_login",
         "wpp_wxapp_js_login_customized",

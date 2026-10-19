@@ -394,6 +394,28 @@ async def test_stop_flushes_by_default_and_stop_without_flush_drops():
 
 
 @_sync
+async def test_messages_arriving_during_stop_are_handed_back_not_dropped():
+    """★ ``stop()`` 等待 flush 期间到达的消息**不许**再进缓冲。
+
+    旧实现 ``_stopped`` 在 flush 之后才置位 ⇒ 等待窗口内 ``enqueue`` 仍返 True、
+    消息进入缓冲；``flush_all`` 的快照已取过，随后 ``clear()`` 把它静默丢掉。
+    """
+    gate = asyncio.Event()
+    sink = _Sink(gate=gate)
+    db = InboundDebouncer("acct-1", sink, interval_ms=60_000)
+    db.enqueue(_msg("m1"))
+    task = asyncio.ensure_future(db.stop())
+    await asyncio.sleep(0.02)
+    assert sink.batches == [["m1"]], "stop 应已开始派发旧缓冲"
+
+    assert db.enqueue(_msg("m2")) is False, "停机中的消息必须交回调用方直通"
+    gate.set()
+    assert await asyncio.wait_for(task, _PROBE_S) == 1
+    assert sink.batches == [["m1"]], "m2 不该被塞进已清空的缓冲"
+    assert db.stopped is True
+
+
+@_sync
 async def test_stop_cancels_the_timer_so_nothing_fires_twice():
     """★ 停机后那个窗口到点**不许**再派发一次（那就是重复回复）。"""
     sink = _Sink()
