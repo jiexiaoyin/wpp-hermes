@@ -290,9 +290,14 @@ def build_style_prompt(samples: Sequence[tuple[str, str]], *, days: int) -> str:
 
 
 #: 提示词注入 / 越权话术：命中就丢掉这个字段（宁可少学）
+#:
+#: ⚠️ 「指令」不能裸过滤（2026-10-19 实修）：群风格里「指令清晰、业务术语多」
+#: 是常见描述，裸 `指令` 会把整段 tone 清空（5 张卡里 3 张 tone 为空）。只拦
+#: 「系统指令 / 以下指令 / 执行…指令」这类**带注入语境**的写法。
 _UNSAFE_RE = re.compile(
     r"(?:ignore\s+(?:all\s+)?previous|system\s*prompt|系统提示|忽略(?:之前|以上|前面|所有)"
-    r"|你现在是|你必须|开发者模式|越狱|jailbreak|prompt|assistant|指令)",
+    r"|你现在是|你必须|开发者模式|越狱|jailbreak|prompt|assistant"
+    r"|(?:系统|以下|上述|前面|之前|忽略|无视|执行|遵循|遵守)[^。！？\n]{0,6}指令)",
     re.IGNORECASE,
 )
 #: 明显辱骂：不模仿（放进 avoid 是模型的活；这里只拦 catchphrases/particles）
