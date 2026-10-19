@@ -1,5 +1,12 @@
 """私聊主动关心（轻量版）—— 老板 2026-10-19 拍板引入。
 
+## 分层（扩展边界 P0-5，2026-10-19）
+
+* **纯策略**在 :mod:`plugin.neutral.proactive_policy`：配置解析、静默时段、
+  触发判定、提示词、输出清洗、日期键。不读 DB、不调模型、不发消息。
+* **执行侧**在本模块：按账号读历史、调 judge 生成、发送、落库、sweep。
+  本模块 re-export 纯策略的公开名字，适配器与既有测试无需改动。
+
 ## 为什么是"轻量版"
 
 参考的 ``astrbot_plugin_proactive_chat`` 是一套完整的主动对话系统（多触发源、
@@ -14,25 +21,26 @@
 * 发送后落库（``outbound``），下一次 sweep 看到最后一条是 outbound 自然不再触发。
 
 默认 ``enabled=False``。代码是独立实现，没有复制参考插件的源码。
-
-## 触发条件（全部满足）
-
-1. ``enabled`` 且 ``allowFrom`` 非空、当前会话在名单里；
-2. 当前时间不在 ``quietHours``（支持跨午夜，如 23→8）；
-3. 该会话有历史消息，且**最后一条是 incoming**；
-4. 距最后一条 incoming ≥ ``minIdleHours``；
-5. 最近 24h 的 outbound 条数 < ``maxPerDay``；
-6. 该会话今天还没被本功能主动发过（用内存 ``_last_sent`` 兜底，防落库失败重发）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
-from dataclasses import dataclass
 from typing import Any, Mapping
+
+from ..neutral.proactive_policy import (  # noqa: F401 —— 兼容旧 import
+    DEFAULT_HISTORY_LIMIT,
+    DEFAULT_SYSTEM,
+    ProactiveConfig,
+    build_prompt,
+    clean_output,
+    in_quiet_hours,
+    is_eligible,
+    resolve_proactive_cfg,
+    today_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -41,185 +49,6 @@ DEFAULT_SWEEP_INTERVAL = 1800
 
 #: 判断"今天是否已主动发过"的内存记录（account_id, peer_id）→ 本地日期。
 _last_sent: dict[tuple[str, str], str] = {}
-
-#: 每条会话最多取多少条历史给模型看。
-_HISTORY_LIMIT = 20
-
-_DEFAULT_SYSTEM = (
-    "你是微信里的一个朋友，不是客服、不是助手。根据最近的聊天记录，"
-    "主动发一条自然、简短、口语化的关心消息。要求：\n"
-    "- 只输出要发送的消息正文，不要引号、不要解释、不要任何前缀；\n"
-    "- 一到两句话，不超过 {max_chars} 个字；\n"
-    "- 提到聊天里出现过的具体事情，不要泛泛地问候；\n"
-    "- 不要提 AI、机器人、助手、系统；不要连续追问，不要有推销感。"
-)
-
-
-@dataclass(frozen=True)
-class ProactiveConfig:
-    enabled: bool = False
-    allow_from: tuple[str, ...] = ()
-    max_per_day: int = 1
-    min_idle_hours: float = 20.0
-    quiet_hours: tuple[int, int] = (23, 8)
-    model: str = ""
-    max_chars: int = 120
-    history_limit: int = _HISTORY_LIMIT
-    timeout_ms: int = 8000
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _as_int(value: Any, default: int, *, lo: int | None = None,
-            hi: int | None = None) -> int:
-    try:
-        out = int(value)
-    except (TypeError, ValueError):
-        return default
-    if lo is not None and out < lo:
-        out = lo
-    if hi is not None and out > hi:
-        out = hi
-    return out
-
-
-def _as_float(value: Any, default: float, *, lo: float | None = None,
-              hi: float | None = None) -> float:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return default
-    if lo is not None and out < lo:
-        out = lo
-    if hi is not None and out > hi:
-        out = hi
-    return out
-
-
-def _str_tuple(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(str(x).strip() for x in value if x is not None and str(x).strip())
-
-
-def _parse_hour(value: Any, default: int) -> int:
-    """``"23:30"`` / ``23`` → 小时（0–23）。"""
-    if isinstance(value, str) and ":" in value:
-        value = value.split(":", 1)[0]
-    return _as_int(value, default, lo=0, hi=23)
-
-
-def resolve_proactive_cfg(raw: Any, *, ai: Any = None) -> ProactiveConfig:
-    """账号 JSON ``proactive`` 段 → 配置。坏值回落默认，绝不 raise。"""
-    cfg = _as_dict(raw)
-    ai_cfg = _as_dict(ai)
-    quiet = cfg.get("quietHours")
-    if isinstance(quiet, (list, tuple)) and len(quiet) >= 2:
-        start_h = _parse_hour(quiet[0], 23)
-        end_h = _parse_hour(quiet[1], 8)
-    else:
-        q = _as_dict(quiet)
-        start_h = _parse_hour(q.get("start"), 23)
-        end_h = _parse_hour(q.get("end"), 8)
-    model = str(cfg.get("model") or "").strip() or str(
-        ai_cfg.get("judgeModel") or "").strip()
-    return ProactiveConfig(
-        enabled=bool(cfg.get("enabled", False)),
-        allow_from=_str_tuple(cfg.get("allowFrom")),
-        max_per_day=_as_int(cfg.get("maxPerDay"), 1, lo=0, hi=10),
-        min_idle_hours=_as_float(cfg.get("minIdleHours"), 20.0, lo=1.0, hi=720.0),
-        quiet_hours=(start_h, end_h),
-        model=model,
-        max_chars=_as_int(cfg.get("maxChars"), 120, lo=10, hi=500),
-        history_limit=_as_int(cfg.get("historyLimit"), _HISTORY_LIMIT, lo=2, hi=100),
-        timeout_ms=_as_int(cfg.get("timeoutMs"), 8000, lo=1000, hi=60000),
-    )
-
-
-def in_quiet_hours(cfg: ProactiveConfig, now: float | None = None) -> bool:
-    """``quietHours`` 内返回 True；支持跨午夜（start > end，如 23→8）。"""
-    start, end = cfg.quiet_hours
-    if start == end:
-        return False
-    hour = time.localtime(now if now is not None else time.time()).tm_hour
-    if start < end:
-        return start <= hour < end
-    return hour >= start or hour < end
-
-
-def _row_at(row: Mapping[str, Any]) -> int:
-    try:
-        return int(row.get("at_sec") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def is_eligible(cfg: ProactiveConfig, rows: list[Mapping[str, Any]],
-                now: float | None = None) -> bool:
-    """纯判定（便于单测）：最后一条是对方发的、且已经静默够久。"""
-    if not cfg.enabled or not cfg.allow_from:
-        return False
-    if not rows:
-        return False
-    now_sec = int(now if now is not None else time.time())
-    last = rows[-1]
-    if str(last.get("direction") or "") != "incoming":
-        return False
-    last_at = _row_at(last)
-    if last_at <= 0:
-        return False
-    if now_sec - last_at < cfg.min_idle_hours * 3600:
-        return False
-    # 最近 24h 的出站条数（含普通回复）—— 今天已经聊过就别再主动打扰
-    out_24h = sum(1 for r in rows
-                  if str(r.get("direction") or "") == "outbound"
-                  and _row_at(r) >= now_sec - 86400)
-    return out_24h < cfg.max_per_day
-
-
-def build_prompt(rows: list[Mapping[str, Any]], cfg: ProactiveConfig) -> str:
-    """把最近历史拼成用户提示（升序：旧 → 新）。"""
-    lines: list[str] = []
-    for row in rows[-cfg.history_limit:]:
-        text = str(row.get("content") or "").strip().replace("\n", " ")
-        if not text:
-            continue
-        who = "我" if str(row.get("direction") or "") == "outbound" else "对方"
-        lines.append(f"{who}: {text[:200]}")
-    return (
-        "最近的聊天记录（旧 → 新）：\n"
-        + "\n".join(lines)
-        + "\n\n请写一条现在主动发过去的关心消息。只输出消息正文。"
-    )
-
-
-def clean_output(text: str, max_chars: int = 120) -> str:
-    """模型输出 → 可直接发送的一行文本；不合格返回空串（调用方跳过）。"""
-    out = str(text or "").strip()
-    out = re.sub(r"```.*?```", "", out, flags=re.S)
-    out = out.strip().strip("\"'“”‘’「」")
-    out = out.splitlines()[0].strip() if out else ""
-    out = re.sub(r"^(消息|回复|回复内容)[:：]\s*", "", out)
-    out = out.strip().strip("\"'“”‘’「」")
-    out = re.sub(r"\s+", " ", out).strip()
-    if not out or out in {"空", "无", "（无）", "(无)"}:
-        return ""
-    if len(out) > max_chars:
-        cut = out[:max_chars]
-        for mark in ("。", "！", "？", "!", "?", "，", ",", " "):
-            pos = cut.rfind(mark)
-            if pos >= max_chars // 2:
-                cut = cut[:pos + 1]
-                break
-        out = cut.strip()
-    return out
-
-
-def _today_key(now: float) -> str:
-    lt = time.localtime(now)
-    return f"{lt.tm_year:04d}-{lt.tm_mon:02d}-{lt.tm_mday:02d}"
 
 
 async def maybe_send_once(adapter: Any, account_id: str,
@@ -243,7 +72,7 @@ async def maybe_send_once(adapter: Any, account_id: str,
 
     sent = 0
     for peer_id in cfg.allow_from:
-        if _last_sent.get((account_id, peer_id)) == _today_key(now_sec):
+        if _last_sent.get((account_id, peer_id)) == today_key(now_sec):
             continue
         try:
             rows = await asyncio.to_thread(
@@ -265,7 +94,7 @@ async def maybe_send_once(adapter: Any, account_id: str,
             continue
         log.info("[WPP PROACTIVE] 已主动发送 → %s（%d 字）", peer_id, len(text))
         sent += 1
-        _last_sent[(account_id, peer_id)] = _today_key(now_sec)
+        _last_sent[(account_id, peer_id)] = today_key(now_sec)
         _persist(account_id, peer_id, text, resp, now_sec)
     return {"sent": sent, "reason": "ok"}
 
@@ -276,7 +105,7 @@ async def _generate(rows: list[Mapping[str, Any]], cfg: ProactiveConfig) -> str:
     try:
         raw = await call_judge(
             model=cfg.model,
-            system_prompt=_DEFAULT_SYSTEM.format(max_chars=cfg.max_chars),
+            system_prompt=DEFAULT_SYSTEM.format(max_chars=cfg.max_chars),
             user_prompt=build_prompt(rows, cfg),
             max_tokens=300,
             timeout_ms=cfg.timeout_ms,
