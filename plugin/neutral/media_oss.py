@@ -57,7 +57,7 @@ _EXT_RE = re.compile(r"\.([a-zA-Z0-9]+)$")
 _UNSAFE_NAME_RE = re.compile(r"[^\w.\-]", re.ASCII)
 
 #: ``路径 -> (过期时刻, 配置)``。**只放读成功且字段齐全的**（见 INVARIANT 第 2 条）。
-_CACHE: dict[str, tuple[float, "OssConfig"]] = {}
+_CACHE: dict[str, tuple[float, OssConfig]] = {}
 
 #: 本进程**见过**的密钥串 —— 只为日志脱敏（``_scrub``）而留，不参与任何判断。
 #: 用集合而不是遍历 ``_CACHE``：缓存会过期、会被清，而"日志里永远不出现密钥"不能有窗口期。
@@ -223,8 +223,12 @@ async def oss_upload_buffer(buf: bytes, filename: str, prefix: str, *,
     ext = m.group(1) if m else "bin"
     tmp_path = os.path.join(tempfile.gettempdir(), f"oss-upload-{secrets.token_hex(6)}.{ext}")
     try:
-        with open(tmp_path, "wb") as fh:
-            fh.write(buf)
+        # 写临时文件可能到 MB 级，放线程池（ASYNC230）
+        def _write_tmp() -> None:
+            with open(tmp_path, "wb") as fh:
+                fh.write(buf)
+
+        await asyncio.to_thread(_write_tmp)
         digest = hashlib.md5(filename.encode("utf-8")).hexdigest()[:12]
         safe_name = _UNSAFE_NAME_RE.sub("_", filename)
         if account_id and kind and key_builder is not None:

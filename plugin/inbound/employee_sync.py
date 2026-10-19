@@ -186,8 +186,8 @@ async def sync_once(
     if adapter is not None:
         try:
             self_wxid = str(adapter.account(account_id).self_wxid or "").strip()
-        except Exception:  # noqa: BLE001 —— 拿不到就只按 raw 里的
-            pass
+        except Exception as exc:  # noqa: BLE001 —— 拿不到就只按 raw 里的
+            log.debug("[WPP:%s] 取 self_wxid 失败，退回 raw.selfWxid: %s", account_id, exc)
     self_wxid = self_wxid or str(raw.get("selfWxid") or "").strip()
 
     found: list[str] = []
@@ -261,8 +261,9 @@ async def sync_forever(
                             "members": int(res.get("members") or 0),
                             "error": str(res.get("error") or ""),
                         }
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("[WPP:%s] 写全员群同步状态失败（不影响同步结果）: %s",
+                                  account_id, exc)
                 if not res.get("ok") and res.get("error"):
                     log.warning("[WPP:%s] 全员群同步未生效: %s", account_id, res["error"])
         except asyncio.CancelledError:

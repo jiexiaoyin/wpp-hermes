@@ -132,7 +132,7 @@ def _verify_v2_signature(headers: Any, raw_body: bytes, secret: str) -> bool:
     skew = _max_skew_seconds()
     if skew and abs(int(time.time() * 1000) - ts_ms) > skew * 1000:
         return False
-    base = f"{ts_raw}.{delivery}.".encode("utf-8") + raw_body
+    base = f"{ts_raw}.{delivery}.".encode() + raw_body
     expect = hmac.new(secret.encode("utf-8"), base, hashlib.sha256).hexdigest()
     return hmac.compare_digest(got.lower(), expect)
 

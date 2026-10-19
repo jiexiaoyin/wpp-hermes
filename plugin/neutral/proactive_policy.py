@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 #: 每条会话最多取多少条历史给模型看。
 DEFAULT_HISTORY_LIMIT = 20

@@ -1205,7 +1205,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             return
 
         # ③ 空消息体保护（既无正文又无媒体 —— vendor 的心跳噪声）
-        if not (msg.content or "").strip() and not msg.media:
+        if not (msg.content).strip() and not msg.media:
             log.debug("[WPP:%s] 空消息体，丢弃 %s", acct.id, msg.msg_id)
             return
 
@@ -1250,7 +1250,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         #     ``TriggerRateLimiter.guard`` 的 docstring 里。
         #     WARNING 级：``.183`` 的 journald 只采 WARNING+，用 debug 就等于"现场看不见"。
         _limit = self._trigger_limiter.guard(
-            acct.id, msg.chatroom_id or msg.peer_id, msg.from_wxid, reason)
+            acct.id, msg.peer_id, msg.from_wxid, reason)
         if not _limit.allowed:
             log.warning("[WPP:%s] 触发限速：%s 在群里触发过密（%s，hits=%d，静默至 %.0f）"
                         "⇒ 丢弃 %s", acct.id, msg.from_wxid, _limit.reason,
@@ -1350,7 +1350,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         from ..core import inbound_context
 
         with inbound_context.bind(acct.id, msg.from_wxid,
-                                  msg.chatroom_id or msg.peer_id):
+                                  msg.peer_id):
             metrics.inc_dispatch_dispatched()
             await self.handle_message(event)
 
@@ -1504,7 +1504,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         cfg = jargon_mine.resolve_jargon_cfg(acct.jargon)
         if not cfg.enabled:
             return
-        group_id = msg.chatroom_id or msg.peer_id
+        group_id = msg.peer_id
         sender = msg.from_wxid or ""
         content = msg.content or ""
 
@@ -1758,7 +1758,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             cfg = jargon_mine.resolve_jargon_cfg(acct.jargon)
             if not cfg.enabled:
                 return None
-            group_id = msg.chatroom_id or msg.peer_id
+            group_id = msg.peer_id
             return jargon_mod.build_jargon_channel_prompt(group_id, msg.content or "")
         except Exception as exc:  # noqa: BLE001 —— 注入失败不阻塞消息
             log.debug("[WPP:%s] 黑话注入失败（照常回复）: %s", acct.id, exc)
@@ -1779,7 +1779,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             cfg = style_mod.resolve_style_cfg(acct.style)
             if not cfg.enabled:
                 return None
-            group_id = msg.chatroom_id or msg.peer_id
+            group_id = msg.peer_id
             return style_mod.build_style_channel_prompt(
                 acct.id, group_id, min_confidence=cfg.min_confidence)
         except Exception as exc:  # noqa: BLE001 —— 注入失败不阻塞消息
@@ -1888,7 +1888,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             #   （同进程的其他账号/心跳/WS 一起停顿）。DB 调用一律进线程池。
             rows = await asyncio.to_thread(
                 repo_messages.list_group_messages,
-                acct.id, msg.chatroom_id or msg.peer_id,
+                acct.id, msg.peer_id,
                 limit=resolve_intent_window(acct.raw), before_sec=ts,
             )
             if not rows:
@@ -2045,17 +2045,21 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         唯一例外是**审批提示**（``is_approval_prompt``）：它是回合继续下去的必要
         交互，不是进度播报；丢了会让工具一直等到超时。
         """
-        if (metadata or {}).get("_interim_send") and not (metadata or {}).get("is_approval_prompt"):
+        # 归一化一次，后面不再重复 ``content or ""``（同一表达式写过 11 遍，
+        # 每遍都给 CC 加 1 —— 复杂度指标被重复归一化灌水，掩盖真实分支）。
+        content = content or ""
+        metadata = metadata or {}
+        if metadata.get("_interim_send") and not metadata.get("is_approval_prompt"):
             log.info("[WPP] 丢弃过程消息（_interim_send，只发最终结果）: %r",
-                     (content or "")[:80])
+                     content[:80])
             return SendResult(success=True, message_id=None)
         # 拒绝话术**静默丢弃**（agent 偶发输出"无 @提及，按群规则不回复"类话术）
         if outbound.is_rejection_phrase(content):
-            log.warning("[WPP] 丢弃拒绝话术（未发出）: %r", (content or "")[:60])
+            log.warning("[WPP] 丢弃拒绝话术（未发出）: %r", content[:60])
             return SendResult(success=True, message_id=None)
         # 网关内部机械通知**静默丢弃**（静默兜底英文报错 / 💾 自审摘要，2026-10-18 事故）
         if outbound.is_machinery_notice(content):
-            log.warning("[WPP] 丢弃内部机械通知（未发出）: %r", (content or "")[:80])
+            log.warning("[WPP] 丢弃内部机械通知（未发出）: %r", content[:80])
             return SendResult(success=True, message_id=None)
 
         try:
@@ -2066,10 +2070,10 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             # 回复 ⇒ 群里显示成"自己 @ 自己"（老板当场指出「@ 的对象也不对」）。
             # 判据在 ``outbound.strip_self_mention``。放在这里 = 分片 / 引用前缀 /
             # 心流记账 **全都看到同一份最终文本**（否则账本记的是没发出的那句）。
-            cleaned = outbound.strip_self_mention(content or "", acct.self_wxid, acct.nickname)
-            if cleaned != (content or ""):
+            cleaned = outbound.strip_self_mention(content, acct.self_wxid, acct.nickname)
+            if cleaned != content:
                 log.info("[WPP:%s] 出站摘掉指向自己的 @: %r → %r",
-                         acct.id, (content or "")[:60], cleaned[:60])
+                         acct.id, content[:60], cleaned[:60])
                 content = cleaned
                 if outbound.is_rejection_phrase(content):
                     # 上面那道早退按**原文**判；摘掉 @ 前缀才现形的拒绝话术在这里补一道。
@@ -2092,7 +2096,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
 
             # 心流交付缝（**前置**）：只有"刚判定通过、正在等这一条回复"的群才有登记，
             # 其余（含所有私聊、所有非心流群消息）是一次内存查表后返回 None。
-            plan = self._hf_pre_send(account_id, peer_id, content or "")
+            plan = self._hf_pre_send(account_id, peer_id, content)
             if plan is not None and plan.placeholder:
                 # 重复内容闸拦下 ⇒ **静默不发**。账本已按 suppressed 收敛
                 # （不占预算 / 不开窗 / 不进重复历史，INVARIANT I5），这里只需把"成功"
@@ -2118,7 +2122,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
                     #   收敛成"没人接话"。重试还会把第 1 片**再发一遍**。
                     #   ``last_id is None`` = 一片都没出去 ⇒ 才是真的"没发"，维持原样。
                     if last_id is None:
-                        self._hf_note_sent(account_id, peer_id, content or "", result)
+                        self._hf_note_sent(account_id, peer_id, content, result)
                         return result
                     log.warning("[WPP:%s] 多片发送中途失败：前 %d 片已发出（不可撤回）"
                                 "⇒ 按部分发出记账: %s", acct.id, idx, result.error)
@@ -2136,13 +2140,13 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
                     # "成功发出前几片"的形状；**只记交付缝，不记 bot 上下文** ——
                     # ``note_bot_reply`` 的 docstring 说了整句没出现就不许记，
                     # 半句记成整句会让 judge 以为"我上次已经说过了"。
-                    self._hf_note_sent(account_id, peer_id, content or "",
+                    self._hf_note_sent(account_id, peer_id, content,
                                        SendResult(success=True, message_id=last_id))
                     return result
                 last_id = result.message_id or last_id
             sent = SendResult(success=True, message_id=last_id)
-            self._hf_note_bot_reply(account_id, peer_id, content or "")
-            self._hf_note_sent(account_id, peer_id, content or "", sent)
+            self._hf_note_bot_reply(account_id, peer_id, content)
+            self._hf_note_sent(account_id, peer_id, content, sent)
             return sent
 
         except (ValueError, outbound.netguard.GuardError) as exc:

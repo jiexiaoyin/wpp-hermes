@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
@@ -110,7 +111,7 @@ class WppOutboundSender:
         self._client_getter = client_getter
 
     @classmethod
-    def from_adapter(cls, adapter: Any, account_id: str) -> "WppOutboundSender":
+    def from_adapter(cls, adapter: Any, account_id: str) -> WppOutboundSender:
         def _getter() -> Any:
             return (getattr(adapter, "_clients", {}) or {}).get(account_id)
         return cls(account_id, _getter)
@@ -187,11 +188,15 @@ class WppOutboundSender:
         from ..core import netguard
 
         client = self._client(conv)
-        src = os.path.expanduser(file_path)
+        src = os.path.expanduser(file_path)  # noqa: ASYNC240 —— 纯字符串处理，微秒级
         if not netguard.is_local_read_allowed(src):
             raise ValueError(f"文件不在可读白名单: {src[:80]}")
-        with open(src, "rb") as fh:
-            b64 = base64.b64encode(fh.read()).decode("ascii")
+        # 读文件可能到 MB 级，放线程池，别阻塞事件循环（ASYNC230）
+        def _read_b64() -> str:
+            with open(src, "rb") as fh:
+                return base64.b64encode(fh.read()).decode("ascii")
+
+        b64 = await asyncio.to_thread(_read_b64)
         resp = await client.send_file_v2(conv.chat_id, os.path.basename(src), b64)
         return self._result(resp, "send_file")
 

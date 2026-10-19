@@ -360,7 +360,7 @@ def test_the_creds_are_left_to_the_module_to_resolve() -> None:
 
 
 def test_the_group_id_is_the_chatroom_with_a_peer_fallback() -> None:
-    """``group_id = msg.chatroom_id or msg.peer_id`` —— 且这一个值喂给**四处**
+    """``group_id = msg.peer_id`` —— 且这一个值喂给**四处**
     （``update_from_message`` / ``record_message`` / ``should_trigger_mine`` / 挖掘任务）。
 
     四处各算一遍（比如挖的时候用 ``msg.peer_id``）会让统计与挖掘落在两个桶里：
@@ -370,8 +370,8 @@ def test_the_group_id_is_the_chatroom_with_a_peer_fallback() -> None:
     assigns = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
                and any(isinstance(t, ast.Name) and t.id == "group_id" for t in n.targets)]
     assert len(assigns) == 1, f"group_id 被赋值 {len(assigns)} 次"
-    assert ast.unparse(assigns[0].value) == "msg.chatroom_id or msg.peer_id"
-    assert "msg.peer_id" not in ast.unparse(fn).replace("msg.chatroom_id or msg.peer_id", ""), \
+    assert ast.unparse(assigns[0].value) == "msg.peer_id"
+    assert "msg.peer_id" not in ast.unparse(fn).replace("msg.peer_id", ""), \
         "别处不该再自己拼一次群 id"
 
     for name in ("update_from_message", "record_message", "should_trigger_mine"):

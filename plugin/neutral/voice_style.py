@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import random
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
 #: 情绪 → 中文表演指令。键与好感度模块的十种情绪一致。
 MOOD_INSTRUCTIONS: dict[str, str] = {

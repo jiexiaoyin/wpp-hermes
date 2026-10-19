@@ -77,13 +77,13 @@ from typing import Any
 from ..core.env_compat import secret_env
 from ..neutral import media_oss as _neutral
 from ..neutral.media_oss import (  # noqa: F401 —— 兼容旧 import
+    _UNSAFE_NAME_RE,
     CRED_CACHE_MAX,
     CRED_TTL_S,
     DEFAULT_ENDPOINT,
     UPLOAD_ATTEMPTS,
     UPLOAD_TIMEOUT_S,
     OssConfig,
-    _UNSAFE_NAME_RE,
     _run_ossutil,
     public_url,
     sanitize_filename_part,

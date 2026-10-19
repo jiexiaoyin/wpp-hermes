@@ -4,7 +4,7 @@
 新代码请直接 ``from ..neutral import quote_ref``。
 """
 
-from ..neutral.quote_ref import (  # noqa: F401
+from ..neutral.quote_ref import (
     GROUP_SUFFIX,
     QuoteIdentity,
     build_mention_prefix,

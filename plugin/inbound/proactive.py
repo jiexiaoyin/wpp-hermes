@@ -28,8 +28,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
-from typing import Any, Mapping
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from ..neutral.contracts import ConversationKey, ConversationStore, OutboundSender
 from ..neutral.proactive_policy import (  # noqa: F401 —— 兼容旧 import
@@ -105,7 +105,7 @@ async def maybe_send_once(
     if key_for is None:
         platform = (getattr(store, "platform", "")
                     or getattr(sender, "platform", ""))
-        def key_for(peer_id: str) -> ConversationKey:  # noqa: F811
+        def key_for(peer_id: str) -> ConversationKey:
             return ConversationKey(platform, account_id, "dm", peer_id)
 
     sent = 0

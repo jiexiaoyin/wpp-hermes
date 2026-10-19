@@ -8,7 +8,8 @@ patch **中立模块** ``plugin.neutral.jargon`` —— 本兼容层里的同名
 快照，改它不会影响实现函数读取的全局。
 """
 
-from ..neutral.jargon import (  # noqa: F401
+from ..neutral.jargon import (  # noqa: F401  # noqa: F401
+    _PURE_DIGITS_RE,
     BURST_AGE_CAP_DAYS,
     COMMON_BLOCK,
     HARD_BLOCK_RE,
@@ -25,6 +26,8 @@ from ..neutral.jargon import (  # noqa: F401
     WEIGHT_IDF,
     JargonCandidate,
     JargonStats,
+    _js_round,
+    _stats,
     build_jargon_channel_prompt,
     calc_burst_score,
     get_group_stats,
@@ -41,9 +44,4 @@ from ..neutral.jargon import (  # noqa: F401
     should_filter_candidate,
     tokenize,
     update_from_message,
-)
-from ..neutral.jargon import (  # noqa: F401
-    _PURE_DIGITS_RE,
-    _js_round,
-    _stats,
 )

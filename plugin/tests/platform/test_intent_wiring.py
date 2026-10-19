@@ -181,10 +181,13 @@ def test_h3_the_candidate_pool_excludes_the_trigger_message_itself():
     # 窗口大小走 resolver（TS `resolveGroupWindow`，1..100、默认 10），不在这里硬编码
     assert kw.get("limit") == "resolve_intent_window(acct.raw)", \
         f"limit 没走 resolver（硬编码的窗口改不动）：{kw.get('limit')}"
-    # 群 id：TS 用 peerId；py2 优先 chatroom_id（落库形态兼容见 W1）。
+    # 群 id：TS 用 peerId；py2 的 WppMessage.peer_id 已经就是
+    # ``chatroom_id or from_wxid``，所以这里直接取 ``msg.peer_id`` 与旧写法
+    # ``msg.chatroom_id or msg.peer_id`` 逐字等价（后者冗余，2026-10-19 化简）。
     # 这一支是**位置**传参（``(account_id, group_id, ...)``），所以判位置不判关键字。
     gid = kw.get("group_id") or ast.unparse(call.args[1 + offset])
-    assert gid.startswith("msg.chatroom_id"), f"群 id 取错了：{gid}"
+    assert gid.startswith("msg.chatroom_id") or gid.startswith("msg.peer_id"), \
+        f"群 id 取错了（应取这轮触发消息的会话 id）：{gid}"
     assert ast.unparse(call.args[0 + offset]) == "acct.id", \
         "第一个位置参数必须是账号 id"
 

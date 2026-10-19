@@ -613,8 +613,8 @@ try:  # pragma: no cover - 纯装配
     from .heartflow.runtime import CACHE_REGISTRY as _HF_CACHE
 
     _HF_CACHE.register("style", reset_style_cache)
-except Exception:  # noqa: BLE001
-    pass
+except Exception as exc:  # noqa: BLE001 —— 心流模块未就位时纯装配跳过
+    log.debug("风格缓存未注册到心流（模块未就位）: %s", exc)
 
 
 # ================================================================ 生成
@@ -828,7 +828,7 @@ async def sweep_loop(account_id: str, interval: int = 300) -> None:
                 await maybe_generate_style_cards(account_id)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("[WPP STYLE] sweep tick 失败（下一轮继续）: %s", exc,
                             exc_info=True)
     except asyncio.CancelledError:

@@ -4,7 +4,7 @@
 ``from ..neutral.rate_limit import ...``。
 """
 
-from ..neutral.rate_limit import (  # noqa: F401
+from ..neutral.rate_limit import (
     GUARDED_REASONS,
     MAX_BUCKETS,
     MAX_TRIGGERS,

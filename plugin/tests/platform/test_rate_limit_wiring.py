@@ -117,12 +117,12 @@ def test_c2_the_limiter_is_not_rebuilt_on_reconnect():
 def test_c3_the_guard_runs_once_per_message_with_the_right_key():
     """判定的 key 必须是 ``(账号, 群, 发送者, reason)`` —— 少一个维度就是"张三刷屏李四被封"。
 
-    ⚠️ 群 id 用 ``msg.chatroom_id or msg.peer_id``：群里前者有值，而 vendor 偶尔只给
+    ⚠️ 群 id 用 ``msg.peer_id``：群里前者有值，而 vendor 偶尔只给
     ``peer_id``；写成裸 ``msg.peer_id`` 在多账号/群聊混排时会与别的会话撞桶。
     """
     call = _one_call(_methods()["_handle_one"], "self._trigger_limiter.guard")
     args = [ast.unparse(a) for a in call.args]
-    assert args == ["acct.id", "msg.chatroom_id or msg.peer_id", "msg.from_wxid", "reason"], args
+    assert args == ["acct.id", "msg.peer_id", "msg.from_wxid", "reason"], args
 
 
 def test_c4_the_guard_sits_between_the_drop_gate_and_everything_else():

@@ -587,7 +587,7 @@ def _style_list(account_id: str, group_id: str) -> str:
             ]
             return f"📋 风格卡版本 ({group_id}):\n" + "\n".join(lines)
         rows = repo_style.list_cards(account_id)
-    except Exception as exc:  # noqa: BLE001 —— 状态页失败也要能回一条消息
+    except Exception as exc:
         log.warning("[WPP:%s] 风格卡列表读取失败: %s", account_id, exc, exc_info=True)
         return "❌ 风格卡列表读取失败（详见日志）"
     if not rows:
@@ -616,7 +616,7 @@ def _style_show(account_id: str, group_id: str) -> str:
             return f"❌ 群 {group_id} 的风格卡 JSON 已损坏（v{row.get('version')}）"
         cfg = style_learn.resolve_style_cfg(_safe_cfg(account_id).get("style"))
         body = style_learn.render_style_card(card, cfg.max_prompt_chars)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("[WPP:%s] 风格卡详情读取失败: %s", account_id, exc, exc_info=True)
         return "❌ 风格卡读取失败（详见日志）"
     return (f"📋 群 {group_id} 风格卡 v{row.get('version')} "
@@ -634,7 +634,7 @@ def _style_rollback(account_id: str, group_id: str, version_raw: str) -> str:
         return f"❌ 版本号不是整数: {version_raw}"
     try:
         new_version = repo_style.rollback_card(account_id, group_id, version)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("[WPP:%s] 风格卡回滚失败: %s", account_id, exc, exc_info=True)
         return "❌ 回滚失败（详见日志）"
     if new_version is None:
@@ -807,7 +807,7 @@ async def _sync_employees(account_id: str, *, adapter: Any = None) -> str:
     try:
         res = await employee_sync.sync_once(
             client, account_id, group_ids, adapter=adapter)
-    except Exception as exc:  # noqa: BLE001 —— 命令回执不许抛
+    except Exception as exc:
         log.warning("[WPP:%s] 全员群同步命令失败: %s", account_id, exc, exc_info=True)
         return f"❌ 全员群同步失败（本轮未改动任何名单）：{exc.__class__.__name__}（详见日志）"
     if not res.get("ok"):

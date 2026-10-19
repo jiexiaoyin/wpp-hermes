@@ -110,8 +110,8 @@ def _hook_profile_home() -> Path | None:
         current = current_secret_scope_home()
         if current:
             return Path(str(current)).expanduser().resolve()
-    except Exception:  # noqa: BLE001 —— 插件在 Hermes 进程外/旧版本
-        pass
+    except Exception as exc:  # noqa: BLE001 —— 插件在 Hermes 进程外/旧版本
+        log.debug("取 secret scope home 失败，退回 profile home: %s", exc)
     return _PROFILE_HOME
 
 
