@@ -10,8 +10,10 @@ handler）共用，所以单独成模块 —— 放任何一侧都会造成 tool
   元数据端点）。所以**解析 DNS 后二次校验 IP**，防 DNS rebinding。
 - **本地读**：``image_url`` 允许传本地路径 ⇒ 不设白名单就能读 ``/etc/passwd``、
   ``/root/.ssh/id_rsa`` 并**发到微信群里**。
-- **出站白名单**（调试用）：微信是生产环境，发出去撤不回。调试期把
-  ``WECHATPRO_SEND_ALLOWLIST`` 设成测试群 id，任何白名单外的发送**直接 raise**。
+- **统一白名单**（收发共用，2026-10-19 起）：微信是生产环境，发出去撤不回。
+  放行集合 = 账号 ``allowFrom`` / ``groupAllowFrom`` / ``adminUsers``
+  ∪ ``WECHATPRO_SEND_ALLOWLIST`` 的额外条目；名单非空时，名单外的发送**直接 raise**。
+  ``.env`` 那一项只是可选补充，加人请用 ``/user add`` 或全员群同步。
 
 ## 相对旧实现的两处修正
 
@@ -29,7 +31,9 @@ import ipaddress
 import logging
 import os
 import socket
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
@@ -352,8 +356,8 @@ def _parse_allowlist(raw: str) -> tuple[str, ...]:
     return tuple(p.strip() for p in raw.split(",") if p.strip())
 
 
-def send_allowlist(profile_home: str | None = None) -> tuple[str, ...]:
-    """``WECHATPRO_SEND_ALLOWLIST`` 解析出的白名单（逗号分隔）。未设 ⇒ 空 tuple。
+def env_allowlist(profile_home: str | None = None) -> tuple[str, ...]:
+    """``WECHATPRO_SEND_ALLOWLIST`` 解析出的**额外**条目（逗号分隔）。未设 ⇒ 空 tuple。
 
     ``profile_home`` 非空时**优先**读该 profile 自己的 ``.env``。这是给
     「没有 scope 的后台任务/cron standalone」用的：那种上下文里
@@ -381,22 +385,79 @@ def send_allowlist(profile_home: str | None = None) -> tuple[str, ...]:
     return _parse_allowlist(gate_env(SEND_ALLOWLIST_ENV))
 
 
+def send_allowlist(profile_home: str | None = None) -> tuple[str, ...]:
+    """兼容旧名：仅 env 那部分（**不是**完整生效名单，见 :func:`unified_allowlist`）。
+
+    保留它是因为工具/探针里还有调用方只想要 ``WECHATPRO_SEND_ALLOWLIST`` 这一层；
+    生产收发路径应使用 :func:`unified_allowlist`。
+    """
+    return env_allowlist(profile_home)
+
+
+def unified_allowlist(profile_home: str | None = None, accounts: Any = None) -> tuple[str, ...]:
+    """统一白名单（2026-10-19 起**收发同一份**）。
+
+    2026-10-19 老板拍板：白名单不区分进出站。一个人/群既然在账号的
+    ``allowFrom`` / ``groupAllowFrom`` / ``adminUsers`` 里，机器人主动发给他/它
+    也必须放行；否则会出现「周州能私聊机器人，机器人一转发就被拦」这种割裂。
+
+    生效集合 = ``WECHATPRO_SEND_ALLOWLIST``（额外条目，保留兼容）
+    ∪ 各已连接账号的 ``allowFrom`` / ``groupAllowFrom`` / ``adminUsers``。
+
+    ``accounts`` 由调用方传入**已连接**的账号（``Account`` 对象或任何带这三个
+    属性的对象）。``None`` 时懒加载本插件的账号文件；加载失败只记日志，不让
+    出站闸把整个发送链路拖死（此时至少还有 env 那一层）。
+    """
+    items: list[str] = list(env_allowlist(profile_home))
+    pool = accounts
+    if pool is None:
+        try:
+            from . import accounts as accounts_mod
+
+            pool = accounts_mod.load_all().values()
+        except Exception as exc:  # noqa: BLE001 —— 读不到账号文件不该让发送崩
+            log.warning("[WPP] 统一白名单：账号配置读取失败（仅用 env 那层）: %s", exc)
+            pool = ()
+    for acct in pool or ():
+        for attr in ("allow_from", "group_allow_from", "admin_users"):
+            try:
+                items.extend(getattr(acct, attr, ()) or ())
+            except Exception:  # noqa: BLE001 —— 单个账号形状不对不拖累其它账号
+                continue
+    return _dedupe_allowlist(items)
+
+
+def _dedupe_allowlist(items: Iterable[Any]) -> tuple[str, ...]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        val = str(item or "").strip()
+        if not val or val in seen:
+            continue
+        seen.add(val)
+        out.append(val)
+    return tuple(out)
+
+
 def check_outbound_allowed(peer_id: str, account_id: str = "",
                            *, allowed: tuple[str, ...] | None = None) -> None:
-    """出站白名单闸（**未设白名单时是 no-op**）。
+    """统一白名单闸（**名单为空时是 no-op**）。
 
-    调试期的保险：微信是生产环境，发出去撤不回。设了白名单后，往别处发直接 raise。
+    放行集合与入站是同一份（``allowFrom`` / ``groupAllowFrom`` / ``adminUsers``），
+    另加 ``WECHATPRO_SEND_ALLOWLIST`` 的显式条目。名单非空时，往名单外发直接 raise。
 
     ``allowed`` 允许调用方传入**连接期捕获**的白名单（见 ``WppClient``）—— 发送
     任务不一定还处在 profile scope 里，不能让它在发送时重新读一次 ambient env。
     """
-    allowed = send_allowlist() if allowed is None else tuple(allowed)
+    allowed = unified_allowlist() if allowed is None else tuple(allowed)
     if not allowed:
         return
     targets = {peer_id, f"{account_id}:{peer_id}" if account_id else peer_id}
     if targets & set(allowed):
         return
     raise GuardError(
-        f"出站被 {SEND_ALLOWLIST_ENV} 拦截：{peer_id!r} 不在白名单 {list(allowed)} 内。"
-        f"（微信是生产环境，该闸用于调试期防止误发）"
+        f"出站被统一白名单拦截：{peer_id!r} 不在名单内。"
+        f"把对方加进私聊白名单用 /user add <wxid>，群用 /group add <群id>，"
+        f"或用 /user sync 从全员群同步员工；名单外的目标不会发送。"
+        f"（微信是生产环境，发出去撤不回）"
     )

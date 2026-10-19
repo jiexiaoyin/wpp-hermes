@@ -310,6 +310,13 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         #: 群名同步句柄（``/Group/List`` → ``wpp_chatrooms``）。会话标题/群名显示依赖它；
         #: 与 sweep 一样必须随 disconnect 取消，否则重连累积轮询。
         self._name_tasks: list[asyncio.Task] = []
+        #: 全员群成员同步句柄（→ ``allowFrom``，收发共用）。同样必须随 disconnect 取消。
+        self._employee_tasks: list[asyncio.Task] = []
+        #: 全员群最近一次同步结果（给 ``/whitelist status`` 看）。
+        self._employee_sync_state: dict[str, dict[str, Any]] = {}
+        #: 出站白名单在 connect 时定版，热刷新（``/user add`` / 全员群同步）要用它
+        #: 回到同一个 profile，而不是重新猜 ambient scope。
+        self._profile_home: str | None = None
         #: W2 好感度记账的 fire-and-forget 句柄。**必须**持强引用：``asyncio`` 只对
         #: 任务持弱引用，"create_task 了就不管"的任务可能在跑完之前被 GC 掉 ——
         #: 现场只表现为"好感度有时不涨"（没有异常、没有日志、没有任何痕迹）。
@@ -438,9 +445,31 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             # 合并开关同样热生效（``merge_allowed`` 本来就读现账号；这里同步标志位）
             db.merge = bool(acct.debounce_merge.get("enabled"))
             db.merge_max_chars = acct.debounce_merge.get("maxChars") or 2000
-        log.info("[WPP:%s] 账号配置已重载（enabled=%s, 群白名单=%d, 黑名单=%d）",
-                 account_id, acct.enabled, len(acct.group_allow_from), len(acct.blacklist_groups))
+        # ★ 白名单收发共用：``/user add|del`` 或全员群同步改完 allowFrom 后，
+        #   出站那份**连接期捕获**的列表也必须一起刷新，否则「收得到、发不出」
+        #   的割裂会一直留到下一次重连。
+        self.refresh_outbound_allowlist()
+        log.info("[WPP:%s] 账号配置已重载（enabled=%s, 私聊白名单=%d, 群白名单=%d, 黑名单=%d）",
+                 account_id, acct.enabled, len(acct.allow_from),
+                 len(acct.group_allow_from), len(acct.blacklist_groups))
         return True
+
+    def refresh_outbound_allowlist(self) -> tuple[str, ...]:
+        """重算统一白名单并推给所有已连接 client。
+
+        只算**已连接**账号（``_clients`` 里的）：未连接的账号不该替一个不存在的
+        连接开门。没有任何已连接账号时退回全部账号（单测/工具态）。
+        """
+        clients = getattr(self, "_clients", {}) or {}
+        accounts = getattr(self, "_accounts", {}) or {}
+        live = [a for aid, a in accounts.items() if aid in clients]
+        self._send_allowlist = outbound.netguard.unified_allowlist(
+            profile_home=getattr(self, "_profile_home", None),
+            accounts=live or list(accounts.values()))
+        for client in clients.values():
+            client.send_allowlist = self._send_allowlist
+        log.info("[WPP] 统一白名单已刷新: %d 条", len(self._send_allowlist))
+        return self._send_allowlist
 
     def account(self, account_id: str = "") -> accounts_mod.Account:
         """取账号；空 ⇒ 默认账号。取不到 raise（**不静默兜底**，否则会串号发到别人）。"""
@@ -553,10 +582,11 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
 
             self._accounts = accounts_mod.load_all(self._extra().get("accounts"))
 
-            # ★ 出站白名单在 connect 时定版（此时仍在 profile runtime scope 内）。
+            # ★ 统一白名单在 connect 时定版（此时仍在 profile runtime scope 内）。
             #   不能等到 send() 再读：后台/cron 发送任务可能没有 scope，届时
             #   platform_gate_env 会回落根 .env，把 wpp-wechat 的六条读成 default 的一条
-            #   （2026-10-19 07:36 生产事故）。
+            #   （2026-10-19 07:36 生产事故）。真正的放行集合要等 accounts 加载完
+            #   才能算（它 = 各账号 allowFrom/groupAllowFrom/adminUsers ∪ env），见下。
             profile_home = None
             try:
                 from agent.secret_scope import current_secret_scope_home
@@ -569,10 +599,7 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                     profile_home = get_hermes_home()
                 except Exception:  # noqa: BLE001
                     profile_home = None
-            self._send_allowlist = outbound.netguard.send_allowlist(
-                profile_home=str(profile_home) if profile_home else None)
-            log.info("[WPP] 出站白名单已绑定: %d 条 (profile=%s)",
-                     len(self._send_allowlist), profile_home or "-")
+            self._profile_home = str(profile_home) if profile_home else None
 
             # 红线先炸，再谈"跳过"。两者都由 ``refusal_reason`` 返回字符串，但后果
             # 差着量级：未启用 / 无凭据是"这个账号先不连"（正常态，跳过就好），
@@ -587,6 +614,15 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
 
             connectable = [a for a in self._accounts.values()
                            if accounts_mod.refusal_reason(a) is None]
+
+            # ★ 2026-10-19 老板拍板：白名单**不区分进出站**。出站放行集合就是
+            #   入站那份（allowFrom / groupAllowFrom / adminUsers）∪ env 额外项。
+            #   只算**可连接**的账号：被红线/未启用拒掉的账号不该替一个不存在的
+            #   连接开门（同 access_policy.reportable 的口径）。
+            self._send_allowlist = outbound.netguard.unified_allowlist(
+                profile_home=self._profile_home, accounts=connectable)
+            log.info("[WPP] 统一白名单已绑定: %d 条 (profile=%s)",
+                     len(self._send_allowlist), self._profile_home or "-")
 
             if not connectable:
                 refused = {a.id: accounts_mod.refusal_reason(a) for a in self._accounts.values()}
@@ -645,6 +681,7 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
 
             self._start_sweeps(connectable)
             self._start_name_sync(connectable)
+            self._start_employee_sync(connectable)
 
             self._mark_connected()
             log.info("[WPP] 平台已连接：%d 个账号 %s（is_reconnect=%s）",
@@ -705,6 +742,13 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
         if self._name_tasks:
             await asyncio.gather(*self._name_tasks, return_exceptions=True)
         self._name_tasks.clear()
+
+        # ③c 全员群成员同步 —— 同样早于 client 关闭。
+        for task in self._employee_tasks:
+            task.cancel()
+        if self._employee_tasks:
+            await asyncio.gather(*self._employee_tasks, return_exceptions=True)
+        self._employee_tasks.clear()
 
         # ④ webhook：先停自动注册任务，再停监听（否则重试任务会在 client 关闭后继续打厂商）
         for task in self._webhook_tasks:
@@ -1093,6 +1137,38 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
             except Exception as exc:  # noqa: BLE001
                 log.warning("[WPP:%s] 群名同步启动失败（不影响收发）: %s", acct.id, exc)
 
+    def _employee_group_ids(self, account_id: str) -> list[str]:
+        """当前账号配置的全员群 id（每轮现读，命令改完不用重连）。"""
+        from ..inbound import employee_sync
+
+        acct = self._accounts.get(account_id)
+        raw = getattr(acct, "raw", None) if acct is not None else None
+        return employee_sync.group_ids_from_raw(raw) if isinstance(raw, dict) else []
+
+    def _start_employee_sync(self, connectable: list[accounts_mod.Account]) -> None:
+        """每账号起一个全员群成员同步（成员 → ``allowFrom``，收发共用）。
+
+        失败只 warn：同步失败时沿用上一次的名单，收发完全不受影响。
+        """
+        from ..inbound import employee_sync
+
+        for acct in connectable:
+            if not self._employee_group_ids(acct.id):
+                continue
+            client = self._clients.get(acct.id)
+            if client is None:
+                continue
+            try:
+                task = asyncio.create_task(
+                    employee_sync.sync_forever(
+                        client, acct.id,
+                        lambda aid=acct.id: self._employee_group_ids(aid),
+                        adapter=self),
+                    name=f"wpp-employee-sync-{acct.id}")
+                self._employee_tasks.append(task)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[WPP:%s] 全员群同步启动失败（不影响收发）: %s", acct.id, exc)
+
     # ================================================================ 入站
 
     async def _on_raw(self, acct: accounts_mod.Account, payload: dict) -> None:
@@ -1394,7 +1470,7 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
 
             # adapter=self：写配置的命令（/user /group /heartflow threshold …）写回账号
             # 文件后靠它当次生效（``commands.write_back`` → ``reload_account``）。
-            reply = commands.handle_command(acct.id, content, adapter=self)
+            reply = await commands.handle_command_async(acct.id, content, adapter=self)
         except Exception as exc:
             log.warning("[WPP:%s] filehelper 命令处理失败: %s", acct.id, exc, exc_info=True)
             return True
@@ -2813,7 +2889,11 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
             message = ""
 
         profile_home = _resolve_standalone_profile_home(acct)
-        send_allowlist = outbound.netguard.send_allowlist(profile_home=profile_home)
+        # 与 live 路径同一份统一白名单（收发共用）：allowFrom / groupAllowFrom /
+        # adminUsers ∪ env 额外项。不能只读 env，否则 standalone 又会退化成
+        # 「周州能私聊、cron 却发不出去」。
+        send_allowlist = outbound.netguard.unified_allowlist(
+            profile_home=profile_home, accounts=all_accounts.values())
         outbound.assert_outbound_allowed(peer_id, acct.id, allowed=send_allowlist)
         async with WppClient(base_url=acct.api_base_url, authcode=acct.authcode,
                              account_id=acct.id, timeout=30,

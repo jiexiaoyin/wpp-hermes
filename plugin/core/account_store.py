@@ -141,22 +141,40 @@ def write_account_key(account_id: str, key: str, value: Any) -> dict[str, Any]:
     这是命令面唯一该用的入口 —— 文件与覆盖必须一起动（见模块 docstring）。
     失败抛 :class:`AccountWriteError`（**不吞**）。
     """
-    k = str(key or "").strip()
-    if not k:
-        raise AccountWriteError("要写的键名是空的")
-    if k in FORBIDDEN_KEYS:
-        raise AccountWriteError(
-            f"拒绝写凭证键 {k!r}：它只从 env（<键>Env / WECHATPRO_*）或厂商面板来，"
-            f"命令面改它 = 改坏就收不到信")
+    return write_account_keys(account_id, {key: value})
+
+
+def write_account_keys(account_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    """**一次**原子写入多个键（同一份备份、同一次替换）。
+
+    为什么要多键入口：全员群同步要同时维护 ``allowFrom``（真正生效的名单）与
+    ``employeeAllowFrom``（自动同步的来源台账，用来在下一次同步时只移除"上次自动
+    加进去、这次已退群"的人）。分两次写会出现「名单已变、台账没变」的中间态，
+    下次同步就会把手工加的人误判成自动项。
+    """
+    cleaned: dict[str, Any] = {}
+    for key, value in (updates or {}).items():
+        k = str(key or "").strip()
+        if not k:
+            raise AccountWriteError("要写的键名是空的")
+        if k in FORBIDDEN_KEYS:
+            raise AccountWriteError(
+                f"拒绝写凭证键 {k!r}：它只从 env（<键>Env / WECHATPRO_*）或厂商面板来，"
+                f"命令面改它 = 改坏就收不到信")
+        cleaned[k] = value
+    if not cleaned:
+        raise AccountWriteError("没有要写的键")
 
     with _LOCK:
         path = account_path(account_id)
         data = read_account_json(account_id)          # 先读（读不到就不会写）
         backup = _backup(path)                        # 再备份（备不了就不写）
-        data[k] = value
+        data.update(cleaned)
         _atomic_write(path, data)
-        _clear_shadow_override(account_id, k)
-        log.info("[WPP:%s] 账号配置已写回：%s（备份 %s）", account_id, k, backup)
+        for k in cleaned:
+            _clear_shadow_override(account_id, k)
+        log.info("[WPP:%s] 账号配置已写回：%s（备份 %s）",
+                 account_id, ",".join(sorted(cleaned)), backup)
         return dict(data)
 
 

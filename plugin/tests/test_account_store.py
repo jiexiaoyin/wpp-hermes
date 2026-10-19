@@ -127,6 +127,32 @@ def test_a_new_key_is_added_without_touching_the_rest(adir, bdir):
     assert {k: v for k, v in after.items() if k != "groupAllowFrom"} == before
 
 
+def test_multi_key_write_is_one_atomic_update_with_one_backup(adir, bdir):
+    """全员群同步要同时改 allowFrom / employeeAllowFrom —— 必须一次备份、一次替换。"""
+    p = _write(adir, "default", _cfg())
+    before = _read(p)
+    S.write_account_keys("default", {
+        "allowFrom": ["boss", "staff"],
+        "employeeAllowFrom": ["staff"],
+    })
+    after = _read(p)
+    assert after["allowFrom"] == ["boss", "staff"]
+    assert after["employeeAllowFrom"] == ["staff"]
+    assert {k: v for k, v in after.items()
+            if k not in ("allowFrom", "employeeAllowFrom")} == \
+        {k: v for k, v in before.items()
+         if k not in ("allowFrom", "employeeAllowFrom")}
+    assert len(list(bdir.glob("*.pre-*"))) == 1
+
+
+def test_multi_key_write_still_refuses_credentials(adir, bdir):
+    p = _write(adir, "default", _cfg())
+    before = p.read_bytes()
+    with pytest.raises(S.AccountWriteError):
+        S.write_account_keys("default", {"allowFrom": ["x"], "authcode": "new"})
+    assert p.read_bytes() == before, "被拒的写必须一个字节都不动"
+
+
 # ==================================================== 2. 凭证：不写、不动、不落日志
 
 def test_credential_fields_are_byte_identical_after_a_write(adir, bdir):
@@ -406,9 +432,13 @@ def test_handle_one_reads_the_latest_account_snapshot():
 
 
 def test_the_command_call_site_passes_the_adapter():
-    """``_maybe_command`` 必须把 adapter 传下去，否则写回是"落地不生效"（又一句谎话）。"""
+    """``_maybe_command`` 必须把 adapter 传下去，否则写回是"落地不生效"（又一句谎话）。
+
+    2026-10-19 起走异步入口（``/user sync`` 要打厂商接口）；同步命令仍由它
+    逐字委托给 ``handle_command``。
+    """
     code = _code(_method("_maybe_command"))
-    assert "commands.handle_command(acct.id, content, adapter=self)" in code
+    assert "await commands.handle_command_async(acct.id, content, adapter=self)" in code
 
 
 def test_reload_refreshes_the_pipeline_cfg_without_rebuilding_it():

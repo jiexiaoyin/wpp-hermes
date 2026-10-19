@@ -89,9 +89,12 @@ HELP_TEXT = """可用命令：
 /mute off <群id> — 解除禁言
 /mute list — 查看禁言中的群
 /xiaowei on|off|status — 小微智能体工具开关（关着时相关工具直接拒绝执行）
-/user add|del|list [wxid...] — 私聊白名单
-/group add|del|list [群id...] — 群白名单
+/user add|del|list [wxid...] — 私聊白名单（收发共用；改了立刻对出站生效）
+/user sync — 从全员群同步员工到私聊白名单（收发同时放行）
+/group add|del|list [群id...] — 群白名单（收发共用）
 /blacklist add|del|list [群id...] — 黑名单群（一票否决，优先于群白名单）
+/whitelist status — 查看统一白名单（私聊/群/管理员/全员群/env 额外项）
+/whitelist sync — 同 /user sync（/outbound 是它的别名）
 /genpair — 生成配对码
 /pairs — 查看配对码
 /help — 显示帮助
@@ -159,6 +162,10 @@ def handle_command(account_id: str, content: str, *, adapter: Any = None) -> str
     if cmd == "/style":
         return _handle_style_command(account_id, arg_list, adapter=adapter)
 
+    # 统一白名单状态（收发同一份）。/outbound 是历史叫法的别名。
+    if cmd in ("/whitelist", "/outbound"):
+        return _handle_whitelist(account_id, arg_list, adapter=adapter)
+
     # 白名单: /user /group /blacklist（三个域共用一套批量实现，见模块 docstring）
     if cmd.lstrip("/") in _ALLOWLIST_KEYS:
         return _handle_allowlist(account_id, cmd.lstrip("/"), arg_list, adapter=adapter)
@@ -181,6 +188,26 @@ def handle_command(account_id: str, content: str, *, adapter: Any = None) -> str
         return "当前无配对码（未生成或已过期）。用 /genpair 生成。"
 
     return f"未知命令 {cmd}，/help 查看帮助"
+
+
+async def handle_command_async(account_id: str, content: str, *, adapter: Any = None) -> str:
+    """异步命令入口（网关/filehelper 用）。
+
+    只有「要打厂商接口」的命令需要异步（全员群同步），其余逐字委托
+    :func:`handle_command` —— 既有同步命令（含全部单测）行为不变。
+    """
+    if not content.startswith("/"):
+        return ""
+    parts = content.split(None, 1)
+    cmd = parts[0].lower()
+    arg_list = parse_args(parts[1] if len(parts) > 1 else "")
+    action = arg_list[0].lower() if arg_list else ""
+
+    if cmd in ("/whitelist", "/outbound") and action == "sync":
+        return await _sync_employees(account_id, adapter=adapter)
+    if cmd == "/user" and action == "sync":
+        return await _sync_employees(account_id, adapter=adapter)
+    return handle_command(account_id, content, adapter=adapter)
 
 
 # --------------------------------------------------------------------------- 内部
@@ -654,6 +681,10 @@ def _handle_allowlist(account_id: str, kind: str, args: list[str],
         body = "\n".join(f"- {x}" for x in items) if items else "(空)"
         return f"📋 {label} ({len(items)}):\n{body}"
 
+    # 全员群同步要打厂商接口 ⇒ 走 :func:`handle_command_async`（网关路径）。
+    if action == "sync" and kind == "user":
+        return "全员群同步需要异步执行：请通过网关发送 /user sync（或 /whitelist sync）"
+
     if action in ("add", "del") and targets:
         items = _allowlist_items(account_id, key)
         if items is None:
@@ -677,6 +708,115 @@ def _handle_allowlist(account_id: str, kind: str, args: list[str],
         return f"✅ {tail}"
 
     return usage
+
+
+def _employee_group_ids(account_id: str, adapter: Any = None) -> list[str]:
+    """当前账号的全员群 id（适配器在跑时每轮现读；否则读盘上那份）。"""
+    if adapter is not None:
+        fn = getattr(adapter, "_employee_group_ids", None)
+        if callable(fn):
+            try:
+                return list(fn(account_id) or [])
+            except Exception as exc:  # noqa: BLE001 —— 状态命令不许抛
+                log.debug("[WPP:%s] 读全员群配置失败: %s", account_id, exc)
+    from ..inbound import employee_sync
+
+    raw = _account_file_cfg(account_id) or {}
+    return employee_sync.group_ids_from_raw(raw)
+
+
+def _handle_whitelist(account_id: str, args: list[str], *, adapter: Any = None) -> str:
+    """``/whitelist status``（``/outbound`` 同义）：统一白名单总览。
+
+    2026-10-19 老板拍板后**没有独立的出站名单**：``allowFrom`` / ``groupAllowFrom``
+    / ``adminUsers`` 同时管收发，``WECHATPRO_SEND_ALLOWLIST`` 只是额外补充。
+    这里只印**来源与计数**；明细用 ``/user list`` ``/group list``。
+    """
+    action = args[0].lower() if args else "status"
+    if action not in ("status", "list"):
+        if action == "sync":
+            return "全员群同步需要异步执行：请通过网关发送 /whitelist sync"
+        return ("用法: /whitelist status | /whitelist sync\n"
+                "（/outbound 是 /whitelist 的别名；出站已并入统一白名单）")
+
+    allow = _allowlist_items(account_id, "allowFrom")
+    groups = _allowlist_items(account_id, "groupAllowFrom")
+    if allow is None or groups is None:
+        return UNREADABLE_CFG_MSG
+    raw = _account_file_cfg(account_id) or {}
+    admins = [str(x) for x in (raw.get("adminUsers") or []) if str(x).strip()]
+    auto = [str(x) for x in (raw.get("employeeAllowFrom") or []) if str(x).strip()]
+    group_ids = _employee_group_ids(account_id, adapter)
+
+    profile_home = getattr(adapter, "_profile_home", None) if adapter is not None else None
+    from ..core import netguard
+
+    env_extra = netguard.env_allowlist(profile_home)
+    # 用盘上这份算生效集合，避免 `adapter.account()` 解析失败时状态页空掉。
+    view = type("_WhitelistView", (), {
+        "allow_from": tuple(allow),
+        "group_allow_from": tuple(groups),
+        "admin_users": tuple(admins),
+    })()
+    effective = netguard.unified_allowlist(profile_home=profile_home, accounts=[view])
+
+    lines = [
+        "📋 统一白名单（收发同一份）",
+        f"私聊 allowFrom: {len(allow)} 人（全员群自动同步 {len(auto)} 人）",
+        f"群 groupAllowFrom: {len(groups)} 个",
+        f"管理员 adminUsers: {len(admins)} 人",
+        f"全员群: {', '.join(group_ids) if group_ids else '(未配置 employeeGroupIds)'}",
+    ]
+    state = None
+    if adapter is not None:
+        try:
+            state = (getattr(adapter, "_employee_sync_state", {}) or {}).get(account_id)
+        except Exception:  # noqa: BLE001
+            state = None
+    if state:
+        import time as _time
+
+        when = _time.strftime("%m-%d %H:%M", _time.localtime(int(state.get("at") or 0)))
+        ok = "成功" if state.get("ok") else f"失败（{state.get('error') or '见日志'}）"
+        lines.append(f"最近同步: {when} {ok}，成员 {state.get('members', 0)} 人")
+    lines.extend([
+        f".env 额外条目: {len(env_extra)} 条（WECHATPRO_SEND_ALLOWLIST，可留空）",
+        f"出站生效目标合计: {len(effective)} 个",
+        "明细: /user list · /group list",
+    ])
+    return "\n".join(lines)
+
+
+async def _sync_employees(account_id: str, *, adapter: Any = None) -> str:
+    """``/user sync`` / ``/whitelist sync``：拉全员群成员 → ``allowFrom``。
+
+    同步失败**整轮不写**（见 ``inbound/employee_sync`` 的失败处理）：宁可这一轮
+    不同步，也不能因厂商抖动把员工误删出名单。
+    """
+    from ..inbound import employee_sync
+
+    if adapter is None:
+        return "❌ 当前环境没有适配器，无法拉取厂商群成员"
+    client = (getattr(adapter, "_clients", {}) or {}).get(account_id)
+    if client is None:
+        return "❌ 账号未连接，无法拉取全员群成员（重连后再试）"
+    group_ids = _employee_group_ids(account_id, adapter)
+    if not group_ids:
+        return ("❌ 未配置全员群：请在账号 JSON 里加 "
+                "\"employeeGroupIds\": [\"<全员群id>@chatroom\"]，重连后再试")
+    try:
+        res = await employee_sync.sync_once(
+            client, account_id, group_ids, adapter=adapter)
+    except Exception as exc:  # noqa: BLE001 —— 命令回执不许抛
+        log.warning("[WPP:%s] 全员群同步命令失败: %s", account_id, exc, exc_info=True)
+        return f"❌ 全员群同步失败（本轮未改动任何名单）：{exc.__class__.__name__}（详见日志）"
+    if not res.get("ok"):
+        return f"❌ 全员群同步失败（本轮未改动任何名单）：{res.get('error') or '未知原因'}"
+    if not res.get("changed"):
+        return f"✅ 全员群同步完成：成员 {res.get('members', 0)} 人，名单无变化"
+    return (f"✅ 全员群同步完成：成员 {res.get('members', 0)} 人，"
+            f"新增 {res.get('added', 0)}，移除 {res.get('removed', 0)}"
+            f"（已写入 allowFrom，收发同时生效）")
 
 
 def _handle_xiaowei(account_id: str, args: list[str], *, adapter: Any = None) -> str:

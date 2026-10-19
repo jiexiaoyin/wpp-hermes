@@ -139,22 +139,25 @@ def test_maybe_command_delegates_to_the_pure_verdict():
         "准入判据必须走 core/filehelper_auth（自带用例与变异门），不要在这里现写"
 
 
+def _exec_call_line(fn: ast.AST) -> int:
+    """命令执行入口的行号：2026-10-19 起是 ``handle_command_async``（异步入口）。"""
+    return min(n.lineno for n in ast.walk(fn)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr in ("handle_command", "handle_command_async"))
+
+
 def test_the_gate_runs_before_the_command_is_executed():
     """判词必须排在实际执行**之前** —— 顺序反了就是"先执行后鉴权"，等于没鉴权。"""
     fn = _method("_maybe_command")
     verdict_line = _verdict_call().lineno
-    exec_line = min(n.lineno for n in ast.walk(fn)
-                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                    and n.func.attr == "handle_command")
+    exec_line = _exec_call_line(fn)
     assert verdict_line < exec_line, "先判后执行（顺序是这条修复的全部意义）"
 
 
 def test_a_non_allow_verdict_returns_before_executing():
     """非 ``ALLOW`` 的分支必须在那行之前 ``return True``（**接管并终止**，不是继续往下跑）。"""
     fn = _method("_maybe_command")
-    exec_line = min(n.lineno for n in ast.walk(fn)
-                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                    and n.func.attr == "handle_command")
+    exec_line = _exec_call_line(fn)
     guards = [n for n in ast.walk(fn)
               if isinstance(n, ast.If) and n.lineno < exec_line
               and isinstance(n.test, ast.Compare)
