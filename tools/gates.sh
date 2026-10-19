@@ -21,8 +21,24 @@ unset JUDGE_API_KEY JUDGE_BASE_URL JUDGE_FALLBACK_API_KEY JUDGE_FALLBACK_BASE_UR
       WECHATPRO_ALLOW_PRODUCTION_WXID 2>/dev/null || true
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-[ $# -ge 1 ] && ROOT=$1
+
+# 参数解析（必须在 cd 之前：第 1 个位置参数可能是树路径，也可能是 --only）
+#
+#   tools/gates.sh                     全量（10 分钟以上）
+#   tools/gates.sh /path/to/tree       指定门禁树
+#   tools/gates.sh --only 变异测试·预算  只跑名字含该关键词的项
+#   tools/gates.sh --only lint
+ONLY=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --only) ONLY="${2:-}"; shift 2 || shift ;;
+        --only=*) ONLY="${1#--only=}"; shift ;;
+        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        *) ROOT="$1"; shift ;;
+    esac
+done
 cd "$ROOT" || exit 1
+[ -n "$ONLY" ] && printf '\033[33m（--only %s：不匹配的项会标记跳过）\033[0m\n' "$ONLY"
 # 选一个**带 pytest** 的 python3。
 #
 # 为什么不能直接写 `PY=${PY:-python3}`：在 Hermes 的工具进程里，PATH 上的 python3 是
@@ -53,11 +69,22 @@ fi
 
 FAILED=""
 NPASS=0
+NSKIP=0
+NSKIP=0
 
 # run <名字> <命令...>
 run() {
     name=$1
     shift
+    if [ -n "$ONLY" ]; then
+        case "$name" in
+            *"$ONLY"*) ;;
+            *)
+                NSKIP=$((NSKIP + 1))
+                printf '  \033[2m⏭  跳过（--only %s）: %s\033[0m\n' "$ONLY" "$name"
+                return 0 ;;
+        esac
+    fi
     printf '\n\033[1m── %s\033[0m\n' "$name"
     if "$@" 2>&1; then
         NPASS=$((NPASS + 1))
@@ -649,10 +676,12 @@ if [ -n "$FAILED" ]; then
     printf '\033[31m门禁未过 —— %d 项失败:%s\033[0m\n' "$(printf '%s' "$FAILED" | grep -c '  - ')" "$FAILED"
     exit 1
 fi
-printf '\033[32m门禁全绿（%d 项）\033[0m\n' "$NPASS"
+printf '\033[32m门禁全绿（%d 项）\033[0m' "$NPASS"
+[ "$NSKIP" -gt 0 ] && printf '\033[2m｜跳过 %d 项（--only %s）\033[0m' "$NSKIP" "$ONLY"
+printf '\n'
 printf '\n⚠️  本地门禁 ≠ 真机验收。发布前还必须在 .183 上跑：\n'
 printf '     hermes plugins validate   # 依赖不缺（V3）\n'
-printf '     hermes plugins doctor     # registrations: 299 tool(s)（V6）\n'
+printf '     hermes plugins doctor     # registrations: 302 tool(s)（V6）\n'
 printf '     sh /tmp/wpp-py2-verify/tools/hermes_run.sh \\\n'
 printf '        /tmp/wpp-py2-verify/tools/probe_tool_dispatch.py /tmp/wpp-py2-verify\n'
 printf '                               # 工具**真能调**（W0：真 registry + 真 dispatch；只读）\n'
