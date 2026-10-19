@@ -32,8 +32,10 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-ADAPTER_REL = "plugin/platform/adapter.py"
-ADAPTER_CLS = "WppAdapter"
+ADAPTER_MAIN = "plugin/platform/adapter.py"          # 类骨架：_handle_one / _build_event / 模块级函数
+ADAPTER_MEDIA = "plugin/platform/adapter_media.py"   # 媒体方法（2026-10-19 拆分）
+ADAPTER_REL = ADAPTER_MEDIA
+ADAPTER_CLS = "MediaMixin"  # 类名随文件迁移
 PARSER_REL = "plugin/inbound/parser.py"
 
 #: 分支 → 该分支必须传的 kind（唯一真源是 ``adapter._OSS_KIND_TAG`` 的四个键）
@@ -52,12 +54,20 @@ def _src(rel: str) -> str:
     return (ROOT / rel).read_text(encoding="utf-8")
 
 
-def _methods(rel: str = ADAPTER_REL, cls: str = ADAPTER_CLS) -> dict[str, ast.AST]:
-    for node in ast.parse(_src(rel)).body:
-        if isinstance(node, ast.ClassDef) and node.name == cls:
-            return {n.name: n for n in node.body
-                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    raise AssertionError(f"{rel} 里找不到 class {cls}")
+def _methods(rel: str | None = None, cls: str | None = None) -> dict[str, ast.AST]:
+    """**两个文件合起来**的方法表。
+
+    2026-10-19 把媒体方法拆到 ``adapter_media.MediaMixin``：_handle_one / _build_event
+    还在 adapter.py，_fetch_media / _publish_media 已搬走。接线测试要跨两个文件看，
+    否则会按"方法不存在"误报（而不是真的接线断了）。
+    """
+    out: dict[str, ast.AST] = {}
+    for r, c in ((ADAPTER_MAIN, "WppAdapter"), (ADAPTER_MEDIA, "MediaMixin")):
+        for node in ast.parse(_src(r)).body:
+            if isinstance(node, ast.ClassDef) and node.name == c:
+                out.update({n.name: n for n in node.body
+                            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))})
+    return out
 
 
 def _fn(rel: str, name: str) -> ast.AST:
@@ -223,7 +233,7 @@ def test_the_injection_appends_and_keeps_the_ts_leading_newline() -> None:
 
     写成 ``f"{line}\\n{msg.content}"`` 就是**前缀**注入 —— 与 ``_media_tag`` 那套撞车，
     正文里两个 ``[图片]``。只查"含有 msg.content"是拦不住写反的。"""
-    inj = _fn(ADAPTER_REL, "_inject_media_enrich_line")
+    inj = _fn(ADAPTER_MAIN, "_inject_media_enrich_line")
     assigns = [n for n in ast.walk(inj) if isinstance(n, ast.Assign)
                and ast.unparse(n.targets[0]) == "msg.content"]
     assert len(assigns) == 1, f"msg.content 被写了 {len(assigns)} 次"
@@ -238,7 +248,7 @@ def test_the_injection_appends_and_keeps_the_ts_leading_newline() -> None:
 
 def test_the_injection_is_idempotent_and_writes_both_keys() -> None:
     """两个键都必须由**参数**赋值（不是字面量），且幂等闸排在赋值之前。"""
-    inj = _fn(ADAPTER_REL, "_inject_media_enrich_line")
+    inj = _fn(ADAPTER_MAIN, "_inject_media_enrich_line")
     written = {ast.unparse(n.targets[0]): ast.unparse(n.value)
                for n in ast.walk(inj) if isinstance(n, ast.Assign)}
     assert written.get("msg.media['oss_url']") == "url", written
@@ -275,7 +285,7 @@ def test_the_marker_suppression_is_the_first_thing_media_tag_does() -> None:
 def test_the_suppression_reads_the_same_key_the_adapter_writes() -> None:
     """写侧（adapter）与读侧（parser）必须是**同一个**键名 —— 这类跨模块约定
     没有任何编译器会管，改一边就是"URL 到了但标记也还在"。"""
-    written = {n.targets[0].slice.value for n in ast.walk(_fn(ADAPTER_REL, "_inject_media_enrich_line"))
+    written = {n.targets[0].slice.value for n in ast.walk(_fn(ADAPTER_MAIN, "_inject_media_enrich_line"))
                if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Subscript)
                and isinstance(n.targets[0].value, ast.Attribute)
                and n.targets[0].value.attr == "media"}

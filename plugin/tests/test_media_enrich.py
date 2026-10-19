@@ -37,6 +37,17 @@ def A(stubbed):
     return m
 
 
+@pytest.fixture(scope="module")
+def AM(stubbed):
+    """媒体方法 2026-10-19 起住在 ``platform/adapter_media.py``（MediaMixin）。
+
+    patch 必须打在**生产实际读取的模块**上：mixin 方法体内读的是
+    ``adapter_media.upload_media_bytes``，打在 ``adapter`` 上无效。
+    """
+    import plugin.platform.adapter_media as mm
+    return mm
+
+
 def _msg(content: str = "", msg_type: int = MT_IMAGE, media: dict | None = None) -> WppMessage:
     return WppMessage(
         account_id="default", msg_id="m1", from_wxid="wxid_a",
@@ -146,14 +157,14 @@ def test_a_file_line_reaches_the_content_with_its_name_and_size(A):
 # ============================================================ ③ _publish_media：上传 + 降级
 
 
-def test_publish_forwards_account_kind_bytes_and_filename(A, monkeypatch):
+def test_publish_forwards_account_kind_bytes_and_filename(A, AM, monkeypatch):
     seen: dict = {}
 
     async def fake_upload(data, filename, *, account_id, kind):
         seen.update(data=data, filename=filename, account_id=account_id, kind=kind)
         return "https://oss/a.jpg"
 
-    monkeypatch.setattr(A, "upload_media_bytes", fake_upload)
+    monkeypatch.setattr(AM, "upload_media_bytes", fake_upload)
     msg = _msg(content="看这个")
     asyncio.run(A.WppAdapter._publish_media(
         _bare(A), _Acct(), msg, kind=A.KIND_IMAGES, filename="m1.jpg", data=b"PNG"))
@@ -162,7 +173,7 @@ def test_publish_forwards_account_kind_bytes_and_filename(A, monkeypatch):
     assert msg.content == "看这个\n[图片] https://oss/a.jpg"
 
 
-def test_a_failed_upload_leaves_the_content_byte_identical(A, monkeypatch):
+def test_a_failed_upload_leaves_the_content_byte_identical(A, AM, monkeypatch):
     """★ 降级判据：没拿到 URL ⇒ 正文**一个字都不能变**、两个键一个都不许写。
 
     ``.183`` 上既没 ossutil 也没凭据 ⇒ 这条就是**现状那条路**；
@@ -171,7 +182,7 @@ def test_a_failed_upload_leaves_the_content_byte_identical(A, monkeypatch):
     async def no_url(*_a, **_k):
         return None
 
-    monkeypatch.setattr(A, "upload_media_bytes", no_url)
+    monkeypatch.setattr(AM, "upload_media_bytes", no_url)
     msg = _msg(content="看这个")
     asyncio.run(A.WppAdapter._publish_media(
         _bare(A), _Acct(), msg, kind=A.KIND_IMAGES, filename="m1.jpg", data=b"PNG"))
@@ -180,13 +191,13 @@ def test_a_failed_upload_leaves_the_content_byte_identical(A, monkeypatch):
     assert "oss_kind" not in msg.media
 
 
-def test_the_file_size_is_what_we_actually_uploaded(A, monkeypatch):
+def test_the_file_size_is_what_we_actually_uploaded(A, AM, monkeypatch):
     """文件行的字节数取 ``len(data)``，**不是**厂商声明的 ``data_len``：
     下载被截断时声明值会说谎，而这一行就是给模型看的"这文件多大"。"""
     async def fake_upload(*_a, **_k):
         return "https://oss/f.xlsx"
 
-    monkeypatch.setattr(A, "upload_media_bytes", fake_upload)
+    monkeypatch.setattr(AM, "upload_media_bytes", fake_upload)
     msg = _msg(msg_type=MT_APP)
     asyncio.run(A.WppAdapter._publish_media(
         _bare(A), _Acct(), msg, kind=A.KIND_FILES, filename="报价单.xlsx", data=b"123"))

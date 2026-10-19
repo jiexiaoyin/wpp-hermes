@@ -35,8 +35,8 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-ADAPTER_REL = "plugin/platform/adapter.py"
-ADAPTER_CLS = "WppAdapter"
+ADAPTER_REL = "plugin/platform/adapter_media.py"  # 媒体方法 2026-10-19 迁到此（adapter.py 只留类骨架）
+ADAPTER_CLS = "MediaMixin"  # 类名随文件迁移
 APP_CARD_REL = "plugin/inbound/app_card.py"
 
 #: adapter 写、app_card 读的两个键（唯一真源写在 ``app_card.mini_program_block`` 的 docstring 里）

@@ -29,6 +29,7 @@ import base64
 import json
 import logging
 import os
+from pathlib import Path
 import struct
 import sys
 import textwrap
@@ -614,7 +615,15 @@ def test_adapter_stt_failure_keeps_message_alive(monkeypatch, adapter) -> None:
 
 
 def _adapter_src(adapter) -> str:
-    return open(adapter.__file__, encoding="utf-8").read()
+    """adapter.py + adapter_media.py 的**拼接**源码。
+
+    媒体方法 2026-10-19 拆到 ``adapter_media.MediaMixin``，接线测试要能同时看到
+    调用点（adapter.py）与被调方法（adapter_media.py）。
+    """
+    main = open(adapter.__file__, encoding="utf-8").read()
+    media_path = Path(adapter.__file__).with_name("adapter_media.py")
+    media = media_path.read_text(encoding="utf-8") if media_path.exists() else ""
+    return main + "\n" + media
 
 
 def test_media_is_fetched_before_text_persist_and_heartflow(adapter) -> None:
@@ -645,7 +654,9 @@ def test_media_is_fetched_before_text_persist_and_heartflow(adapter) -> None:
     assert "media=media" in one[_i_build:_i_build + 240], \
         "取到的 (media_urls, media_types) 必须交给 _build_event（否则附件丢了）"
 
-    build = src[src.index("async def _build_event"):src.index("async def _fetch_media")]
+    _b = src.index("async def _build_event")
+    _next = src.index("\n    async def ", _b + 10)
+    build = src[_b:_next]
     assert "await self._fetch_media(" not in build, \
         "_build_event 不许自己再取一次 —— 取两次＝多下一次、多传一次（白花钱）"
 
