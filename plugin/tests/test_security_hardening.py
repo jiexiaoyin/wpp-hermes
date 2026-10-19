@@ -748,3 +748,53 @@ def test_phoneerp_query_schema_does_not_offer_userid():
     """schema 里不能再出现 userid —— 否则模型会以为权限由它决定。"""
     props = _phoneerp_handlers()["phoneerp_query"]["schema"]["properties"]
     assert "userid" not in props
+
+
+def test_group_message_identity_is_the_member_not_the_room():
+    """群聊权限必须按**发消息的员工**，不能拿群 id 当身份。
+
+    两种真实 payload 形态都要认：
+    * 新格式：``FromUserName`` 是发送者，``ChatroomId`` 是群；
+    * 旧格式：``FromUserName`` 是群，``sender_id`` 才是发送者。
+    """
+    from plugin.inbound.parser import parse_message
+
+    new_fmt = parse_message("acct-a", {
+        "FromUserName": "wxid_staff", "ChatroomId": "123@chatroom",
+        "content": "零售明细 昨天", "msgId": "m1", "MsgType": 1,
+    })
+    assert new_fmt.from_wxid == "wxid_staff"
+    assert new_fmt.chatroom_id == "123@chatroom"
+
+    old_fmt = parse_message("acct-a", {
+        "FromUserName": "123@chatroom", "sender_id": "wxid_staff",
+        "is_group": True, "content": "零售明细 昨天", "msgId": "m2", "MsgType": 1,
+    })
+    assert old_fmt.from_wxid == "wxid_staff", "群成员身份不能被群 id 覆盖"
+    assert old_fmt.chatroom_id == "123@chatroom"
+
+
+def test_group_query_passes_the_member_wxid_not_the_room(monkeypatch):
+    """按 adapter 的绑法（sender=成员，peer=群）调工具 ⇒ --userid 必须是成员。"""
+    from plugin.inbound.parser import parse_message
+
+    msg = parse_message("acct-a", {
+        "FromUserName": "wxid_staff", "ChatroomId": "123@chatroom",
+        "content": "零售明细 昨天", "msgId": "m3", "MsgType": 1,
+    })
+    calls = []
+
+    class _R:
+        returncode = 0
+        stdout = '{"ok": true}'
+        stderr = ""
+
+    monkeypatch.setattr("plugin.toolkit.phoneerp.subprocess.run",
+                        lambda argv, **kw: calls.append(argv) or _R())
+    handler = _phoneerp_handlers()["phoneerp_query"]["handler"]
+    with inbound_context.bind("acct-a", msg.from_wxid, msg.chatroom_id):
+        asyncio.run(handler(query="零售明细 昨天"))
+
+    argv = calls[0]
+    assert argv[argv.index("--userid") + 1] == "wxid_staff"
+    assert argv[argv.index("--userid") + 1] != "123@chatroom"
