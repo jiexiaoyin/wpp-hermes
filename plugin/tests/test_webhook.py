@@ -516,6 +516,17 @@ def test_start_webhook_registers_both_paths_with_the_token():
         "两条路由都得把 token 交给 server（请求侧要靠它复核一次）"
 
 
+def test_business_route_does_not_require_a_signature():
+    """business 回调 vendor **不签名**（2026-10-19 实抓无 X-Webhook-* 头）。
+
+    沿用账号 secret 时每条都 403（业务消息静默丢失，WS 不兜底所有 msgType）；
+    但 token 仍必须存在 —— 否则 token-only 退化成无凭据，上面的 fail-closed 分支会跳过注册。
+    """
+    code = _adapter_code("_start_webhook")
+    assert "secret='' if acct.webhook_path_token else acct.webhook_secret" in code, \
+        "business 路由不能强制 v2 HMAC；有路径 token 时只按 token 鉴权"
+
+
 def test_start_webhook_without_any_credential_skips_the_route():
     """没 token 又没 secret ⇒ **不注册**（并报 error），不是"注册了但放行"。"""
     fn = _adapter_method("_start_webhook")

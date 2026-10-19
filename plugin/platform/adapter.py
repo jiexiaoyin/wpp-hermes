@@ -1088,10 +1088,17 @@ class WppAdapter(MediaMixin, BasePlatformAdapter):
                 lambda payload, a=acct: self._on_raw(a, payload),
                 secret=acct.webhook_secret, path_token=acct.webhook_path_token,
             )
+            # ⚠️ business 回调**不带任何签名头**（2026-10-19 18:31 实抓：body 是
+            # wechatpad.message.v2 全量消息，headers 里没有 X-Webhook-*；vendor
+            # /Webhook/Business/Set 也没有 secret 字段）⇒ 这里若沿用账号 secret，
+            # 每条都 403、业务消息静默丢失（WS 并不兜底所有 msgType，如 payment_notice）。
+            # business 的凭据只有路径 token（21 字符 / ~84 bit，vendor 侧同样按 URL 派发）；
+            # 主 webhook 仍强制 v2 HMAC。
             self._webhook.add_path(
                 paths.business,
                 lambda payload, a=acct: self._on_raw(a, payload),
-                secret=acct.webhook_secret, path_token=acct.webhook_path_token,
+                secret="" if acct.webhook_path_token else acct.webhook_secret,
+                path_token=acct.webhook_path_token,
             )
             registered += 1
             self._webhook_accounts.add(acct.id)

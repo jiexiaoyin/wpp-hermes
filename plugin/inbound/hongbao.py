@@ -124,7 +124,7 @@ def is_red_packet_message(msg: Any) -> bool:
 
 
 def extract_red_packet_info(msg: Any) -> dict:
-    """从 raw 提取红包 ``{url, key}``（供 ``/Msg/OpenHongBao`` 用，**不自动拆**）。
+    """从 raw 提取红包 ``{url, key}``（供 ``/TenPay/OpenHongBao`` 用，**不自动拆**）。
 
     两条 vendor 路径都试；取不到就返空 dict（调用方只 log）。
     """
