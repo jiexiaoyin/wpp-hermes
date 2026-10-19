@@ -494,6 +494,43 @@ def test_repr_of_the_config_hides_the_keys():
     assert "openclaw-a" in text and "已隐去" in text
 
 
+# ============================================================ 6. 中立层注入（P0-7）
+
+def test_neutral_load_accepts_an_injected_env_dict():
+    """中立层不认 Hermes profile scope —— 调用方把读好的 dict 注入即可。"""
+    from plugin.neutral import media_oss as N
+
+    cfg = N.load_oss_config("<injected>", raw={
+        "accessKeyId": FAKE_AK, "accessKeySecret": FAKE_SK, "bucket": "b"})
+    assert cfg is not None
+    assert cfg.endpoint == N.DEFAULT_ENDPOINT
+    assert cfg.bucket == "b"
+
+
+@_sync
+async def test_neutral_upload_uses_the_injected_key_builder(monkeypatch):
+    """key 结构不再写死 ``wpp/…``：注入什么就用什么（别的通道可以有自己的前缀）。"""
+    from plugin.neutral import media_oss as N
+
+    seen: list[list[str]] = []
+
+    async def _spy(args, timeout_s):
+        seen.append(args)
+        return 0, ""
+
+    cfg = N.OssConfig(FAKE_AK, FAKE_SK, "openclaw-a", N.DEFAULT_ENDPOINT)
+    monkeypatch.setattr(N.shutil, "which", lambda _n: "/usr/bin/ossutil")
+    url = await N.oss_upload_buffer(
+        b"x", "f.jpg", "ignored", account_id="chan", kind="images",
+        key_builder=lambda acct, kind, name: f"{acct}/{kind}/{name}",
+        load_config=lambda: cfg,
+        uploader=lambda oss, path, key: N.upload_to_oss(oss, path, key,
+                                                        run_ossutil=_spy),
+    )
+    assert seen[0][3].startswith("oss://openclaw-a/chan/images/"), seen[0]
+    assert "ignored" not in url and "/chan/images/" in url
+
+
 def test_the_invariant_block_says_all_three_things():
     """不变量标记留在**源码的家**里 —— 改这一带的人必须先看到这三条。"""
     src = (Path(__file__).resolve().parents[1] / "inbound" / "media_oss.py").read_text(encoding="utf-8")
