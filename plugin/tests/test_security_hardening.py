@@ -142,6 +142,42 @@ def test_plain_tmp_files_are_allowed():
     assert netguard.is_local_read_allowed("/tmp/some-image.png") is True
 
 
+def test_sensitive_files_are_denied_even_under_tmp(tmp_path):
+    """``/tmp`` 无条件可读不等于"什么都能发" —— 凭据文件名全局拒绝。"""
+    from plugin.core import netguard
+
+    for name in (".env", ".env.local", "id_rsa", "server.pem", "credentials",
+                 "client.key", ".netrc"):
+        p = tmp_path / name
+        p.write_text("x", encoding="utf-8")
+        assert netguard.is_local_read_allowed(str(p)) is False, name
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    key = ssh / "config"
+    key.write_text("x", encoding="utf-8")
+    assert netguard.is_local_read_allowed(str(key)) is False
+    # 普通文件仍然可发（别把闸口收得没人敢用）
+    assert netguard.is_local_read_allowed(str(tmp_path / "report.pdf")) is True
+
+
+def test_scope_home_prevents_cross_profile_reads(tmp_path, monkeypatch):
+    """scope 明确时只放行**当前** profile；别的 profile 的 workspace 不读。"""
+    from plugin.core import netguard
+
+    monkeypatch.setattr(netguard, "_ALWAYS_READABLE", ())
+    home = tmp_path / "hermes"
+    for name in ("wpp-wechat", "wecom"):
+        (home / "profiles" / name / "workspace").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.setattr(netguard, "_current_profile_home",
+                        lambda: home / "profiles" / "wpp-wechat")
+    mine = home / "profiles" / "wpp-wechat" / "workspace" / "a.png"
+    other = home / "profiles" / "wecom" / "workspace" / "secret.png"
+    assert netguard.is_local_read_allowed(str(mine)) is True
+    assert netguard.is_local_read_allowed(str(other)) is False
+
+
 # ---------------------------------------------------------------- ③ SSRF
 
 
@@ -159,6 +195,17 @@ def test_endpoint_guard_rejects_literals_but_allows_domains():
             netguard.assert_endpoint_public(url)
     assert netguard.assert_endpoint_public("https://api.example.com/v1") == \
         "https://api.example.com/v1"
+
+
+@pytest.mark.parametrize("url", [
+    "http://100.64.0.1/",        # CGNAT：is_private=False 但能路由到内网设备
+    "http://198.18.0.1/",        # 基准测试网段
+])
+def test_ssrf_blocks_non_global_literal_ranges(url):
+    from plugin.core import netguard
+
+    with pytest.raises(netguard.GuardError):
+        netguard.assert_endpoint_public(url)
 
 
 def test_public_url_guard_resolves_dns(monkeypatch):
@@ -351,6 +398,9 @@ class _RecordingClient:
         self.responses = list(responses or [])
         #: ``set_webhook`` 直接把 authcode 写进请求体（TS 契约）—— 假值即可
         self.authcode = "AC"
+        #: 真 ``WppClient`` 在构造期捕获白名单；鸭子类型替身补同样的属性
+        self.send_allowlist: tuple[str, ...] = ()
+        self.account_id = "acct"
 
     async def call(self, endpoint, body=None, method="POST", *,
                    audit=True, **_kw):
@@ -476,3 +526,103 @@ def test_webhook_tool_transform_and_authcode_injection():
     endpoint, body = client.sent[0]
     assert endpoint == "/Webhook/Set"
     assert body["enabled"] is True and body["authcode"] == "AC"
+
+
+# ------------------------------------------- ⑦ 出站闸：无目标上传步骤（2026-10-19）
+
+
+def test_targetless_upload_needs_guard_targets(tmp_path, monkeypatch):
+    """白名单开着时：裸 ``/Tools/UploadFile`` 依旧 fail-closed；带 guard_targets
+    （已校验收件人）才放行；上下文里塞白名单外的收件人同样拒。"""
+    from plugin.core import netguard, outbound_guard
+
+    monkeypatch.setattr(netguard, "send_allowlist", lambda: ("wxid_boss",))
+    with pytest.raises(netguard.GuardError):
+        outbound_guard.guard("/Tools/UploadFile", {"base64": "QUJD"}, "acct")
+    with outbound_guard.guard_targets("wxid_boss"):
+        outbound_guard.guard("/Tools/UploadFile", {"base64": "QUJD"}, "acct")
+    with pytest.raises(netguard.GuardError), outbound_guard.guard_targets("wxid_victim"):
+        outbound_guard.guard("/Tools/UploadFile", {"base64": "QUJD"}, "acct")
+    # 上下文随 with 退出复位，不会泄漏给后续请求
+    assert outbound_guard._upload_targets_var.get() == ()
+
+
+def test_file_upload_carries_guard_context_only_over_upload_step():
+    """send_file_via_app 的真行为：上传步骤（体里没收件人）期间闸上下文里是**收件人**，
+    ShareLink 步骤自己带 ToWxid ⇒ 上下文已复位。没有上下文的裸上传在白名单模式下
+    仍会被 fail-closed 拒（上一条测试钉住）。"""
+    import asyncio as _aio
+    from plugin.core import netguard, outbound_guard
+    from plugin.core.api_client import WppClient
+
+    monkey_calls: list = []
+
+    class _CtxProbe(_RecordingClient):
+        async def call(self, endpoint, body=None, method="POST", max_retries=2, *, audit=True):
+            monkey_calls.append((endpoint, outbound_guard._upload_targets_var.get()))
+            return await super().call(endpoint, body, method=method, max_retries=max_retries, audit=audit)
+
+    net_send_allowlist = netguard.send_allowlist
+    try:
+        netguard.send_allowlist = lambda: ("wxid_boss",)
+        client = _CtxProbe([{"Success": True, "Code": 0, "Data": {"mediaId": "MID-1"}},
+                            {"Success": True, "Code": 0, "Data": {}}])
+        # 真客户端在构造期捕获白名单；替身手动补上（发送任务掉 scope 后也不重读 env）
+        client.send_allowlist = ("wxid_boss",)
+        _aio.run(WppClient.send_file_via_app(client, "wxid_boss", "报表.pdf", "QUJD", 0))
+    finally:
+        netguard.send_allowlist = net_send_allowlist
+    assert monkey_calls == [("/Tools/UploadFile", ("wxid_boss",)),
+                            ("/Msg/ShareLink", ())], monkey_calls
+
+
+def test_file_xml_escapes_ext_and_sizes_without_decoding():
+    """``fileext`` 来自**文件名**，同样要过 XML 转义；``totallen`` 用长度算，不 decode。"""
+    from plugin.core.api_client import WppClient
+
+    client = _RecordingClient([{"Code": 0, "Data": {"mediaId": "MID-1"}},
+                               {"Code": 0, "Data": {}}])
+    asyncio.run(WppClient.send_file_via_app(client, "wxid_a", "坏.<x&y>", "QUJD"))
+    xml = client.sent[1][1]["Xml"]
+    assert "fileext=&lt;x&amp;y&gt;" in xml
+    assert "<fileext>&lt;x&amp;y&gt;</fileext>" in xml
+    assert "<totallen>3</totallen>" in xml, "QUJD 解码后 3 字节，且不许为算它去 b64decode"
+
+
+def test_oversized_file_is_rejected_before_upload(monkeypatch):
+    """超限必须在**上传前**拒 —— 否则 267MB base64 已经发到 vendor 了才发现。"""
+    import plugin.core.api_client as api
+
+    monkeypatch.setattr(api, "_MAX_B64_JSON_BYTES", 8)
+    client = _RecordingClient()
+    with pytest.raises(api.WppApiError) as exc:
+        asyncio.run(api.WppClient.send_file_via_app(
+            client, "wxid_a", "a.bin", "QUJDQUJDQUJD"))
+    assert exc.value.code == "file_too_large"
+    assert client.sent == [], "一个请求都不该发出去"
+
+
+# ------------------------------------------- ⑧ profile workspace 可读（HERMES_PROFILE 缺失）
+
+
+def test_profile_workspace_readable_without_profile_env(tmp_path, monkeypatch):
+    """多 profile 网关不带 HERMES_PROFILE ⇒ 旧白名单只放行 ~/.hermes/workspace，
+    profile 自己的 workspace/cache 全被拒（wpp_send_image 从 profile 目录发图必挂）。
+    修复后：profiles/*/（workspace|cache|tmp）可读；凭据目录照旧永远拒。"""
+    from plugin.core import netguard
+
+    home = tmp_path / ".hermes"
+    ws = home / "profiles" / "wpp-wechat" / "workspace" / "media"
+    ws.mkdir(parents=True)
+    img = ws / "x.jpg"
+    img.write_bytes(b"x")
+    cred = home / "profiles" / "wpp-wechat" / ".env"
+    cred.write_text("SECRET=1")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    # ⚠️ ``tmp_path`` 在 /tmp 下，而 ``_ALWAYS_READABLE`` 无条件放行 /tmp —— 不剥掉它，
+    #    「profile 根目录的 .env 被拒」这条断言会因测试目录本身在 /tmp 而假红
+    #    （实现没毛病：生产路径 /root/.hermes/profiles/*/.env 不在 /tmp，实测为 False）。
+    monkeypatch.setattr(netguard, "_ALWAYS_READABLE", ())
+    assert netguard.is_local_read_allowed(str(img)) is True
+    assert netguard.is_local_read_allowed(str(cred)) is False

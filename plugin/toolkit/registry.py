@@ -142,6 +142,12 @@ def register_generic_tools(ctx, adapter_getter, tool_defs: list[dict]) -> int:
 
         endpoint = td["endpoint"]
         method = td.get("method", "POST")
+        # ★ 2026-10-19：只接受本工具 schema 声明过的参数。模型多塞的键（例如给
+        #   /Msg/StartAutoSync 塞一个白名单内的 ``ToWxid`` 当诱饵）原先会原样进
+        #   请求体：厂商忽略未知键、照做 TargetURL，而出站闸只看到那个诱饵目标 ⇒
+        #   整道白名单被绕过。schema 外参数一律丢弃并留 WARNING，闸随后按
+        #   「无目标 ⇒ 拒绝」fail-closed。
+        allowed_keys = frozenset(td.get("params", {})) | {"account_id"}
 
         # ⚠️ 2026-10-02 修掉第二个**静默**缺陷（与 hermes_contract 的调用契约同因）：
         #    原来签名是 ``_handler(adapter_getter=noop_adapter_getter, endpoint=…, …)``
@@ -154,7 +160,8 @@ def register_generic_tools(ctx, adapter_getter, tool_defs: list[dict]) -> int:
         #    同理）：handler 在循环结束后才被调用，直接引用循环变量 ``td`` 会闭包晚绑定到
         #    **最后一条**定义上 —— 那就是"每条工具都按别人的规则整形"的静默错绑。
         async def _handler(endpoint=endpoint, method=method,
-                           transform=td.get("transform"), **params):
+                           transform=td.get("transform"),
+                           allowed_keys=allowed_keys, tool_name=td["name"], **params):
             adapter = adapter_getter()
             if not adapter:
                 return "adapter 未就绪"
@@ -163,7 +170,11 @@ def register_generic_tools(ctx, adapter_getter, tool_defs: list[dict]) -> int:
             if not client:
                 return (f"账号 {account_id} 未连接"
                         f"（已连接: {sorted(adapter._clients or {})}）")
-            body = {k: v for k, v in params.items() if v is not None}
+            unknown = sorted(k for k in params if k not in allowed_keys)
+            if unknown:
+                log.warning("[WPP] 工具 %s 收到 schema 外参数，已丢弃: %s", tool_name, unknown)
+            body = {k: v for k, v in params.items()
+                    if v is not None and k in allowed_keys}
             # 可选「请求体整形」：个别厂商端点的真实契约 schema 表达不了（二选一字段、
             # 金额 number→两位小数字符串、剔除线上 model 不存在的死字段）。规则由策略层
             # ``toolkit/policy.py`` 以纯函数挂上，生成物与 schema 都保持不动。

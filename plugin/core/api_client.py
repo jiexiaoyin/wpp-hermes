@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import re
@@ -57,6 +58,33 @@ log = logging.getLogger(__name__)
 
 #: 文件下载上限（200MB）—— 防 vendor 返回超大数据把进程打 OOM
 MAX_FILE_BYTES = 200 * 1024 * 1024
+
+#: JSON 响应体上限（32MB）—— ``resp.text()`` 会把 chunked/无 Content-Length 的
+#: 响应整包读进内存，一个畸形/恶意响应就能把事件循环打 OOM。
+_MAX_JSON_BYTES = 32 * 1024 * 1024
+
+#: ``_post_json_b64`` 的 JSON 外壳上限：200MB 文件 base64 后约 267MB。
+_MAX_B64_JSON_BYTES = MAX_FILE_BYTES * 4 // 3 + 1024 * 1024
+
+
+async def _read_capped(resp, cap: int) -> bytes | None:
+    """**边读边判**的响应读取；超过 ``cap`` 返回 ``None``（不把流读进内存）。
+
+    与 ``netguard.safe_fetch_url`` 同一原则：只看 ``Content-Length`` 挡不住
+    chunked/缺头响应。鸭子类型响应没有 ``content`` 时退回 ``read()`` 并复核长度。
+    """
+    content = getattr(resp, "content", None)
+    if content is None:
+        # 鸭子类型替身（单测）：优先 read()，只有 text() 时退回 text()。
+        reader = getattr(resp, "read", None)
+        raw = (await reader()) if reader is not None else (await resp.text()).encode("utf-8")
+        return raw if len(raw) <= cap else None
+    buf = bytearray()
+    async for chunk in content.iter_chunked(64 * 1024):
+        buf.extend(chunk)
+        if len(buf) > cap:
+            return None
+    return bytes(buf)
 
 #: 已知语义特殊的端点：``Code != 0`` **不代表调用失败**，豁免判定
 _IGNORE_CODE_ENDPOINTS = frozenset({"/Msg/Quote"})
@@ -115,17 +143,25 @@ def _decode_b64(text: str) -> bytes | None:
         return None
 
 
-def _bind_endpoint(endpoint: str, body: dict, method: str) -> tuple[str, dict]:
-    """把路径占位符与 GET query 收进 URL，返回 ``(endpoint, 剩余 body)``。
+def _bind_endpoint(endpoint: str, body: dict,
+                   method: str) -> tuple[str, dict, tuple[str, ...]]:
+    """把路径占位符与 GET query 收进 URL，返回 ``(endpoint, 剩余 body, 路径目标)``。
 
     路径占位符只认 ``{name}`` 形式（XiaoWei 会话端点）。名单里的键是**请求参数**，
     不是请求体字段 —— 取走后不能再出现在 body 里。
+
+    第三个返回值是**被移出 body 的路径值**：出站闸只检查 body 的话，
+    ``/XiaoWei/.../{session_id}/Messages`` 这类端点的目标就落在闸外 ——
+    请求体里放一个白名单内的诱饵键即可放行任意路径目标（2026-10-19 审阅）。
     """
     body = dict(body)
+    path_targets: list[str] = []
     if "{" in endpoint:
         def _replace(match: re.Match[str]) -> str:
             key = match.group(1)
             value = body.pop(key, "")
+            if value is not None and str(value).strip():
+                path_targets.append(str(value).strip())
             return quote("" if value is None else str(value), safe="")
 
         endpoint = re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", _replace, endpoint)
@@ -143,7 +179,7 @@ def _bind_endpoint(endpoint: str, body: dict, method: str) -> tuple[str, dict]:
         if query:
             endpoint = f"{endpoint}{'&' if '?' in endpoint else '?'}{query}"
         body = {}
-    return endpoint, body
+    return endpoint, body, tuple(path_targets)
 
 
 def _content_disposition_name(header: str) -> str:
@@ -190,12 +226,19 @@ class WppClient:
         account_id: str = "",
         timeout: int = 30,
         audit: bool = True,
+        send_allowlist: tuple[str, ...] | None = None,
     ) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self.authcode = authcode or ""
         self.account_id = account_id
         self.timeout = timeout
         self.audit = audit
+        #: 出站白名单**在构造时捕获**（连接发生在 profile scope 内）。发送任务
+        #: （cron / 后台协程）不一定还在同一个 scope 里，若在发送时重新读 ambient env，
+        #: 会回落到根 ``.env`` —— 2026-10-19 07:36 的私聊回复就是这样被拒两次的。
+        if send_allowlist is None:
+            send_allowlist = outbound_guard.netguard.send_allowlist()
+        self.send_allowlist: tuple[str, ...] = tuple(send_allowlist)
         #: ``loop -> ClientSession``。会话是 **loop-bound** 的（aiohttp 的硬约束）：
         #: 同一个 WppClient 会被 adapter 的 loop 与工具调用的 loop 同时用，共用一个
         #: 会话必炸（"Timeout context manager should be used inside a task" /
@@ -292,7 +335,8 @@ class WppClient:
 
     # -------------------------------------------------------------- URL/头
 
-    def _raw_url(self, endpoint: str, body: Any = None) -> str:
+    def _raw_url(self, endpoint: str, body: Any = None,
+                 path_targets: tuple[str, ...] = ()) -> str:
         """``{base}/api{endpoint}?authcode=<authcode>`` —— 鉴权的 query 那一半。
 
         所有请求（业务 + 下载）都走这里，**没有例外** —— 旧实现有 9 个下载方法
@@ -302,8 +346,13 @@ class WppClient:
         忘了过闸"在结构上不可能发生 —— 299 个工具（含通用端点表）、适配器、standalone
         全都经过本方法。判据本身见 :mod:`plugin.core.outbound_guard`（未设白名单时是
         no-op，故生产行为不变）。
+
+        ``path_targets`` 是 ``_bind_endpoint`` 从 body 移到 URL 的收件人；不传给闸就等于
+        路径目标不受核对（2026-10-19 审阅）。
         """
-        outbound_guard.guard(endpoint, body, self.account_id)
+        outbound_guard.guard(endpoint, body, self.account_id,
+                             allowed=self.send_allowlist,
+                             path_targets=path_targets)
         ep = endpoint if endpoint.startswith("/") else f"/{endpoint}"
         url = f"{self.base_url}/api{ep}"
         if self.authcode:
@@ -379,7 +428,7 @@ class WppClient:
           ``_request`` 对 GET 直接丢掉 body，导致带参 GET 端点永远只查默认值。
         """
         method = method.upper()
-        endpoint, body = _bind_endpoint(endpoint, body or {}, method)
+        endpoint, body, path_targets = _bind_endpoint(endpoint, body or {}, method)
         # ★ 写端点**一律不重试**（2026-10-18 审阅修）。超时/连接断时无法区分
         #   "请求没到"和"请求到了、响应丢了"；重试后者的代价是第二条真实微信消息
         #   （不可撤回）。分类复用出站闸的写词表 —— 通用端点表里的 216 个端点
@@ -390,16 +439,18 @@ class WppClient:
         return await self._request(
             endpoint, body,
             method=method, max_retries=max_retries, audit=audit,
+            path_targets=path_targets,
         )
 
     async def _request(
         self, endpoint: str, body: dict, *,
         method: str, max_retries: int, audit: bool = True,
+        path_targets: tuple[str, ...] = (),
     ) -> dict:
         import aiohttp  # 延迟导入，见模块 docstring
 
         session = await self._acquire()
-        url = self._raw_url(endpoint, body)
+        url = self._raw_url(endpoint, body, path_targets)
         headers = self._headers()
         is_get = method == "GET"
         # GET 退避比 POST 更保守（0.3*attempt vs 0.5*2^n）
@@ -413,7 +464,12 @@ class WppClient:
                     method, url, json=None if is_get else body, headers=headers,
                     timeout=aiohttp.ClientTimeout(total=self.timeout),
                 ) as resp:
-                    text = await resp.text()
+                    raw = await _read_capped(resp, _MAX_JSON_BYTES)
+                    if raw is None:
+                        raise WppApiError(
+                            "response_too_large",
+                            f"{endpoint} -> 响应超过 {_MAX_JSON_BYTES} 字节上限", endpoint)
+                    text = raw.decode("utf-8", errors="replace")
                     status = resp.status
                     if status != 200:
                         err = WppApiError(f"http_{status}",
@@ -508,8 +564,10 @@ class WppClient:
                     except ValueError:
                         pass
                 content_type = (resp.headers.get("Content-Type") or "").lower()
-                raw = await resp.read()
+                raw = await _read_capped(resp, cap)
                 if not raw:
+                    if raw is None:
+                        log.warning("[WPP] %s 响应超过上限 %s，拒绝", endpoint, cap)
                     return None
                 if accept_json_b64 and "json" in content_type:
                     try:
@@ -537,8 +595,13 @@ class WppClient:
                 if resp.status != 200:
                     log.warning("[WPP] %s HTTP %s", endpoint, resp.status)
                     return None
+                raw = await _read_capped(resp, _MAX_B64_JSON_BYTES)
+                if raw is None:
+                    log.warning("[WPP] %s 响应超过 JSON 上限 %s，拒绝",
+                                endpoint, _MAX_B64_JSON_BYTES)
+                    return None
                 try:
-                    data = json.loads(await resp.text())
+                    data = json.loads(raw.decode("utf-8", errors="replace"))
                 except json.JSONDecodeError:
                     return None
                 return _decode_b64(_extract_b64(data.get("Data") or data))
@@ -576,8 +639,10 @@ class WppClient:
                             return None
                     except ValueError:
                         pass
-                raw = await resp.read()
-                if not raw or len(raw) > cap:
+                raw = await _read_capped(resp, cap)
+                if not raw:
+                    if raw is None:
+                        log.warning("[WPP] %s 响应超过上限 %s，拒绝", endpoint, cap)
                     return None
                 return {
                     "content": raw,
@@ -805,10 +870,22 @@ class WppClient:
         ``/Msg/UploadFile`` 端点**不存在**（swagger 只有 ``/Tools/UploadFile``），
         调用必然 404/``Code=-1``。
         """
-        import base64 as _b64
+        # ★ 上限必须在**上传之前**判：放在上传后等于先把 267MB 的 base64 塞进
+        #   请求体发出去，再在本地说"太大了"。
+        if len(file_base64 or "") > _MAX_B64_JSON_BYTES:
+            raise WppApiError("file_too_large",
+                              f"文件超过 {MAX_FILE_BYTES} 字节上限"
+                              f"（base64 {len(file_base64)} 字符）",
+                              endpoint="/Tools/UploadFile")
 
-        up = await self.call("/Tools/UploadFile", {"base64": file_base64}, audit=False)
-        media_id = str((up.get("Data") or {}).get("mediaId") or "")
+        # 上传步骤体里没有收件人 ⇒ 用 guard_targets 把**已校验收件人**带进闸的核对
+        #   （白名单开着时裸 UploadFile 会被 fail-closed 拒掉，2026-10-19 实测）。
+        with contextlib.ExitStack() as _stack:
+            if self.send_allowlist:
+                _stack.enter_context(outbound_guard.guard_targets(
+                    to_wxid, allowed=self.send_allowlist, account_id=self.account_id))
+            up = await self.call("/Tools/UploadFile", {"base64": file_base64}, audit=False)
+            media_id = str((up.get("Data") or {}).get("mediaId") or "")
         if not media_id:
             return {"Success": False, "Code": -2,
                     "CodeValue": "UPLOAD_NO_MEDIA_ID", "Data": up.get("Data")}
@@ -817,13 +894,16 @@ class WppClient:
             return (str(s).replace("&", "&amp;").replace("<", "&lt;")
                     .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
 
+        # ★ 旧实现为了算 ``totallen`` 直接 ``b64decode`` 整串：200MB 文件会在事件
+        #   循环里同步分配 ~200MB 字节串（解码期间还占着 CPU）—— 只是要一个展示
+        #   字段，不值得。按 base64 长度纯算术估算即可。
         size = int(file_size or 0)
         if size <= 0:
-            try:
-                size = len(_b64.b64decode(file_base64, validate=False))
-            except Exception:  # noqa: BLE001 —— 尺寸只是展示字段，算不出就给 0
-                size = 0
+            # 纯算术估算解码后长度（等价于 ``len(b64decode(s))``，但不分配内存）。
+            pad = 2 if file_base64.endswith("==") else 1 if file_base64.endswith("=") else 0
+            size = max(0, len(file_base64) * 3 // 4 - pad)
         ext = (file_name.rsplit(".", 1)[-1] if "." in file_name else "dat").lower()
+        ext = esc(ext)   # ext 直接来自文件名 ⇒ 同样可能带 ``&``/``<``（XML 注入）
         xml = (
             '<appmsg appid="wxfile" sdkver="0">'
             f"<title>{esc(file_name)}</title><des></des><action>view</action><type>6</type>"

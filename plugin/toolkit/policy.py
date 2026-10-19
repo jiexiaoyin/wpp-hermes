@@ -1470,11 +1470,38 @@ ADMIN_TOOLS_GATE = RuntimeGate(
         # 不可撤回的关系链操作
         "wpp_friend_delete",
         "wpp_friend_blacklist",
+        "wpp_friend_send_request",
+        "wpp_finder_send_dm",
+        "wpp_qw_add",
+        "wpp_qw_apply",
         "wpp_group_quit",
+        "wpp_group_transfer_owner",
+        "wpp_group_add_member",
+        "wpp_group_invite_member",
         "wpp_oa_quit",
         "wpp_wxapp_delete_oauth",
+        # ★ 2026-10-19：群发/群设置/资金/授权/账号资料 —— 与原管理面同一风险等级。
+        #   群发尤其危险：一次请求打 N 个群且撤不回（handler 另有 64 个目标硬上限）；
+        #   转账确认动钱；JSLogin/AuthMpLogin 是第三方授权入口（钓鱼/接管）。
+        "wpp_group_mass_text",
+        "wpp_group_create",
+        "wpp_group_facing_create",
+        "wpp_group_set_name",
+        "wpp_group_set_announcement",
+        "wpp_group_set_access_verify",
+        "wpp_tenpay_confirm_pre_transfer",
+        "wpp_wxapp_js_login",
+        "wpp_wxapp_js_login_customized",
+        "wpp_oa_auth_mp_login",
+        "wpp_user_set_privacy",
+        "wpp_user_add_me_methods",
+        "wpp_user_update_profile",
+        "wpp_user_set_alias",
+        "wpp_user_upload_headimage",
+        "wpp_user_send_verify_code",
     ),
-    source="2026-10-18 安全审阅 P0-2（webhook/auto-sync/登录/凭据面默认关闭）",
+    source="2026-10-18 安全审阅 P0-2（webhook/auto-sync/登录/凭据面默认关闭）；"
+           "2026-10-19 补齐群发/群管理/资金/授权/资料类写工具",
 )
 
 #: 全部运行期门禁。顺序无意义；**同一工具被两条门禁认领**会在建索引时直接抛

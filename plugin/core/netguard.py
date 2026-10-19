@@ -40,6 +40,22 @@ DEFAULT_MAX_BYTES = 200 * 1024 * 1024
 #: 无条件允许的临时目录
 _ALWAYS_READABLE = ("/tmp/", "/var/tmp/")
 
+#: **任何目录**下一律拒绝的敏感文件名/后缀（含 /tmp —— 否则 ``/tmp/.env``、
+#: ``/tmp/id_rsa`` 都能被当成"图片"发进微信群）。
+#: 只按**文件名/路径段**判断，不做内容嗅探：漏判的代价是"本可发但被拒"，
+#: 过度放行的代价是"凭据发到生产群且撤不回"。
+_SENSITIVE_NAMES = frozenset({
+    ".netrc", ".pgpass", ".git-credentials", ".my.cnf",
+    "credentials", "authcode", "authcodes",
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+})
+_SENSITIVE_SUFFIXES = (
+    ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx",
+)
+_SENSITIVE_DIR_PARTS = frozenset({
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".password-store",
+})
+
 #: 出站白名单 env（**调试用**；未设则不限制）
 SEND_ALLOWLIST_ENV = "WECHATPRO_SEND_ALLOWLIST"
 
@@ -79,6 +95,41 @@ def _denied_dirs() -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
+def _current_profile_home() -> Path | None:
+    """当前 task 的 secret scope home（拿不到 ⇒ ``None``）。
+
+    只做**软依赖**：插件单测/进程外 import 时 ``agent.secret_scope`` 不存在，
+    这时退回 env 推导。任何异常都当"没有 scope"处理，读取白名单不能因为
+    Hermes 内部接口变化而整条报错。
+    """
+    try:
+        from agent.secret_scope import current_secret_scope_home
+    except ImportError:
+        return None
+    try:
+        raw = current_secret_scope_home()
+    except Exception:  # noqa: BLE001 —— 读白名单绝不允许把工具打挂
+        return None
+    if not raw:
+        return None
+    try:
+        p = Path(os.path.expanduser(str(raw)))
+    except (TypeError, ValueError):
+        return None
+    return p if p.is_absolute() else None
+
+
+def _is_sensitive_path(real: str) -> bool:
+    """文件名/路径段是否属于凭据类（**对白名单内所有目录生效**，含 /tmp）。"""
+    p = Path(real)
+    if {part.lower() for part in p.parts} & _SENSITIVE_DIR_PARTS:
+        return True
+    name = p.name.lower()
+    if name == ".env" or name.startswith(".env."):
+        return True
+    return name in _SENSITIVE_NAMES or name.endswith(_SENSITIVE_SUFFIXES)
+
+
 def readable_dirs() -> tuple[str, ...]:
     """允许读取的本地目录（**已 realpath 规范化**，带尾斜杠）。"""
     dirs: list[str] = list(_ALWAYS_READABLE)
@@ -86,12 +137,39 @@ def readable_dirs() -> tuple[str, ...]:
     # ① 本插件目录（部署后是 ~/.hermes/plugins/wechatpadpro/）
     dirs.append(str(_plugin_dir()) + os.sep)
 
-    # ② HERMES_HOME 下的 workspace / cache —— 按当前 profile 推导，不写死 profile 名
+    # ② HERMES_HOME 下的 workspace / cache —— 按**当前 profile** 推导，不写死 profile 名
     home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
     profile = (os.environ.get("HERMES_PROFILE") or "").strip()
     roots = [Path(home) / "workspace", Path(home) / "cache", Path(home) / "tmp"]
-    if profile and profile != "default":
-        roots += [Path(home) / "profiles" / profile / "workspace"]
+
+    # ★ 优先用 secret scope（多 profile 网关的正解）：scope 在 task 上下文里，
+    #   即使 systemd 没带 HERMES_PROFILE 也能定位到**当前** profile。
+    scope_home = _current_profile_home()
+    if scope_home is not None:
+        roots += [scope_home / sub for sub in ("workspace", "cache", "tmp")]
+        # scope 明确时**不**扫描别的 profile —— 否则 wpp-wechat 的会话能读到
+        # wecom 的 workspace（跨租户/跨业务泄露）。
+    elif profile and profile != "default":
+        roots += [Path(home) / "profiles" / profile / sub
+                  for sub in ("workspace", "cache", "tmp")]
+    else:
+        # ⚠️ 2026-10-19 修复：多 profile 网关（systemd `gateway run`）**不带**
+        #   HERMES_PROFILE env、且某些后台任务没有 secret scope ⇒ 旧逻辑只放行
+        #   ~/.hermes/workspace，profile 自己的 workspace/cache 全部"本地媒体读取被拒"
+        #   （wpp_send_image 从 profile workspace 发图必挂，实测 07:24）。
+        #   ⇒ 两者都拿不到时**最后兜底**扫描 profiles/*/ 的工作目录面。
+        #   安全边界：敏感文件名/目录先过全局拒绝名单（见 `_is_sensitive_path`），
+        #   凭据目录（plugins/accounts、备份目录）另有明确拒绝。
+        profiles_root = Path(home) / "profiles"
+        try:
+            if profiles_root.is_dir():
+                for p in sorted(profiles_root.iterdir()):
+                    if not p.is_dir():
+                        continue
+                    for sub in ("workspace", "cache", "tmp"):
+                        roots.append(p / sub)
+        except OSError:
+            pass
     dirs += [str(r) + os.sep for r in roots]
 
     out: list[str] = []
@@ -123,6 +201,11 @@ def is_local_read_allowed(path: str) -> bool:
         if real == denied.rstrip(os.sep) or real.startswith(denied):
             log.warning("[WPP] 拒绝读取凭据目录内的文件: %s", real[:120])
             return False
+    # ★ 全局敏感文件（对 /tmp 这类"无条件可读"目录尤其重要）
+    if _is_sensitive_path(real):
+        log.warning("[WPP] 拒绝读取敏感文件: %s", real[:120])
+        return False
+
     # 插件目录里的点文件（.env 等）与 JSON（账号/配置的常见形态）同样拒绝
     plugin = os.path.realpath(_plugin_dir()) + os.sep
     if real.startswith(plugin):
@@ -160,8 +243,12 @@ def assert_public_url(url: str) -> str:
             ip = ipaddress.ip_address(raw_ip.split("%")[0])   # 去掉 IPv6 zone id
         except ValueError:
             continue
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified):
+        # ``not is_global`` 补齐 ``is_private`` 漏掉的段：CGNAT ``100.64.0.0/10``、
+        # 基准测试 ``198.18.0.0/15``、``192.0.0.0/24`` 等 —— 它们能路由到内网设备，
+        # 但 ``is_private`` 为 False。``is_reserved`` 仍显式保留（NAT64
+        # ``64:ff9b::/96`` 内嵌 127.0.0.1 时 ``is_global`` 为 True）。
+        if (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
             raise GuardError(f"SSRF 拦截: 拒绝内网/保留 IP {raw_ip}（host={host}）")
     return url
 
@@ -190,8 +277,8 @@ def assert_endpoint_public(url: str) -> str:
         ip = ipaddress.ip_address(host.split("%")[0])
     except ValueError:
         return url                      # 域名（非字面量 IP）⇒ 放行，见 docstring
-    if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-            or ip.is_multicast or ip.is_unspecified):
+    if (not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
         raise GuardError(f"SSRF 拦截: 拒绝内网/保留 IP {host}")
     return url
 
@@ -259,22 +346,51 @@ async def safe_fetch_url(url: str, *, timeout: int = 30,
 # ------------------------------------------------------------------ 出站白名单
 
 
-def send_allowlist() -> tuple[str, ...]:
-    """``WECHATPRO_SEND_ALLOWLIST`` 解析出的白名单（逗号分隔）。未设 ⇒ 空 tuple。"""
-    from .env_compat import gate_env
-
-    raw = gate_env(SEND_ALLOWLIST_ENV)
+def _parse_allowlist(raw: str) -> tuple[str, ...]:
     if not raw:
         return ()
     return tuple(p.strip() for p in raw.split(",") if p.strip())
 
 
-def check_outbound_allowed(peer_id: str, account_id: str = "") -> None:
+def send_allowlist(profile_home: str | None = None) -> tuple[str, ...]:
+    """``WECHATPRO_SEND_ALLOWLIST`` 解析出的白名单（逗号分隔）。未设 ⇒ 空 tuple。
+
+    ``profile_home`` 非空时**优先**读该 profile 自己的 ``.env``。这是给
+    「没有 scope 的后台任务/cron standalone」用的：那种上下文里
+    ``platform_gate_env`` 会回落到**根 ``.env``**，把 wpp-wechat 的六条白名单
+    读成 default 的一条（2026-10-19 07:36 生产事故）。调用方明确知道
+    profile home 时，就不要让 ambient scope 决定读哪份配置。
+    """
+    if profile_home:
+        try:
+            from pathlib import Path
+
+            env_path = Path(profile_home) / ".env"
+            for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                if key.strip() == SEND_ALLOWLIST_ENV:
+                    val = val.strip().strip('"').strip("'")
+                    return _parse_allowlist(val)
+        except OSError:
+            pass
+    from .env_compat import gate_env
+
+    return _parse_allowlist(gate_env(SEND_ALLOWLIST_ENV))
+
+
+def check_outbound_allowed(peer_id: str, account_id: str = "",
+                           *, allowed: tuple[str, ...] | None = None) -> None:
     """出站白名单闸（**未设白名单时是 no-op**）。
 
     调试期的保险：微信是生产环境，发出去撤不回。设了白名单后，往别处发直接 raise。
+
+    ``allowed`` 允许调用方传入**连接期捕获**的白名单（见 ``WppClient``）—— 发送
+    任务不一定还处在 profile scope 里，不能让它在发送时重新读一次 ambient env。
     """
-    allowed = send_allowlist()
+    allowed = send_allowlist() if allowed is None else tuple(allowed)
     if not allowed:
         return
     targets = {peer_id, f"{account_id}:{peer_id}" if account_id else peer_id}

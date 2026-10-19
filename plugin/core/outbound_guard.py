@@ -54,7 +54,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
+from collections.abc import Iterator
+from contextvars import ContextVar
 from typing import Any
 
 from . import netguard
@@ -96,6 +99,14 @@ TARGET_KEYS = (
     "RoomId", "roomId", "room_id",
     "QID", "qid",
     "Target",
+    # ★ 2026-10-19：以下四个键是厂商真实接收方/操作对象，原先漏在闸外：
+    #   /Group/SendTransferGroupOwner 的 NewOwnerUserName（新群主）、
+    #   /Finder/FinderSendText 的 FinderUsername（私信对象）、
+    #   withUserList / groupUserList（批量操作成员）。
+    "NewOwnerUserName", "newOwnerUserName",
+    "FinderUsername", "finderUsername",
+    "withUserList", "withUserlist", "with_user_list",
+    "groupUserList", "groupUserlist", "group_user_list",
 )
 
 #: 目标键的**归一化**集合（``lower`` + 去下划线）。
@@ -117,6 +128,32 @@ _MAX_DEPTH = 3
 
 #: 单次请求最多核对多少个目标（防病态载荷把闸变成 CPU 放大器）。
 _MAX_TARGETS = 64
+
+#: **无目标上传步骤**的收件人上下文（2026-10-19 修）。
+#: ``/Tools/UploadFile`` 这类端点体里只有 base64、天生没有收件人，真发送在紧随其后的
+#: ``/Msg/ShareLink`` 上。fail-closed 让它永远被拒 ⇒ 白名单开着时**所有发文件都挂**
+#: （07:29 实测）。⇒ 组合调用用 :func:`guard_targets` 把**已校验过的**收件人带进
+#: 上传步骤；上下文里的目标同样逐个过白名单，不核对不上就照样拒。
+_upload_targets_var: ContextVar[tuple[str, ...]] = ContextVar(
+    "wpp_upload_guard_targets", default=())
+
+
+@contextlib.contextmanager
+def guard_targets(*targets: str, allowed: tuple[str, ...] | None = None,
+                  account_id: str = "") -> Iterator[None]:
+    """把本协程内「无目标端点」的核对收件人临时设为 ``targets``（须全在白名单内）。
+
+    ``allowed``/``account_id`` 与 :func:`guard` 同义：组合调用（UploadFile→ShareLink）
+    必须和后续真发送用**同一份**白名单，否则上传步骤会按 ambient env 再判一次。
+    """
+    cleaned = tuple(t for t in (str(x or "").strip() for x in targets) if t)
+    for t in cleaned:
+        netguard.check_outbound_allowed(t, account_id, allowed=allowed)
+    token = _upload_targets_var.set(cleaned)
+    try:
+        yield
+    finally:
+        _upload_targets_var.reset(token)
 
 _WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
 _SEG_RE = re.compile(r"[^0-9A-Za-z]+")
@@ -142,16 +179,21 @@ def is_read_only(endpoint: str) -> bool:
     return bool(words & READ_WORDS)
 
 
-def _add_value(value: Any, out: list[str]) -> None:
-    """**已确认是目标**的值：标量收下，列表逐项收，字典继续找。"""
+def _add_value(value: Any, out: list[str], state: dict[str, bool]) -> None:
+    """**已确认是目标**的值：标量收下，列表逐项收，字典继续找。
+
+    ``state["overflow"]`` 在超过 :data:`_MAX_TARGETS` 后置位 —— 绝不能静默截断：
+    截断等于「前 64 个在白名单里、第 65 个随便发」，正是闸要防的事。
+    """
     if len(out) >= _MAX_TARGETS:
+        state["overflow"] = True
         return
     if isinstance(value, (list, tuple)):
         for item in value:
-            _add_value(item, out)
+            _add_value(item, out, state)
         return
     if isinstance(value, dict):
-        _gather(value, out, 0)
+        _gather(value, out, 0, state)
         return
     if isinstance(value, bool) or value is None:
         return
@@ -161,32 +203,38 @@ def _add_value(value: Any, out: list[str]) -> None:
             out.append(got)
 
 
-def _gather(value: Any, out: list[str], depth: int) -> None:
+def _gather(value: Any, out: list[str], depth: int, state: dict[str, bool]) -> None:
     """在**非目标键**下继续找容器：只为了找更深的 dict，**不收裸标量**。
 
     "不收裸标量"这条是必需的：``{"blackList": ["bystander"]}`` 走的是非目标键，
     若把列表里的字符串也当目标，就会把"不给谁看"的人当成收件人（判反）。
     """
-    if len(out) >= _MAX_TARGETS or depth > _MAX_DEPTH:
+    if depth > _MAX_DEPTH:
         return
     if isinstance(value, dict):
         for key, val in value.items():
             if _norm_key(key) in _NORMALIZED_TARGET_KEYS:
-                _add_value(val, out)
+                _add_value(val, out, state)
             elif isinstance(val, (dict, list, tuple)):
-                _gather(val, out, depth + 1)
+                _gather(val, out, depth + 1, state)
         return
     if isinstance(value, (list, tuple)):
         for item in value:
             if isinstance(item, (dict, list, tuple)):
-                _gather(item, out, depth + 1)
+                _gather(item, out, depth + 1, state)
+
+
+def _collect_targets(body: Any) -> tuple[tuple[str, ...], bool]:
+    """返回 ``(targets, overflow)``；``overflow`` 表示目标数超过硬上限。"""
+    out: list[str] = []
+    state = {"overflow": False}
+    _gather(body, out, 0, state)
+    return tuple(out), state["overflow"]
 
 
 def targets_in(body: Any) -> tuple[str, ...]:
     """请求体里所有可核对的目标（单值/多值/嵌套列表都算）。"""
-    out: list[str] = []
-    _gather(body, out, 0)
-    return tuple(out)
+    return _collect_targets(body)[0]
 
 
 def duplicated_target_keys(body: Any) -> tuple[str, ...]:
@@ -226,13 +274,21 @@ def duplicated_target_keys(body: Any) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
-def guard(endpoint: str, body: Any = None, account_id: str = "") -> None:
+def guard(endpoint: str, body: Any = None, account_id: str = "",
+          *, allowed: tuple[str, ...] | None = None,
+          path_targets: tuple[str, ...] = ()) -> None:
     """出站闸判据（**唯一实现**，``WppClient._raw_url`` 调用）。
 
     未设白名单 ⇒ no-op（生产行为与 TS 一致）；只读端点 ⇒ 放行；其余端点把体里所有目标
     逐个过白名单，取不到目标则 fail-closed。
+
+    ``allowed`` 是**连接期捕获**的白名单（见 ``WppClient``），避免发送任务掉出
+    profile scope 后重新读到根 ``.env``；``path_targets`` 是已经被
+    ``_bind_endpoint`` 移进 URL 路径的收件人 —— 它们同样必须过闸，否则
+    「路径里是任意目标、请求体里放一个白名单诱饵」就能绕过。
     """
-    if not netguard.send_allowlist():
+    allowed = netguard.send_allowlist() if allowed is None else tuple(allowed)
+    if not allowed:
         return
     if is_read_only(endpoint):
         return
@@ -243,12 +299,25 @@ def guard(endpoint: str, body: Any = None, account_id: str = "") -> None:
             f"({', '.join(sorted(dup))}) —— 厂商侧只有一个会生效，闸无法确认实际发给谁 ⇒ "
             f"白名单期间拒绝执行。"
         )
-    targets = targets_in(body)
+    body_targets, overflow = _collect_targets(body)
+    if overflow:
+        raise netguard.GuardError(
+            f"出站闸：{endpoint} 的请求里目标数超过硬上限 {_MAX_TARGETS} —— "
+            f"闸不会截断后放行（截断=第 {_MAX_TARGETS + 1} 个目标不受核对）。"
+        )
+    targets = tuple(dict.fromkeys((*path_targets, *body_targets)))
     if not targets:
+        # 体里没有收件人 ≠ 一定拒：组合调用（UploadFile→ShareLink）用 guard_targets()
+        # 带进来的**已校验收件人**也算核对（仍逐个过白名单，见模块 docstring）。
+        ctx_targets = _upload_targets_var.get()
+        if ctx_targets:
+            for target in ctx_targets:
+                netguard.check_outbound_allowed(target, account_id, allowed=allowed)
+            return
         raise netguard.GuardError(
             f"出站闸：{endpoint} 不是只读端点，请求体里又没有任何可核对的目标 ⇒ "
             f"白名单（{netguard.SEND_ALLOWLIST_ENV}）期间**拒绝执行**。"
             f"（说不清对谁操作的一律不放行 —— 微信是生产环境，发出去撤不回）"
         )
     for target in targets:
-        netguard.check_outbound_allowed(target, account_id)
+        netguard.check_outbound_allowed(target, account_id, allowed=allowed)

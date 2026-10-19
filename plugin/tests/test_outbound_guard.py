@@ -303,8 +303,12 @@ def _method_code(src: str, cls: str, name: str) -> str:
 
 def test_the_guard_is_called_in_the_single_url_builder():
     code = _method_code(_client_src(), "WppClient", "_raw_url")
-    assert "outbound_guard.guard(endpoint, body, self.account_id)" in code, \
+    assert "outbound_guard.guard(endpoint, body, self.account_id" in code, \
         "判据必须挂在 _raw_url 上（所有厂商请求的唯一出处）"
+    assert "allowed=self.send_allowlist" in code, \
+        "必须用连接期捕获的白名单，不能在发送任务里重新读 ambient env"
+    assert "path_targets=path_targets" in code, \
+        "路径目标必须交给闸核对"
 
 
 def test_every_request_helper_passes_the_body_into_it():
@@ -313,7 +317,7 @@ def test_every_request_helper_passes_the_body_into_it():
     src = _client_src()
     for name in ("_request", "_post_bytes", "_post_json_b64"):
         code = _method_code(src, "WppClient", name)
-        assert "_raw_url(endpoint, body)" in code, f"{name} 没把 body 传给 _raw_url"
+        assert "_raw_url(endpoint, body" in code, f"{name} 没把 body 传给 _raw_url"
 
 
 def test_raw_url_is_the_only_place_that_builds_a_vendor_url():

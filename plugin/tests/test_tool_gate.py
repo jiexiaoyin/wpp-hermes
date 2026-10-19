@@ -288,6 +288,36 @@ def test_the_two_real_gates_cover_the_expected_tools():
     assert "wpp_fc_publish_raw" in policy.DENY_TOOLS
 
 
+def test_irreversible_write_tools_are_behind_the_admin_gate():
+    """2026-10-19：群发/群管理/资金/第三方授权/账号资料类写工具不能再裸奔。
+
+    这些动作要么**撤不回**（群发、加好友、群主转让），要么动钱/动授权（转账确认、
+    JSLogin），要么改账号资料（隐私、头像、别名）。它们原先不在 ``adminToolsEnabled``
+    门禁里 —— 模型被群消息诱导一句就能调。
+    """
+    from plugin.toolkit import policy
+
+    gated = {
+        "wpp_group_mass_text",
+        "wpp_group_transfer_owner",
+        "wpp_group_add_member",
+        "wpp_group_invite_member",
+        "wpp_group_set_name",
+        "wpp_group_set_announcement",
+        "wpp_group_set_access_verify",
+        "wpp_friend_send_request",
+        "wpp_finder_send_dm",
+        "wpp_tenpay_confirm_pre_transfer",
+        "wpp_wxapp_js_login",
+        "wpp_oa_auth_mp_login",
+        "wpp_user_set_privacy",
+        "wpp_user_update_profile",
+        "wpp_user_set_alias",
+    }
+    missing = sorted(n for n in gated if policy.gate_for(n) is not policy.ADMIN_TOOLS_GATE)
+    assert not missing, f"这些不可逆/高风险写工具没有被管理面门禁认领：{missing}"
+
+
 def test_ungated_tools_have_no_gate():
     from plugin.toolkit import policy
 
