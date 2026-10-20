@@ -58,12 +58,28 @@ def plugin_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _serves_home(plugin: Path, home: Path) -> bool:
+    """插件目录是否就是 ``home``（或其 profile）运行时会加载的那一份。
+
+    运行期账号目录是 ``PLUGIN_DIR/accounts``（``core/accounts.py``），与 home 无关；
+    但只有插件确实属于该 home 时才能写到插件目录，否则会写出目标 home 之外。
+    共享布局：插件在 ``<base>/plugins/<dir>``，profile 在 ``<base>/profiles/<name>``。
+    """
+    if plugin.parent.name != "plugins":
+        return False
+    base = plugin.parent.parent.resolve()
+    if base == home:
+        return True
+    return home.parent.name == "profiles" and home.parent.parent.resolve() == base
+
+
 def accounts_dir(home: Path | None = None) -> Path:
     """账号目录；支持 ``WECHATPRO_ACCOUNTS_DIR`` 覆盖（与插件运行期同口径）。
 
-    正常安装时本文件就在 ``<home>/plugins/<plugin>/`` 下，账号写在插件目录内。
-    若用 ``--home`` 指向别处（离线准备 / 测试），**不能**写回当前运行代码所在的
-    目录 —— 那会写出目标 home 之外。这时按安装布局落到
+    插件已安装时（本文件在 ``<base>/plugins/<plugin>/`` 下），运行期读取的就是
+    ``plugin/accounts`` —— **包括 profile home**（profile 的 ``plugins/`` 通常只是
+    指向全局插件目录的符号链接）。只有 ``--home`` 指向与当前插件无关的目标
+    （离线准备 / 测试）时，才按目标安装布局写到
     ``<home>/plugins/<PLUGIN_NAME>/accounts``。
     """
     override = os.environ.get("WECHATPRO_ACCOUNTS_DIR", "").strip()
@@ -72,26 +88,61 @@ def accounts_dir(home: Path | None = None) -> Path:
     here = plugin_dir()
     if home is not None:
         target = Path(home).expanduser().resolve()
-        if here.parent.name == "plugins" and here.parent.parent.resolve() == target:
+        if _serves_home(here, target):
             return here / "accounts"
         return target / "plugins" / PLUGIN_NAME / "accounts"
     return here / "accounts"
 
 
+def _profile_home(base: Path, profile: str) -> Path | None:
+    candidate = (base / "profiles" / profile).resolve()
+    return candidate if candidate.is_dir() else None
+
+
+def _bound_hermes_home() -> Path | None:
+    """当前 Hermes 运行上下文绑定的 home；独立运行向导时返回 ``None``。
+
+    multiplex gateway 的 ``os.environ['HERMES_HOME']`` 是**宿主** home（如
+    ``~/.hermes``），真实 profile 由 Hermes 的 context override 绑定。
+    直接读环境变量会把 profile 配置误判成 default 未配置。
+    """
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore
+    except Exception:  # noqa: BLE001 —— 独立运行向导时没有 Hermes 模块
+        return None
+    try:
+        return Path(get_hermes_home()).expanduser().resolve()
+    except Exception:  # noqa: BLE001 —— 上下文异常时退回环境变量
+        return None
+
+
 def detect_home(explicit: str | None = None) -> Path:
     """定位 Hermes home。
 
-    优先级：``--home`` → ``HERMES_HOME`` → 插件所在 home（``<home>/plugins/<name>``）
-    → ``~/.hermes``。
+    优先级：``--home`` → Hermes 运行上下文 → ``HERMES_HOME``（再叠加
+    ``HERMES_PROFILE``）→ 插件所在 home → ``~/.hermes``。
     """
     if explicit:
         return Path(explicit).expanduser().resolve()
+    env_profile = os.environ.get("HERMES_PROFILE", "").strip()
+    bound = _bound_hermes_home()
+    if bound is not None:
+        if env_profile:
+            # 上下文 home 可能仍是宿主 home；此时配置在 profiles/<name> 下。
+            return _profile_home(bound, env_profile) or bound
+        return bound
     env_home = os.environ.get("HERMES_HOME", "").strip()
     if env_home:
-        return Path(env_home).expanduser().resolve()
+        home = Path(env_home).expanduser().resolve()
+        if env_profile:
+            return _profile_home(home, env_profile) or home
+        return home
     p = plugin_dir()
     if p.parent.name == "plugins":
-        return p.parent.parent.resolve()
+        base = p.parent.parent.resolve()
+        if env_profile:
+            return _profile_home(base, env_profile) or base
+        return base
     return (Path.home() / ".hermes").resolve()
 
 
@@ -119,7 +170,7 @@ def resolve_home(home_arg: str | None, profile: str | None) -> tuple[Path, str]:
             name = Path(name).expanduser().resolve().name
         return home, name
     if profile:
-        base = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")).expanduser()
+        base = detect_home(None)
         if base.parent.name == "profiles":
             base = base.parent.parent
         # 允许传路径；纯名字则落到 <base>/profiles/<name>
@@ -274,6 +325,64 @@ def _account_path(account_id: str = DEFAULT_ACCOUNT, home: Path | None = None) -
     return accounts_dir(home) / f"{account_id}.json"
 
 
+def _enabled_plugins(config_text: str) -> set[str]:
+    """解析 ``config.yaml`` 里 ``plugins.enabled`` 的条目（不引入 YAML 依赖）。
+
+    只认 ``plugins:`` 段下的 ``enabled:`` 列表；``platform_toolsets`` 等其它段里的
+    同名条目不算启用，注释行也不算。
+    """
+    names: set[str] = set()
+    plugins_indent: int | None = None
+    enabled_indent: int | None = None
+    for raw in config_text.splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        text = line.strip()
+        if indent == 0:
+            plugins_indent = 0 if text == "plugins:" else None
+            enabled_indent = None
+            continue
+        if plugins_indent is None:
+            continue
+        if text.startswith("enabled:"):
+            value = text[len("enabled:"):].strip()
+            if value.startswith("[") and value.endswith("]"):
+                names.update(
+                    item.strip().strip("'\"")
+                    for item in value[1:-1].split(",")
+                    if item.strip()
+                )
+                enabled_indent = None
+            else:
+                enabled_indent = indent
+            continue
+        if enabled_indent is not None:
+            if text.startswith("- "):
+                names.add(text[2:].strip().strip("'\""))
+            elif indent <= enabled_indent:
+                enabled_indent = None
+    return names
+
+
+def _plugin_enabled(home: Path) -> bool:
+    """插件是否在 home 的 ``plugins.enabled`` 里。
+
+    兼容两种写法：清单名 ``wechatpadpro-platform``（``hermes plugins enable``
+    写入的）与安装目录名 ``wechatpadpro``（手工配置/旧版）。
+    """
+    config_path = home / "config.yaml"
+    if not config_path.is_file():
+        return False
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    wanted = {PLUGIN_NAME, plugin_dir().name}
+    return bool(_enabled_plugins(text) & wanted)
+
+
 def check_status(home_arg: str | None = None, profile: str | None = None,
                  *, _resolved: bool = False) -> dict:
     """只读检查，返回可 JSON 序列化的状态；绝不包含密钥值。
@@ -321,14 +430,7 @@ def check_status(home_arg: str | None = None, profile: str | None = None,
     if not token_key:
         missing.append(TOKEN_KEY_KEY)
 
-    config_text = ""
-    config_path = home / "config.yaml"
-    if config_path.is_file():
-        try:
-            config_text = config_path.read_text(encoding="utf-8")
-        except OSError:
-            config_text = ""
-    plugin_enabled = PLUGIN_NAME in config_text
+    plugin_enabled = _plugin_enabled(home)
 
     # 账号文件不是必需的：只配 env 凭据时插件会合成 default 账号
     # （见 platform/enablement.py）。ready 只反映"凭据齐 + 插件已启用"。

@@ -28,9 +28,16 @@ esac
 
 PYTHON="${PYTHON:-python3}"
 
+# ruff 可能是独立二进制而非当前解释器的模块（本机系统 python 就是这种）。
+if "$PYTHON" -m ruff --version >/dev/null 2>&1; then
+  RUFF=("$PYTHON" -m ruff)
+else
+  RUFF=(ruff)
+fi
+
 if [[ "$RUN_LINT" -eq 1 ]]; then
   printf '==> ruff check plugin\n'
-  "$PYTHON" -m ruff check plugin
+  "${RUFF[@]}" check plugin
 fi
 
 if [[ "$RUN_TESTS" -eq 1 ]]; then
