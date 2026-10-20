@@ -1,4 +1,4 @@
-# wpp-hermes-py2
+# wpp-hermes
 
 把**个人微信**（WeChatPadPro 协议）接进 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 的平台插件。
 
@@ -10,6 +10,22 @@
 
 > 本项目只做协议适配，不附带、不托管任何 WeChatPadPro 服务。你需要自己有一个可用的
 > WeChatPadPro 兼容服务（下文称 “vendor”）以及它的 `authcode` / `tokenKey`。
+
+---
+
+## 相关项目
+
+本仓库是 WeChatPadPro 跨平台适配插件生态的一部分。三个仓库共用同一套 vendor API，
+按你使用的 Agent 平台选择：
+
+| 项目 | 平台 | 语言 | 说明 |
+|---|---|---|---|
+| [wpp-hermes](https://github.com/jiexiaoyin/wpp-hermes)（本仓库） | Hermes Agent | Python 3 | 平台插件 + 292 个 `wpp_*` 工具 |
+| [wpp-openclaw](https://github.com/jiexiaoyin/wpp-openclaw) | OpenClaw | TypeScript | OpenClaw channel 插件 |
+| [astrbot-plugin-wpp](https://github.com/jiexiaoyin/astrbot-plugin-wpp) | AstrBot | Python 3 | AstrBot 平台适配器 |
+
+三者能力方向一致，但配置格式与安装方式不同；不要混用配置文件。第一次接触这个生态时，
+可以先在任意一个仓库跑通 vendor 连接，再按所用 Agent 平台迁移配置。
 
 ---
 
@@ -39,8 +55,8 @@ systemctl --user restart hermes-gateway    # 或你实际的启动方式
 ### 方式 B：脚本安装
 
 ```bash
-git clone <repo-url> wpp-hermes-py2
-cd wpp-hermes-py2
+git clone <repo-url> wpp-hermes
+cd wpp-hermes
 bash scripts/install.sh
 ```
 
@@ -75,7 +91,9 @@ hermes plugins doctor "$HERMES_HOME/plugins/wechatpadpro-platform"
 
 - **准入**：所有群聊、私聊全部放行；可选 `allowlist` / `blacklist` / `pairing`，
   公众号与微信团队/支付等服务通知在任何模式下都不回复。
-- **数据库**：SQLite（`<插件目录>/wpp.sqlite3`），可选 MySQL。
+- **数据库**：SQLite（`<插件目录>/wpp.sqlite3`），可选 MySQL/MariaDB。
+  SQLite 是完整后端：历史检索、心流台账、审计、黑话/风格/好感度持久化都可以直接使用，
+  **不需要安装 MariaDB**。
 - **能力**：OSS 转存、心流、好感度、黑话、风格、语音、主动关心、MCP 等默认关闭；
   群画像（心流子能力）默认开启。
 
@@ -84,6 +102,35 @@ hermes plugins doctor "$HERMES_HOME/plugins/wechatpadpro-platform"
 
 ⚠️ 一个客户端密钥同一时间只能被一个客户端使用。复制账号文件或 profile 之前，先确认
 没有两个进程拿同一份凭据连接 vendor。
+
+---
+
+## 文件传输助手命令
+
+在微信「文件传输助手」里给机器人发命令，可以运行时查看和修改当前账号的策略；
+`/pair` 则在私聊里由普通用户发送。常用命令：
+
+| 命令 | 作用 |
+|---|---|
+| `/help` | 显示完整命令列表与心流运维子命令 |
+| `/heartflow on\|off\|status` | 心流开关与状态 |
+| `/affection on\|off\|status` | 好感度开关与状态 |
+| `/jargon on\|off\|status` | 黑话挖掘开关与状态 |
+| `/style on\|off\|status` | 说话风格开关与状态 |
+| `/tts on\|off\|status` | 语音合成 / 情绪路由开关 |
+| `/proactive on\|off\|status` | 私聊主动关心开关 |
+| `/mute <群id> [分钟]` / `/mute off <群id>` / `/mute list` | 临时禁言某个群 |
+| `/xiaowei on\|off\|status` | 小微智能体工具开关 |
+| `/user add\|del\|list [wxid...]` | 私聊白名单（收发共用） |
+| `/user sync` | 从全员群同步员工到私聊白名单 |
+| `/group add\|del\|list [群id...]` | 群白名单（收发共用） |
+| `/blacklist add\|del\|list [群id...]` | 群黑名单（一票否决） |
+| `/whitelist status` / `/whitelist sync` | 查看统一白名单 / 同步全员群 |
+| `/genpair` / `/pairs` | 管理员生成 / 查看配对码 |
+| `/pair <8位码>` | 普通用户在私聊里自助配对（`dmPolicy=pairing`） |
+
+命令改动会写回账号 JSON 并立即生效；写入失败时会明确回复“本次改动未生效”，
+不会假装成功。完整说明见 [docs/features.md](docs/features.md)。
 
 ---
 
@@ -110,7 +157,7 @@ journalctl --user -u hermes-gateway -n 80
 | 能力 | 依赖 | 缺失时 |
 |---|---|---|
 | 基本收发、媒体 | 无（仅 vendor 凭据） | — |
-| 历史检索 / 心流落库 / 审计 | SQLite（默认）或 MySQL | SQLite 无需配置；连不上时降级，不影响收发 |
+| 历史检索 / 心流台账 / 审计 / 黑话与风格持久化 | SQLite（默认，零配置）或 MySQL/MariaDB（可选） | 两种后端功能等价；SQLite 无需安装数据库服务；数据库不可用时降级，不影响收发 |
 | 群聊心流 / 好感度 / 黑话 / 风格 | 显式开启 + LLM key | 对应模块不启用 |
 | OSS 媒体公网 URL | `WECHATPRO_OSS_ENABLED=1` + 凭据 + ossutil | 消息不带 URL，照常收发 |
 | 语音转文字 | silk 解码器 + STT key | 第一条语音打一次 WARNING |
@@ -152,6 +199,8 @@ bash scripts/check.sh          # pytest + ruff + 公开树敏感信息扫描
 
 ## 文档
 
+- [功能详解](docs/features.md) — 心流、好感度、意图识别、黑话、风格、语音、历史检索
+- [wpp_* 工具清单](docs/tools.md) — 292 个工具的分组说明与必填参数
 - [安装与升级](docs/install.md)
 - [配置参考](docs/configuration.md)
 - [排障](docs/troubleshooting.md)

@@ -35,6 +35,11 @@
   测试夹具与示例统一使用占位值。
 - **拆分职责**：`wecom_*` 与 `phoneerp_*` 工具移出本插件，分别回归
   wecom-skill 与 phoneerp skill；本插件工具面只保留 `wpp_*`（292 个）。
+- **客户文档**：新增 `docs/features.md`（心流、好感度、意图识别、黑话、风格、
+  语音、历史检索的详细说明）与 `docs/tools.md`（292 个 `wpp_*` 工具分组清单）；
+  README 补充文件传输助手命令与 wpp-openclaw / astrbot-plugin-wpp 生态链接。
+- **文档修正**：明确 SQLite 是完整后端（历史检索/心流台账/审计等无需 MariaDB）；
+  LLM key 统一说明为 `JUDGE_API_KEY`，移除未被代码读取的 `WECHATPRO_LLM_API_KEY`。
 - 新增 `scripts/check_public_tree.py`，CI 同时跑 lint、测试与敏感信息扫描。
 
 ---

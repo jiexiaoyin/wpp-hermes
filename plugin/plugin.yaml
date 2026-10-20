@@ -403,15 +403,11 @@ optional_env:
     description: >
       Optional OSS credentials JSON path (legacy fallback). Prefer the OSS_*
       environment variables above.
-  - name: WECHATPRO_LLM_API_KEY
-    description: "LLM API key for heartflow / affection / jargon"
-    prompt: "LLM API key"
-    secret: true
   - name: JUDGE_API_KEY
     description: >
-      LLM key used by heartflow's judge model and embedding calls when the
-      account does not name another env via embeddingApiKeyEnv
-      (MINIMAX_API_KEY is accepted as a fallback).
+      Shared LLM key for heartflow's judge model, affection, jargon and style
+      (MINIMAX_CN_API_KEY / MINIMAX_API_KEY are accepted as fallbacks).
+      Embedding uses the per-account embeddingApiKeyEnv instead.
     secret: true
   - name: JUDGE_BASE_URL
     description: "Optional base URL for the judge model (implementation default when empty)"

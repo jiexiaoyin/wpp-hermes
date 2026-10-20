@@ -1,5 +1,10 @@
 # 安装、升级与卸载
 
+> 本仓库只适用于 **Hermes Agent**。如果你用的是 OpenClaw，请使用
+> [wpp-openclaw](https://github.com/jiexiaoyin/wpp-openclaw)；如果是 AstrBot，
+> 请使用 [astrbot-plugin-wpp](https://github.com/jiexiaoyin/astrbot-plugin-wpp)。
+> 三者共用同一套 vendor API，但安装方式与配置格式不同。
+
 ## 前置条件
 
 | 项 | 要求 |
@@ -40,8 +45,8 @@ python3 "$HERMES_HOME/plugins/wechatpadpro-platform/setup_wizard.py"
 ## 方式 B：安装脚本
 
 ```bash
-git clone <repo-url> wpp-hermes-py2
-cd wpp-hermes-py2
+git clone <repo-url> wpp-hermes
+cd wpp-hermes
 bash scripts/install.sh
 ```
 
@@ -130,8 +135,8 @@ rm -rf "$HERMES_HOME/plugins/wechatpadpro-platform"
 ## 离线安装
 
 ```bash
-git clone <repo-url> wpp-hermes-py2
-cd wpp-hermes-py2
+git clone <repo-url> wpp-hermes
+cd wpp-hermes
 bash scripts/install.sh --no-wizard
 # 然后按 docs/configuration.md 手工写 .env 或运行向导
 ```

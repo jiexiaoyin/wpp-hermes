@@ -61,7 +61,7 @@ profile、两台机器或两个测试进程；后连接的一方会把前一方�
 | `WECHATPRO_DB_HOST` | `127.0.0.1` | 仅 MySQL；只允许本机，远程需显式 `WECHATPRO_DB_ALLOW_REMOTE=1` |
 | `WECHATPRO_DB_PORT` | `3306` | 仅 MySQL |
 | `WECHATPRO_DB_USER` / `WECHATPRO_DB_PASSWORD` | 空 | 仅 MySQL |
-| `WECHATPRO_DB_NAME` | 空 | 仅 MySQL；不配则历史/心流落库/审计降级 |
+| `WECHATPRO_DB_NAME` | 空 | 仅 MySQL；MySQL 模式下不配则该后端不可用（SQLite 模式忽略此项） |
 | `WECHATPRO_DB_CONNECT_TIMEOUT` / `_READ_TIMEOUT` / `_WRITE_TIMEOUT` | 实现默认 | 秒 |
 
 ### OSS 媒体转存（可选，默认关闭）
@@ -80,7 +80,8 @@ profile、两台机器或两个测试进程；后连接的一方会把前一方�
 
 | 变量 | 说明 |
 |---|---|
-| `WECHATPRO_LLM_API_KEY` | 心流 / 好感度 / 黑话 / 风格学习的 key |
+| `JUDGE_API_KEY` | 心流 / 好感度 / 黑话 / 风格学习共用的模型 key（也接受 `MINIMAX_CN_API_KEY` / `MINIMAX_API_KEY`） |
+| `JUDGE_BASE_URL` | 可选，自定义判定模型的兼容端点 |
 | `WECHATPRO_STT_API_KEY` | 语音转写 key（也接受 `SILICONFLOW_API_KEY`） |
 | `WPP_STT_BACKEND` | `siliconflow`（默认）或 `dashscope` |
 | `WPP_STT_URL` / `WPP_STT_MODEL` | 覆盖 STT 端点与模型 |
@@ -203,9 +204,9 @@ profile、两台机器或两个测试进程；后连接的一方会把前一方�
   （可选 `JUDGE_BASE_URL`，未设置时用实现默认端点）。
 - **heartflow.profile**：群画像 / 模型画像能力，**默认开启**；不需要时写
   `"enabled": false`。
-- **向量模型**：`embeddingModel` + `embeddingApiKeyEnv`（指向 `.env` 里的 key，
-  例如 `DASHSCOPE_API_KEY`），可选 `embeddingBaseUrl`。未配置时向量快路径关闭，
-  自动退回判定模型，不影响心流可用性。
+- **向量模型**：用于群聊意图识别（挑选相关上下文），配 `embeddingModel` +
+  `embeddingApiKeyEnv`（指向 `.env` 里的 key，例如 `DASHSCOPE_API_KEY`），可选
+  `embeddingBaseUrl`。未配置时向量层关闭，自动退回 LLM 意图判断；不影响心流。
 - **affection**：好感度记账，影响 TTS 情绪路由。
 - **jargon**：群黑话（黑化）挖掘，写入数据库。
 - **style**：从群聊归纳说话风格，注入回复侧 system prompt。
@@ -254,6 +255,10 @@ WECHATPRO_WEBHOOK_SECRET=<随机长串>
 **默认使用 SQLite，无需安装数据库服务。** 数据落在
 `<插件目录>/wpp.sqlite3`（可用 `WECHATPRO_SQLITE_PATH` 改位置），首次启动自动建
 20 张表与索引。WAL 模式 + 5 秒 busy timeout，适合单机单进程的 Hermes 网关。
+
+SQLite 与 MySQL/MariaDB 是**功能等价的两个后端**：历史检索、心流台账、审计、
+黑话/风格/好感度持久化在 SQLite 下全部可用。MariaDB 只是“可选替代”，不是这些
+能力的前置依赖。
 
 需要 MariaDB/MySQL 时显式切换：
 

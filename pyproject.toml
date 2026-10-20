@@ -1,11 +1,11 @@
 # 只放工具链配置（本仓不打包发布）。pytest 配置仍在 pytest.ini。
 [project]
-name = "wpp-hermes-py2"
+name = "wpp-hermes"
 version = "2.1.0"
 description = "WeChatPadPro 的 Hermes 平台插件（个人微信 → Hermes Agent）"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "wpp-hermes-py2 contributors" }]
+authors = [{ name = "wpp-hermes contributors" }]
 requires-python = ">=3.11"
 classifiers = [
   "Programming Language :: Python :: 3",
