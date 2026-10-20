@@ -24,6 +24,7 @@ def _adapter_with_client(client):
     """只构造 `_maybe_member_event` 用到的两个属性，避开整套 adapter 初始化。"""
     adapter = object.__new__(WppAdapter)
     adapter._clients = {"default": client}
+    adapter._member_event_at = {}
     return adapter
 
 
@@ -100,9 +101,55 @@ async def test_sync_failure_never_propagates():
 
 
 @pytest.mark.asyncio
+async def test_members_changed_syncs_that_group():
+    """vendor 的 10000 占位符 ⇒ 拉该群名单对比（这是唯一能知道"有人变了"的信号）。"""
+    client = AsyncMock()
+    adapter = _adapter_with_client(client)
+
+    with patch("plugin.inbound.name_sync.sync_members",
+               AsyncMock(return_value=4)) as m:
+        await adapter._maybe_member_event(
+            _ACCT, _msg("收到一条微信系统通知", msg_type="10000"))
+
+    m.assert_awaited_once_with(client, "default", ["1@chatroom"])
+
+
+@pytest.mark.asyncio
+async def test_members_changed_is_throttled_per_group():
+    """vendor 一次成员变动可能连推多条 10000 —— 30s 内同群只拉一次。"""
+    client = AsyncMock()
+    adapter = _adapter_with_client(client)
+    msg = _msg("收到一条微信系统通知", msg_type="10000")
+
+    with patch("plugin.inbound.name_sync.sync_members",
+               AsyncMock(return_value=4)) as m:
+        await adapter._maybe_member_event(_ACCT, msg)
+        await adapter._maybe_member_event(_ACCT, msg)
+
+    assert m.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_throttle_is_per_group_not_global():
+    """A 群刚拉过，不该挡住 B 群。"""
+    client = AsyncMock()
+    adapter = _adapter_with_client(client)
+
+    with patch("plugin.inbound.name_sync.sync_members",
+               AsyncMock(return_value=4)) as m:
+        await adapter._maybe_member_event(
+            _ACCT, _msg("收到一条微信系统通知", chatroom_id="1@chatroom"))
+        await adapter._maybe_member_event(
+            _ACCT, _msg("收到一条微信系统通知", chatroom_id="2@chatroom"))
+
+    assert m.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_missing_client_is_skipped():
     adapter = object.__new__(WppAdapter)
     adapter._clients = {}
+    adapter._member_event_at = {}
 
     with patch("plugin.inbound.name_sync.sync_members",
                AsyncMock(return_value=0)) as m:

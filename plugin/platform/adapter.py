@@ -117,6 +117,10 @@ from .inbound_ws import WppWsClient
 
 log = logging.getLogger(__name__)
 
+#: 群成员变动事件的**同群节流窗口（秒）**。vendor 对一次成员变动可能连推多条
+#: ``msgType=10000``（进群 + 改群名各一条），不节流会把同一份名单拉两遍。
+_MEMBER_EVENT_THROTTLE_SEC = 30.0
+
 #: 平台名 —— 必须与目录名 / ``config.yaml plugins.enabled`` 的键 / toolset 名**三者一致**
 PLATFORM_NAME = "wechatpadpro"
 
@@ -314,6 +318,9 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         #: 群名同步句柄（``/Group/List`` → ``wpp_chatrooms``）。会话标题/群名显示依赖它；
         #: 与 sweep 一样必须随 disconnect 取消，否则重连累积轮询。
         self._name_tasks: list[asyncio.Task] = []
+        #: 群成员变动事件的节流表（``chatroom_id -> 上次拉取时刻``）。
+        #: vendor 一次成员变动可能连推多条 ``msgType=10000``，不节流就重复拉同一份名单。
+        self._member_event_at: dict[str, float] = {}
         #: 全员群成员同步句柄（→ ``allowFrom``，收发共用）。同样必须随 disconnect 取消。
         self._employee_tasks: list[asyncio.Task] = []
         #: 全员群最近一次同步结果（给 ``/whitelist status`` 看）。
@@ -1075,7 +1082,20 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             return
 
         # self_join = 机器人自己被拉进群：新群还没 id，只能拉全部群。
+        # members_changed = vendor 只给占位符（实测无原文）⇒ 拉该群一次对比即可。
         targets = None if ev.kind == "self_join" else [ev.chatroom_id]
+
+        # 节流：同一群 30s 内只拉一次。vendor 可能对一次成员变动连推多条 10000
+        # （实测进群+改群名会各推一条），不节流就是同一份名单拉两遍。
+        if ev.kind == "members_changed" and ev.chatroom_id:
+            now = time.time()
+            last = self._member_event_at.get(ev.chatroom_id, 0.0)
+            if now - last < _MEMBER_EVENT_THROTTLE_SEC:
+                log.debug("[WPP:%s] 成员变动节流跳过（群 %s，%.0fs 内）",
+                          acct.id, ev.chatroom_id, now - last)
+                return
+            self._member_event_at[ev.chatroom_id] = now
+
         try:
             written = await name_sync.sync_members(client, acct.id, targets)
             log.info("[WPP:%s] 成员变动 %s（群 %s，%s）⇒ 刷新 %d 条昵称",

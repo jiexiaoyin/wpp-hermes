@@ -21,13 +21,14 @@ from plugin.inbound import join_events
 
 
 class _Msg:
-    """最小消息桩：只带本模块读的三个字段。"""
+    """最小消息桩：只带本模块读的字段。"""
 
-    def __init__(self, content: str, msg_type="10000", chatroom_id="1@chatroom"):
+    def __init__(self, content, msg_type="10000", chatroom_id="1@chatroom", raw=None):
         self.content = content
         self.msg_type = msg_type
         self.chatroom_id = chatroom_id
         self.peer_id = chatroom_id
+        self.raw = raw or {}
 
 
 # ---------------------------------------------------------------- 进群
@@ -104,11 +105,15 @@ def test_ordinary_messages_are_not_events(text):
     assert join_events.parse(_Msg(text, msg_type="1")) is None
 
 
-def test_known_system_type_with_unknown_text_is_reported():
-    """已知系统类型但文案不认识 ⇒ 返回 ``unknown_system`` 供日志留痕，不能静默吞。"""
-    ev = join_events.parse(_Msg("某某操作了某某", msg_type="10000"))
+def test_10000_placeholder_means_members_changed():
+    """**实测常态**：vendor 对 10000 只推占位符、raw 里也没有原文。
+
+    这种时候不能报"不认识"就完事 —— 它是"该群成员可能变了"的唯一信号，
+    必须返回 ``members_changed`` 让调用方去拉一次名单。
+    """
+    ev = join_events.parse(_Msg("收到一条微信系统通知", msg_type="10000"))
     assert ev is not None
-    assert ev.kind == "unknown_system"
+    assert ev.kind == "members_changed"
 
 
 def test_unknown_type_with_unknown_text_is_none():
@@ -118,3 +123,71 @@ def test_unknown_type_with_unknown_text_is_none():
 def test_parse_never_raises_on_none_content():
     ev = join_events.parse(_Msg(None))
     assert ev is None
+
+
+# ---------------------------------------------------------------- raw 兜底
+
+def test_normalized_content_falls_back_to_raw():
+    """**2026-10-20 实测**：vendor 对 msgType=10000 把 content 归一化成
+    「收到一条微信系统通知」，原文只在 raw 里。只读 content 会永远判成 unknown。"""
+    msg = _Msg("收到一条微信系统通知", msg_type="10000",
+               raw={"Data": {"Content": '"张三"邀请"李四"加入了群聊'}})
+    ev = join_events.parse(msg)
+    assert ev is not None
+    assert ev.kind == "join"
+    assert ev.member_name == "李四"
+
+
+def test_raw_leave_is_detected():
+    msg = _Msg("收到一条微信系统通知", msg_type="10000",
+               raw={"Data": {"Msg": '"李四"退出了群聊'}})
+    ev = join_events.parse(msg)
+    assert ev is not None
+    assert ev.kind == "leave"
+
+
+def test_raw_text_nested_in_lists():
+    """字段形状可能深到 list-of-dict —— 深度上限内都要挖到。"""
+    msg = _Msg("收到一条微信系统通知", msg_type="10000",
+               raw={"Data": {"List": [{"Content": '"李四"加入了群聊'}]}})
+    ev = join_events.parse(msg)
+    assert ev is not None and ev.kind == "join"
+
+
+def test_raw_scan_is_depth_limited():
+    """别为了找文本把整个 payload 走穿（大 payload 会拖慢热路径）。"""
+    deep = {"a": {"b": {"c": {"d": {"e": {"f": '"李四"加入了群聊'}}}}}}
+    ev = join_events.parse(_Msg("收到一条微信系统通知", msg_type="10000", raw=deep))
+    assert ev is not None and ev.kind == "members_changed"
+
+
+def test_members_changed_carries_candidates_for_diagnosis():
+    """候选文本必须进日志 —— 厂商哪天给了原文，就靠它发现并补正则。"""
+    msg = _Msg("收到一条微信系统通知", msg_type="10000",
+               raw={"Data": {"Content": "某某 操作了 某某"}})
+    ev = join_events.parse(msg)
+    assert ev is not None and ev.kind == "members_changed"
+    assert "某某 操作了 某某" in ev.raw
+
+
+def test_string_system_type_means_members_changed():
+    """**2026-10-20 16:31 实测**：vendor 把类型发成字符串 ``system``（不是 10000）。
+
+    只判 ``== "10000"`` 会让它永远走 unknown_system —— 这次就是踩这个。
+    """
+    ev = join_events.parse(_Msg("收到一条微信系统通知", msg_type="system"))
+    assert ev is not None
+    assert ev.kind == "members_changed"
+
+
+def test_revoke_type_also_means_members_changed():
+    """**实测教训**：同一件事（拉人进群）vendor 两次给了不同类型
+    （``system`` 和 ``10002``）。按类型挑必漏，所以已知系统类型一律当成员变动。"""
+    ev = join_events.parse(_Msg("收到一条微信系统通知", msg_type="10002"))
+    assert ev is not None and ev.kind == "members_changed"
+
+
+def test_truly_unknown_type_stays_unknown():
+    """不在已知集合里的类型才报 unknown（那是唯一需要人看的情况）。"""
+    ev = join_events.parse(_Msg("收到一条微信系统通知", msg_type="system_x"))
+    assert ev is None or ev.kind == "unknown_system"
