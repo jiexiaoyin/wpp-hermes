@@ -156,7 +156,7 @@ hermes plugins doctor "$HERMES_HOME/plugins/wechatpadpro-platform"
 
 ## Web 控制台（可选）
 
-插件自带一个 Hermes dashboard 页签（`/wechatpadpro`），不修改 Hermes 本体代码：
+插件自带一个 Hermes dashboard 页签（`/wpp-console`），不修改 Hermes 本体代码：
 
 - **账号状态**：真实 WS 在线状态、客户端就绪、最近一次热加载结果与快照新鲜度
   （`live` / `delayed` / `stale` / `unknown`）。

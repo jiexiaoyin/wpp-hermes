@@ -305,7 +305,7 @@ GRANT ALL PRIVILEGES ON wechatpro.* TO 'wechatpro'@'127.0.0.1';
 
 ## 7. Web 控制台（可选）
 
-插件自带 Hermes dashboard 页签 `/wechatpadpro`，由 Hermes 官方插件机制加载
+插件自带 Hermes dashboard 页签 `/wpp-console`，由 Hermes 官方插件机制加载
 （`dashboard/manifest.json` + `dashboard/plugin_api.py`），**不修改 Hermes 本体代码**。
 
 ### 启用
@@ -328,6 +328,11 @@ hermes-gw-restart
 
 访问 dashboard 的「微信助手控制台」页签。账号绑定在哪个 profile 不影响控制台——
 它直接读写 `accounts/*.json` 与插件数据库。
+
+> 页签路径刻意用 `/wpp-console`，不要改成 `/wechatpadpro`：本插件自己的 webhook
+> 反代规则通常占用 `/wechatpadpro/` 前缀（vendor 回调），dashboard 又会把页签路径
+> 重定向成带尾斜杠的形式，两者相撞时页面会被转发到 webhook 端口并显示
+> `{"error":"unknown path"}`。
 
 ⚠️ **不要**把 `wechatpadpro-console` 加到 `profiles/wpp-wechat/config.yaml`：
 Hermes 的次级 profile 只允许运行该 profile 自己的 bundled 插件后端，user 插件 API

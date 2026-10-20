@@ -10,7 +10,7 @@
 
 Web 控制台（不修改 Hermes 本体代码）。
 
-- **Dashboard 页签**：`/wechatpadpro`，由 Hermes 官方插件机制加载
+- **Dashboard 页签**：`/wpp-console`，由 Hermes 官方插件机制加载
   （`dashboard/manifest.json` + `dashboard/plugin_api.py` + 纯 IIFE 前端）。
   只在 **root/launch profile** 启用 `wechatpadpro-console`；次级 profile 的 user
   插件后端由 Hermes 拒绝挂载（API 404），页签会明确提示切回 default。

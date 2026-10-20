@@ -5,7 +5,7 @@
   "icon": "MessageSquare",
   "version": "2.3.0",
   "tab": {
-    "path": "/wechatpadpro",
+    "path": "/wpp-console",
     "position": "end"
   },
   "entry": "dist/index.js",
