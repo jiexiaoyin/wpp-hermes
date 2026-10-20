@@ -1058,6 +1058,36 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             except Exception as exc:  # noqa: BLE001
                 log.warning("[WPP:%s] 群名同步启动失败（不影响收发）: %s", acct.id, exc)
 
+    async def _send_join_welcome(self, acct, chatroom_id: str,
+                                 text: str, ats: list[str]) -> None:
+        """发一条进群欢迎语（可 @ 新人）。
+
+        **刻意不复用 ``send()``**：那条路会打 ``_interim_send`` 标记、走拒绝话术闸，
+        而欢迎语是固定模板 + vendor 拿来的 wxid，既不会命中拒绝话术，也不该被当成
+        过程消息丢掉。这里直接走 ``client.send_text``，但**照常落库**（台账要能核）。
+
+        失败只记 warning —— 欢迎语发不出去绝不能影响收信。
+        """
+        client = self._clients.get(acct.id)
+        if client is None:
+            return
+        try:
+            resp = await client.send_text(
+                to_wxid=chatroom_id, content=text, ats=ats or None)
+            if not outbound.send_ok(resp):
+                log.warning("[WPP:%s] 欢迎语未送达（群 %s）: %s",
+                            acct.id, chatroom_id, outbound.send_error_text(resp))
+                return
+            ids = outbound.extract_outbound_msg_ids(resp)
+            await _persist_outbound_record(acct, chatroom_id, text, ids)
+            log.info("[WPP:%s] 已发进群欢迎语（群 %s，@ %d 人）：%s",
+                     acct.id, chatroom_id, len(ats or []), text[:60])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 —— 欢迎语失败不拖累收信
+            log.warning("[WPP:%s] 欢迎语发送失败（群 %s）: %s",
+                        acct.id, chatroom_id, exc)
+
     async def _maybe_member_event(self, acct, msg) -> None:
         """进群/退群系统通知 → 拉该群成员昵称增量（**事件驱动，不做定时轮询**）。
 
@@ -1067,7 +1097,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
 
         任何失败都只记日志 —— 记账坏了绝不能让收信链路失败。
         """
-        from ..inbound import join_events, name_sync
+        from ..inbound import join_events, join_welcome, name_sync
 
         try:
             ev = join_events.parse(msg)
@@ -1108,6 +1138,16 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             log.info("[WPP:%s] 成员变动 %s（群 %s）⇒ 写入 %d 条｜新增 %s｜移出 %s",
                      acct.id, ev.kind, ev.chatroom_id or "全部", res["written"],
                      _fmt_members(res["added"]), _fmt_members(res["removed"]))
+            # 欢迎语只在**单群**事件上发：self_join 时 targets=None（拉全部群），
+            # added 里混着各群的新人，没法归属到某一个群。
+            if targets is not None:
+                cfg = join_welcome.resolve_cfg(getattr(acct, "join_welcome", None))
+                welcome = join_welcome.build(
+                    cfg, ev.chatroom_id, res["added"],
+                    hour=time.localtime().tm_hour)
+                if welcome:
+                    text, ats = welcome
+                    await self._send_join_welcome(acct, ev.chatroom_id, text, ats)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 —— 昵称刷新失败不影响收发

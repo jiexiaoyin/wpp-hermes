@@ -19,6 +19,13 @@ import pytest
 
 from plugin.platform.adapter import WppAdapter
 
+#: 测试用账号桩：`_maybe_member_event` 会读 `join_welcome` 段。
+_ACCT_WITH_WELCOME = SimpleNamespace(
+    id="default",
+    join_welcome={"enabled": True, "mode": "all",
+                  "template": "欢迎 {name}！", "mention": True},
+)
+
 
 def _adapter_with_client(client):
     """只构造 `_maybe_member_event` 用到的两个属性，避开整套 adapter 初始化。"""
@@ -156,3 +163,76 @@ async def test_missing_client_is_skipped():
         await adapter._maybe_member_event(_ACCT, _msg('"李四"加入了群聊'))
 
     m.assert_not_awaited()
+
+
+# ---------------------------------------------------------------- 欢迎语接线
+
+@pytest.mark.asyncio
+async def test_welcome_sent_for_a_real_newcomer():
+    """diff 出真实新增 ⇒ 发一条欢迎语。"""
+    client = AsyncMock()
+    adapter = _adapter_with_client(client)
+
+    with patch("plugin.inbound.name_sync.sync_members",
+               AsyncMock(return_value={"written": 3, "added": [("wxid_new", "新来的")],
+                                       "removed": []})), \
+            patch.object(WppAdapter, "_send_join_welcome", AsyncMock()) as send:
+        await adapter._maybe_member_event(
+            _ACCT_WITH_WELCOME, _msg("收到一条微信系统通知"))
+
+    send.assert_awaited_once()
+    args = send.await_args.args
+    assert args[1] == "1@chatroom"
+    assert "新来的" in args[2]
+    assert args[3] == ["wxid_new"]
+
+
+@pytest.mark.asyncio
+async def test_welcome_skipped_when_mode_excludes_group():
+    """白名单模式 + 群不在名单 ⇒ 一个新人也别想发。"""
+    client = AsyncMock()
+    adapter = _adapter_with_client(client)
+    acct = SimpleNamespace(id="default", join_welcome={
+        "enabled": True, "mode": "allowlist", "groups": ["other@chatroom"]})
+
+    with patch("plugin.inbound.name_sync.sync_members",
+               AsyncMock(return_value={"written": 3, "added": [("wxid_new", "新来的")],
+                                       "removed": []})), \
+            patch.object(WppAdapter, "_send_join_welcome", AsyncMock()) as send:
+        await adapter._maybe_member_event(acct, _msg("收到一条微信系统通知"))
+
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_welcome_skipped_on_self_join():
+    """机器人自己被拉进群时拉的是**全部群**，added 跨群混合，不能归属到某个群。"""
+    client = AsyncMock()
+    adapter = _adapter_with_client(client)
+
+    with patch("plugin.inbound.name_sync.sync_members",
+               AsyncMock(return_value={"written": 40,
+                                       "added": [("wxid_a", "甲"), ("wxid_b", "乙")],
+                                       "removed": []})), \
+            patch.object(WppAdapter, "_send_join_welcome", AsyncMock()) as send:
+        await adapter._maybe_member_event(
+            _ACCT_WITH_WELCOME,
+            _msg("[群聊邀请] 周州 邀请你加入群聊「某群」", msg_type="group_invite"))
+
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_welcome_skipped_when_nobody_added():
+    """只是有人退群 ⇒ 没有欢迎语。"""
+    client = AsyncMock()
+    adapter = _adapter_with_client(client)
+
+    with patch("plugin.inbound.name_sync.sync_members",
+               AsyncMock(return_value={"written": 3, "added": [],
+                                       "removed": [("wxid_old", "老成员")]})), \
+            patch.object(WppAdapter, "_send_join_welcome", AsyncMock()) as send:
+        await adapter._maybe_member_event(
+            _ACCT_WITH_WELCOME, _msg("收到一条微信系统通知"))
+
+    send.assert_not_awaited()

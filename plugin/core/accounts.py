@@ -193,6 +193,9 @@ class Account:
     tts: dict[str, Any]
     #: 私聊主动关心（2026-10-19；``enabled`` 默认 false）
     proactive: dict[str, Any]
+    #: 新人进群欢迎语（2026-10-20）。三模式：allowlist / blocklist / all；
+    #: ``enabled`` 默认 false —— 不配就不发，避免升级后突然刷屏。
+    join_welcome: dict[str, Any]
     #: 到达层合并发送（2026-10-19；``enabled`` 默认 false）
     debounce_merge: dict[str, Any]
     #: SpectreCore 轻量项（引用提示等；默认全关）
@@ -517,6 +520,7 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         style=_with_ai_defaults(_as_dict(cfg.get("style"))),
         tts=_as_dict(cfg.get("tts")),
         proactive=_as_dict(cfg.get("proactive")),
+        join_welcome=_as_dict(cfg.get("joinWelcome")),
         debounce_merge=_as_dict(cfg.get("debounceMerge")),
         spectre=_as_dict(cfg.get("spectre")),
         llm_intent_enabled=_as_bool(cfg.get("llmIntentEnabled"), False),
