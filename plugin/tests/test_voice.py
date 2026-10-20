@@ -66,7 +66,7 @@ def _msg(msg_type: int = MT_VOICE, content: str = "收到一条语音", media: d
 
 
 def _pipeline() -> InboundPipeline:
-    return InboundPipeline("acc", {"selfWxid": "wxid_bot", "nickname": "益融小助理"})
+    return InboundPipeline("acc", {"selfWxid": "wxid_bot", "nickname": "示例小助理"})
 
 
 # ============================================================ ① 正文注入（parser）

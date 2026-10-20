@@ -9,7 +9,7 @@ handler）共用，所以单独成模块 —— 放任何一侧都会造成 tool
   LLM 被 prompt injection 诱导就能打 ``127.0.0.1`` / 内网（如 ``169.254.169.254``
   元数据端点）。所以**解析 DNS 后二次校验 IP**，防 DNS rebinding。
 - **本地读**：``image_url`` 允许传本地路径 ⇒ 不设白名单就能读 ``/etc/passwd``、
-  ``/root/.ssh/id_rsa`` 并**发到微信群里**。
+  ``~/.ssh/id_rsa`` 并**发到微信群里**。
 - **统一白名单**（收发共用，2026-10-19 起）：微信是生产环境，发出去撤不回。
   放行集合 = 账号 ``allowFrom`` / ``groupAllowFrom`` / ``adminUsers``
   ∪ ``WECHATPRO_SEND_ALLOWLIST`` 的额外条目；名单非空时，名单外的发送**直接 raise**。
@@ -17,7 +17,7 @@ handler）共用，所以单独成模块 —— 放任何一侧都会造成 tool
 
 ## 相对旧实现的两处修正
 
-1. 旧 ``_LOCAL_READ_DIRS`` 写死了 ``/root/.hermes/profiles/wpp-wechat/workspace/``
+1. 旧 ``_LOCAL_READ_DIRS`` 写死了 ``~/.hermes/profiles/wpp-wechat/workspace/``
    —— 单 profile 路径，多 profile / 多账号下会误放行或误拒。现在从
    ``HERMES_HOME`` 与**当前 profile** 推导。
 2. 白名单目录改为**规范化后比对**（``os.path.realpath``）—— 旧实现用 ``abspath``，
@@ -475,9 +475,9 @@ def send_allowlist(profile_home: str | None = None) -> tuple[str, ...]:
 def unified_allowlist(profile_home: str | None = None, accounts: Any = None) -> tuple[str, ...]:
     """统一白名单（2026-10-19 起**收发同一份**）。
 
-    2026-10-19 老板拍板：白名单不区分进出站。一个人/群既然在账号的
+    2026-10-19 项目约定：白名单不区分进出站。一个人/群既然在账号的
     ``allowFrom`` / ``groupAllowFrom`` / ``adminUsers`` 里，机器人主动发给他/它
-    也必须放行；否则会出现「周州能私聊机器人，机器人一转发就被拦」这种割裂。
+    也必须放行；否则会出现「联系人甲能私聊机器人，机器人一转发就被拦」这种割裂。
 
     生效集合 = ``WECHATPRO_SEND_ALLOWLIST``（额外条目，保留兼容）
     ∪ 各已连接账号的 ``allowFrom`` / ``groupAllowFrom`` / ``adminUsers``。

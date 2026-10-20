@@ -42,7 +42,7 @@ def _row(**over) -> dict:
         "peer_name": None,
         "from_wxid": None,
         "msg_type": "1",
-        "content": "@益融小助理 有现货吗",
+        "content": "@示例小助理 有现货吗",
         "raw_payload": None,
         "at_sec": 1700000000,
     }
@@ -50,16 +50,16 @@ def _row(**over) -> dict:
     return base
 
 
-#: 真机（``.183``）实测的 v1 / WS 帧形状：发送者在**顶层** ``sender_id``，
+#: 真机（``真机``）实测的 v1 / WS 帧形状：发送者在**顶层** ``sender_id``，
 #: ``go_fields`` 里的 ``FromUserName`` 对群消息就是**群 id**，且整帧没有昵称字段。
 LIVE_FRAME = {
     "sender_id": "wxid_sender",
     "go_fields": {
-        "Content": "@益融小助理 有现货吗",
+        "Content": "@示例小助理 有现货吗",
         "FromUserName": "111@chatroom",
         "MsgType": 1,
         "NewMsgId": "9001",
-        "PushContent": "某某: @益融小助理 有现货吗",
+        "PushContent": "某某: @示例小助理 有现货吗",
     },
 }
 

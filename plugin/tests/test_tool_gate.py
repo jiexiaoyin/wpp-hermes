@@ -277,7 +277,7 @@ def test_the_two_real_gates_cover_the_expected_tools():
         f"TS 工具面是 20 个：{sorted(policy.XIAOWEI_GATE.tools)}"
     #: 四个**带守卫**的发布工具（``tools/msg.py``）。⚠️ 它们**没被撤注册** —— TS 侧
     #: 整体撤出了 AI 工具面（``friendcircle-meta.ts:45-47``），py2 仍暴露但带开关。
-    #: 这是**有意保留**的差异（撤注册是减少一个能力，要老板拍板），本用例只钉现状。
+    #: 这是**有意保留**的差异（撤注册是减少一个能力，要项目约定），本用例只钉现状。
     assert set(policy.FRIEND_CIRCLE_PUBLISH_GATE.tools) == {
         "wpp_fc_publish_images", "wpp_fc_publish_video",
         "wpp_fc_publish_text", "wpp_fc_publish_ai",

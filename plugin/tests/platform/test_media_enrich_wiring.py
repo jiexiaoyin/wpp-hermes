@@ -17,7 +17,7 @@
    OSS 目录错、标记也错（``[视频] https://…jpg``），而上传本身**成功**、日志干净。
    ⇒ W2 判分支与 kind 的**一一对应**。
 3. **降级没有提前 return** ⇒ 没拿到 URL 也往里注入 ``[图片] None``，正文被污染，
-   且"有凭据/没凭据"两种环境行为分叉（``.183`` 现在就是没凭据那条路）。
+   且"有凭据/没凭据"两种环境行为分叉（``真机`` 现在就是没凭据那条路）。
    ⇒ W3 判 ``if not url: return`` 在注入调用**之前**。
 4. **注入写成前缀**（``f"{line}\\n{msg.content}"``）⇒ 与 ``_media_tag`` 那套混了血，
    正文里出现两个 ``[图片]``/``[文件]``。⇒ W4 逐字比那条 f-string 的**组成**。
@@ -219,7 +219,7 @@ def test_publish_returns_before_injecting_when_there_is_no_url() -> None:
     """★ 降级：``if not url: return`` 必须**排在**注入调用之前。
 
     没这道闸，拿不到 URL 也会执行 ``_inject_media_enrich_line(msg, kind, None, …)``
-    ⇒ 正文里冒出 ``[图片] None``，而没凭据的机器（``.183``）与有凭据的机器行为分叉。"""
+    ⇒ 正文里冒出 ``[图片] None``，而没凭据的机器（``真机``）与有凭据的机器行为分叉。"""
     pub = _methods()["_publish_media"]
     guard = next(n for n in _body(pub) if isinstance(n, ast.If)
                  and ast.unparse(n.test) == "not url")

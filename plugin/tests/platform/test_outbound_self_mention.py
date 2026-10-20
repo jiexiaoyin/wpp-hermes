@@ -1,6 +1,6 @@
 """出站 @self 闸（2026-10-02）—— 机器人**不许 @ 自己**。
 
-## 现场（``.183`` live-test，2026-10-02 13:19，老板实测抓到）
+## 现场（``真机`` live-test，2026-10-02 13:19，老板实测抓到）
 
 群里有人 @ 了本账号，agent（qwen3.8-flash）把上下文里那条 ``@<本账号昵称>``
 **原样抄进了回复**，于是账号在群里 @ 了自己：
@@ -35,7 +35,7 @@ from pathlib import Path
 from plugin.platform import outbound as O
 
 BOT = "wxid_bot"
-NICK = "益融小助理"
+NICK = "示例小助理"
 
 #: 仓根（``plugin/tests/platform/...`` 往上三层）
 ROOT = Path(__file__).resolve().parents[3]
@@ -83,7 +83,7 @@ def test_another_persons_mention_survives() -> None:
 def test_a_name_that_starts_with_ours_is_over_stripped_like_the_inbound_helper() -> None:
     """已知的过度剔除：``@<昵称>`` 走**裸子串替换**（继承 ``normalize_mention``）。
 
-    ``@益融小助理x`` 会被当成"自己的提及"摘掉前缀。**故意保留**：换成带词界的
+    ``@示例小助理x`` 会被当成"自己的提及"摘掉前缀。**故意保留**：换成带词界的
     ``\\b`` 反而会漏掉 ``@昵称`` 紧贴中文的形态（中文是 ``\\w``，没有词界 —— 见
     ``test_mentions.py`` §3 那条 A7 记录），而两个方向的代价不对称：
     漏掉一次 = 群里出现"自己 @ 自己"（一眼假、老板当场抓到）；多摘一次 = 昵称恰好

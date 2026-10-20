@@ -6,7 +6,7 @@
     python3 tools/gen_vendor_defs.py            # 写盘
     python3 tools/gen_vendor_defs.py --check    # 只校验（deploy.sh 回归门）
 
-源（本仓蓝本）: /root/dev/wpp-hermes-py2/tools/vendor_source/tools_data_extra.py
+源（本仓蓝本）: <repo>/tools/vendor_source/tools_data_extra.py
 源 SHA-256: 12d00247ad1a556e24feaea0840dd9be611a1c608a505777b10a2e71e74cf787
 派生组数: 15，工具条数: 107（已排除聚合项: ALL_EXTRA_TOOLS）
 

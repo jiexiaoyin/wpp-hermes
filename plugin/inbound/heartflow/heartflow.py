@@ -90,7 +90,7 @@ log = logging.getLogger(__name__)
 
 #: 账号级心流参数缺省（对齐 TS ``defaultHeartflowConfig``）。
 #:
-#: ⚠️ ``enabled: False`` + **没有 model 缺省**都是刻意的：v1.4.0 老板拍板"消除 plugin
+#: ⚠️ ``enabled: False`` + **没有 model 缺省**都是刻意的：v1.4.0 项目约定"消除 plugin
 #: hardcode" —— 模型名必须由 accounts JSON（``heartflow.model``）提供，缺失时
 #: :func:`judge_heartflow` **抛错**（不是静默回落某个模型）。静默回落的表现是
 #: "换了模型但线上没换"，而它只在账单和判分分布上看得见。
@@ -343,7 +343,7 @@ def extract_hf_image_urls(text: Any, max_images: int = HF_VISION_DEFAULTS["maxIm
     跟一句 "(注: …)" —— 正则按空白截断，不会被它带歪）。只认 ``http(s)://``
     （生产是 OSS 直链），去重后按出现顺序截取 ``max_images`` 张。
 
-    为什么要看图（2026-09-29 老板拍板）：群里的图在 judge 眼里只是一行
+    为什么要看图（2026-09-29 项目约定）：群里的图在 judge 眼里只是一行
     ``[图片] https://…jpg`` 文本 ⇒ 模型只能瞎猜，5 条真实图片消息纯文本判分全部 ~0.25
     （含"零售单晒单"这种明显该接的）。把图交给视觉模型后同一 prompt 只多一个 image_url 块：
     晒单 0.25→0.66~0.705、下单指引 0.31→0.705~0.72（过线），而白酒广告/街景/自拍仍 0.25
@@ -729,7 +729,7 @@ async def judge_heartflow(inp: HfJudgeInput, cfg: Mapping[str, Any] | None,
     "这是第 N 次尝试"版本 —— 换的是**同一行**（:data:`HF_JSON_REMINDER`），
     prompt 其余部分逐字不变。
 
-    ⚠️ ``model`` 缺失 ⇒ **抛错**（不是回落）：v1.4.0 老板拍板"消除 plugin hardcode"，
+    ⚠️ ``model`` 缺失 ⇒ **抛错**（不是回落）：v1.4.0 项目约定"消除 plugin hardcode"，
     模型名必须由 accounts JSON 提供。静默回落的表现是"改了配置但线上没改"。
     """
     from ...llm import judge as judge_mod  # 延迟导入：保持模块级零第三方依赖
@@ -743,7 +743,7 @@ async def judge_heartflow(inp: HfJudgeInput, cfg: Mapping[str, Any] | None,
     model = (cfg or {}).get("model")
     if not model or not isinstance(model, str):
         raise ValueError(
-            "[WPP HF] heartflow.model 未配置。v1.4.0 老板拍板：模型名必须由 "
+            "[WPP HF] heartflow.model 未配置。v1.4.0 项目约定：模型名必须由 "
             "accounts/<id>.json 的 heartflow.model 提供，插件**不再有** hardcode 回落。")
 
     timeout_ms = _int_or((cfg or {}).get("timeoutMs"), HF_DEFAULTS["timeoutMs"], lo=1)

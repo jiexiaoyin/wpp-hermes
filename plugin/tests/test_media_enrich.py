@@ -14,7 +14,7 @@
 
 ## 两处"钉住我们**不**做的事"
 
-1. **降级路径必须让正文逐字节不变**：``.183`` 上既没有 ossutil 也没有 OSS 凭据
+1. **降级路径必须让正文逐字节不变**：``真机`` 上既没有 ossutil 也没有 OSS 凭据
    （老板 2026-10-02 二次确认「先不放」）⇒ "没拿到 URL"就是**现状那条路**，
    动它等于偷偷改了生产行为。
 2. **注入是追加、且带前导 ``\\n``**（TS ``m.content = \\`${m.content}\\n[图片] ${url}\\```），
@@ -176,7 +176,7 @@ def test_publish_forwards_account_kind_bytes_and_filename(A, AM, monkeypatch):
 def test_a_failed_upload_leaves_the_content_byte_identical(A, AM, monkeypatch):
     """★ 降级判据：没拿到 URL ⇒ 正文**一个字都不能变**、两个键一个都不许写。
 
-    ``.183`` 上既没 ossutil 也没凭据 ⇒ 这条就是**现状那条路**；
+    ``真机`` 上既没 ossutil 也没凭据 ⇒ 这条就是**现状那条路**；
     而"写了 URL 却没写 ``oss_url``"或者反过来，都会让正文里的 ``[图片]``
     要么一个没有、要么两个（见 ``_media_tag``）。"""
     async def no_url(*_a, **_k):

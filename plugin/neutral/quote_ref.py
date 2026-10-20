@@ -18,7 +18,7 @@
 ⇒ ``fromusr`` 恒空 ⇒ ``_quote_prefix`` 第一句 ``return ""`` ⇒ **前缀从来没出现过**，
 refermsg 里的 ``<fromusr>`` 也一直是空。
 
-旧树（``/root/dev/wpp-hermes/plugin/adapter.py::_send_quote``）当年**不是**靠 metadata：
+旧树（``<legacy-repo>/plugin/adapter.py::_send_quote``）当年**不是**靠 metadata：
 它按锚点 id **回查 DB**（``SELECT msg_id, new_msg_id, from_wxid, peer_name FROM
 wpp_messages WHERE account_id=%s AND (msg_id=%s OR new_msg_id=%s) LIMIT 1``）拿到
 "是谁被回复"，Hermes 移植把这一截丢了。TS 同样回查

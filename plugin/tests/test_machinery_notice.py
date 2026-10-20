@@ -108,7 +108,7 @@ def bare(monkeypatch, stubbed):
         adapter_mod.DEFAULT_ACCOUNT: SimpleNamespace(
             id=adapter_mod.DEFAULT_ACCOUNT,
             self_wxid="wxid_self",
-            nickname="益融小助理",
+            nickname="示例小助理",
         ),
     }
     inst._clients = {}
@@ -126,7 +126,7 @@ def test_send_drops_machinery_notice_after_stripping_self_mention(bare):
     """``@自己 ⚠️ ...`` —— 原文不命中，摘掉 @ 前缀后必须补拦。"""
     result = asyncio.run(bare.send(
         "room_test@chatroom",
-        "@益融小助理 💾 Self-improvement review: x"))
+        "@示例小助理 💾 Self-improvement review: x"))
     assert result.success is True
     assert result.message_id is None
 

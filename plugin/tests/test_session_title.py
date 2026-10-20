@@ -28,7 +28,7 @@ from plugin.inbound import session_title as T
 
 
 GROUP = "21354014635@chatroom"
-GROUP_NAME = "🇨🇳移动业务对接群Ⅱ益融机友"
+GROUP_NAME = "🇨🇳移动业务对接群Ⅱ示例机友"
 
 
 def _origin(**kw) -> dict:
@@ -54,7 +54,7 @@ def names(monkeypatch):
     )
     monkeypatch.setattr(
         T, "contact_name",
-        lambda a, w: {"q139198824": "接晓银"}.get(w, ""),
+        lambda a, w: {"wxid_owner_demo": "示例联系人"}.get(w, ""),
     )
     T.clear_name_cache()
     yield
@@ -79,7 +79,7 @@ def test_group_title_is_just_the_group_name(names):
 
 
 def test_the_sender_never_leaks_into_a_group_title(names):
-    origin = _origin(user_id="q139198824", user_name="接晓银")
+    origin = _origin(user_id="wxid_owner_demo", user_name="示例联系人")
     assert T.build_session_title(origin) == GROUP_NAME
 
 
@@ -92,9 +92,9 @@ def test_group_title_falls_back_to_group_id(monkeypatch):
 
 
 def test_dm_title_is_the_contact_nickname(names):
-    origin = _origin(chat_id="default:q139198824", chat_name="q139198824",
-                     chat_type="dm", user_id="q139198824", user_name="q139198824")
-    assert T.build_session_title(origin) == "接晓银"
+    origin = _origin(chat_id="default:wxid_owner_demo", chat_name="wxid_owner_demo",
+                     chat_type="dm", user_id="wxid_owner_demo", user_name="wxid_owner_demo")
+    assert T.build_session_title(origin) == "示例联系人"
 
 
 def test_dm_title_uses_the_pushed_nickname_when_the_db_is_cold(monkeypatch):

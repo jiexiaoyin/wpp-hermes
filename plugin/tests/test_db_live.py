@@ -17,7 +17,7 @@ stub（``test_db.py``）验的是"框架发了什么语句、自己维护的状�
    绝不 DROP/ALTER 任何 ``wpp_`` 真表（R8：migration 框架也只 ADD）。
 
 本机（dev 树所在机器）没有真测试库（3306/3307 是**别的项目**的 1Panel MariaDB）⇒ 这些用例
-会**大声跳过**，那不是通过：真测试库 ``wechatpro_test`` 在 .183 上，用
+会**大声跳过**，那不是通过：真测试库 ``wechatpro_test`` 在 真机 上，用
 ``WECHATPRO_DB_NAME=wechatpro_test`` 跑它们（``tools/gates.sh`` 里也各挂了一道）。
 """
 

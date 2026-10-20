@@ -3,7 +3,7 @@
 旧 ``adapter.py``（1900 行）的功能等价物，但按 Hermes 0.21.5 的**真实契约**重写。
 本模块是 ``registration._register_platform`` 的 ``adapter_factory`` 目标。
 
-## 实测契约（每条都在 .183 的 Hermes 源码里核过，不是照着文档猜的）
+## 实测契约（每条都在 真机 的 Hermes 源码里核过，不是照着文档猜的）
 
 ============================  ====================================================
 基类**只有 4 个** ``@abstractmethod``  ``connect`` / ``disconnect`` / ``send`` / ``get_chat_info``
@@ -26,7 +26,7 @@
 - **瞬时失败**（网络断）⇒ 才返回 ``False`` 交给 runner 重试。
 
 旧实现的 ``_is_connected`` 恒 False + ``connect()`` 返回 False = 每 300 秒泄漏
-约 2 个 fd 且永远重试（这解释了 .183 上"平台永不启用"里的资源抖动）。
+约 2 个 fd 且永远重试（这解释了 真机 上"平台永不启用"里的资源抖动）。
 
 ### ② ``MAX_MESSAGE_LENGTH`` **不在基类上**
 
@@ -650,14 +650,14 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             # 插件照常起来、照常连别的账号，运维翻日志未必看到那行（审阅 C4）。
             #
             # ⚠️ 判据是 `enabled ∧ 有凭据` 的账号才判（见 ``assert_no_red_line``）：
-            #    ``/root/.hermes`` 上那份 ``default.json`` 把 ``selfWxid`` 写成生产号
+            #    某台开发机上那份 ``default.json`` 把 ``selfWxid`` 写成生产号
             #    却 ``enabled=false`` —— 它连不上，不该让整个插件起不来。
             accounts_mod.assert_no_red_line(self._accounts.values())
 
             connectable = [a for a in self._accounts.values()
                            if accounts_mod.refusal_reason(a) is None]
 
-            # ★ 2026-10-19 老板拍板：白名单**不区分进出站**。出站放行集合就是
+            # ★ 2026-10-19 项目约定：白名单**不区分进出站**。出站放行集合就是
             #   入站那份（allowFrom / groupAllowFrom / adminUsers）∪ env 额外项。
             #   只算**可连接**的账号：被红线/未启用拒掉的账号不该替一个不存在的
             #   连接开门（同 access_policy.reportable 的口径）。
@@ -1248,7 +1248,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         #     ③ 闸的判据只需要 ``reason`` 与发送者，早判 = 少做无用工。
         #     ⇒ 被限速的那条**整条丢弃**（不是交给心流）：理由写在
         #     ``TriggerRateLimiter.guard`` 的 docstring 里。
-        #     WARNING 级：``.183`` 的 journald 只采 WARNING+，用 debug 就等于"现场看不见"。
+        #     WARNING 级：``真机`` 的 journald 只采 WARNING+，用 debug 就等于"现场看不见"。
         _limit = self._trigger_limiter.guard(
             acct.id, msg.peer_id, msg.from_wxid, reason)
         if not _limit.allowed:
@@ -1279,7 +1279,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         #     黑名单群·非白名单会话（④）都已剔除 ⇒ 落下来的是"白名单内、真被人说出口"的话，
         #     与 TS 的隐私口径一致（TS 注释：黑名单群/非 allowlist/白名单外 DM/自回环不入库）。
         #     又必须**早于** ④a 与 ⑤：心流缓冲、judge、LLM 上下文都从这里取粮。
-        #     ⚠️ 仍然**只在白名单内**落库 —— 这是老板拍板过的隐私口径，别为了"数据全"放宽。
+        #     ⚠️ 仍然**只在白名单内**落库 —— 这是项目约定过的隐私口径，别为了"数据全"放宽。
         #     ``persist_inbound`` 自己吞一切异常（只 warn），不会因为写库失败丢消息。
         # 同步 pymysql（ping + INSERT + commit）⇒ 必须 offload，否则库一慢整条
         # 事件循环停摆（read/write_timeout=30s），WS 心跳与其它账号一起排队。
@@ -1597,7 +1597,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         """收尾：丢句柄 + 把异常记成一行 warn。
 
         这里**唯一会漏出来**的是 :class:`jargon_mine.JargonConfigError`（``jargon.model``
-        没配）—— 它是**故意的**：TS 在 v1.4.0 12:28 老板拍板"消除 plugin hardcode"之后
+        没配）—— 它是**故意的**：TS 在 v1.4.0 12:28 项目约定"消除 plugin hardcode"之后
         把那个分支改成了**直接抛**，为的是把"账面上写着在挖、其实没模型"逼到明面上。
         抛出点在任何 try 之外 ⇒ 整轮中止，由这里**每轮一行** warn（不是静默）。
         其余失败（超时 / 坏 JSON / 库不可用）在 ``mine_jargon_for_group`` 内部就吞了，
@@ -2328,7 +2328,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         5. ``wxid`` 兜底
 
         ⚠️ **2026-10-03 更正一句旧注释**：这里原来写着"第 2 级改成查联系人表，语义等价
-        且更省"—— 那是**错的**。真机上（``.183``）``wpp_contacts`` / ``wpp_chatrooms`` /
+        且更省"—— 那是**错的**。真机上（``真机``）``wpp_contacts`` / ``wpp_chatrooms`` /
         ``wpp_chatroom_members`` **全是 0 行**（没人同步过通讯录），第 2 级实际上永远是空
         的；而能让 ``fromusr`` 有值的那一档（回查被引用消息）当时根本不存在 ⇒ 整条链
         一次都没跑通过。现在把"行内 ``peer_name``"补回第 2 级（它是**被引用消息自己带的**
@@ -2830,7 +2830,7 @@ async def _standalone_send(pconfig: Any, chat_id: str, message: str, *,
         profile_home = _resolve_standalone_profile_home(acct)
         # 与 live 路径同一份统一白名单（收发共用）：allowFrom / groupAllowFrom /
         # adminUsers ∪ env 额外项。不能只读 env，否则 standalone 又会退化成
-        # 「周州能私聊、cron 却发不出去」。
+        # 「联系人甲能私聊、cron 却发不出去」。
         send_allowlist = outbound.netguard.unified_allowlist(
             profile_home=profile_home, accounts=(acct,))
         outbound.assert_outbound_allowed(peer_id, acct.id, allowed=send_allowlist)

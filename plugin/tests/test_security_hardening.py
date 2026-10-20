@@ -659,95 +659,13 @@ def test_profile_workspace_readable_without_profile_env(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_PROFILE", raising=False)
     # ⚠️ ``tmp_path`` 在 /tmp 下，而 ``_ALWAYS_READABLE`` 无条件放行 /tmp —— 不剥掉它，
     #    「profile 根目录的 .env 被拒」这条断言会因测试目录本身在 /tmp 而假红
-    #    （实现没毛病：生产路径 /root/.hermes/profiles/*/.env 不在 /tmp，实测为 False）。
+    #    （实现没毛病：生产路径 ~/.hermes/profiles/*/.env 不在 /tmp，实测为 False）。
     monkeypatch.setattr(netguard, "_ALWAYS_READABLE", ())
     assert netguard.is_local_read_allowed(str(img)) is True
     assert netguard.is_local_read_allowed(str(cred)) is False
 
 
-# --------------------------------- ⑨ phoneerp 权限：身份只认入站 contextvar（2026-10-19）
-
-
-def _phoneerp_handlers():
-    """注册 phoneerp 四件套并取回 handler（真表 + 假 ctx）。"""
-    from plugin.toolkit import phoneerp
-
-    class _Ctx:
-        def __init__(self):
-            self.tools = {}
-
-        def register_tool(self, **kwargs):
-            self.tools[kwargs["name"]] = kwargs
-
-    ctx = _Ctx()
-    assert phoneerp.register(ctx, lambda: None) == 4
-    return ctx.tools
-
-
-def test_phoneerp_caller_userid_prefers_bound_sender():
-    """模型填的 userid 是 injection 可改写的；绑定存在时一律以真实发送者为准。"""
-    from plugin.toolkit.phoneerp import _caller_userid
-
-    with inbound_context.bind("acct-a", sender="wxid_real"):
-        assert _caller_userid("wxid_boss") == "wxid_real"
-    # 没有绑定（CLI/TUI 直调）才回退到显式传参 —— 保持旧行为
-    assert _caller_userid("wxid_explicit") == "wxid_explicit"
-
-
-@pytest.mark.parametrize("tool,params", [
-    ("phoneerp_query", {"query": "零售明细 今天"}),
-    ("phoneerp_location", {"store": "3号店"}),
-    ("phoneerp_imei", {"imei": "860430084378288"}),
-    ("phoneerp_natural", {"query": "库存汇总"}),
-])
-def test_phoneerp_tools_pass_real_sender_as_userid(tool, params, monkeypatch):
-    """四个工具都必须把**真实发送者 wxid** 作为 ``--userid`` 传给 CLI。
-
-    旧实现把 `` userid=xxx`` 拼进 query 文本，而 CLI 只认 ``--userid`` 开关
-    ⇒ 权限过滤从未生效；且模型可以把 userid 留空拿到老板权限。
-    """
-    calls = []
-
-    class _R:
-        returncode = 0
-        stdout = '{"ok": true}'
-        stderr = ""
-
-    def fake_run(argv, **kwargs):
-        calls.append(argv)
-        return _R()
-
-    monkeypatch.setattr("plugin.toolkit.phoneerp.subprocess.run", fake_run)
-    handler = _phoneerp_handlers()[tool]["handler"]
-    with inbound_context.bind("acct-a", sender="wxid_real"):
-        asyncio.run(handler(**params))
-
-    argv = calls[0]
-    assert argv[argv.index("--userid") + 1] == "wxid_real"
-    assert not any("userid=" in str(a) for a in argv), \
-        "userid 必须走开关，不能拼进 query 文本（CLI 不解析）"
-
-
-def test_phoneerp_tools_without_binding_stay_boss_mode(monkeypatch):
-    """没有入站绑定（CLI/TUI）⇒ 不传 --userid，与旧行为一致。"""
-    calls = []
-
-    class _R:
-        returncode = 0
-        stdout = '{"ok": true}'
-        stderr = ""
-
-    monkeypatch.setattr("plugin.toolkit.phoneerp.subprocess.run",
-                        lambda argv, **kw: calls.append(argv) or _R())
-    handler = _phoneerp_handlers()["phoneerp_query"]["handler"]
-    asyncio.run(handler(query="零售明细 今天"))
-    assert "--userid" not in calls[0]
-
-
-def test_phoneerp_query_schema_does_not_offer_userid():
-    """schema 里不能再出现 userid —— 否则模型会以为权限由它决定。"""
-    props = _phoneerp_handlers()["phoneerp_query"]["schema"]["properties"]
-    assert "userid" not in props
+# --------------------------------- ⑨ 群聊身份：成员 ≠ 群 id（phoneerp 工具迁出后仅留解析层）
 
 
 def test_group_message_identity_is_the_member_not_the_room():
@@ -772,29 +690,3 @@ def test_group_message_identity_is_the_member_not_the_room():
     })
     assert old_fmt.from_wxid == "wxid_staff", "群成员身份不能被群 id 覆盖"
     assert old_fmt.chatroom_id == "123@chatroom"
-
-
-def test_group_query_passes_the_member_wxid_not_the_room(monkeypatch):
-    """按 adapter 的绑法（sender=成员，peer=群）调工具 ⇒ --userid 必须是成员。"""
-    from plugin.inbound.parser import parse_message
-
-    msg = parse_message("acct-a", {
-        "FromUserName": "wxid_staff", "ChatroomId": "123@chatroom",
-        "content": "零售明细 昨天", "msgId": "m3", "MsgType": 1,
-    })
-    calls = []
-
-    class _R:
-        returncode = 0
-        stdout = '{"ok": true}'
-        stderr = ""
-
-    monkeypatch.setattr("plugin.toolkit.phoneerp.subprocess.run",
-                        lambda argv, **kw: calls.append(argv) or _R())
-    handler = _phoneerp_handlers()["phoneerp_query"]["handler"]
-    with inbound_context.bind("acct-a", msg.from_wxid, msg.chatroom_id):
-        asyncio.run(handler(query="零售明细 昨天"))
-
-    argv = calls[0]
-    assert argv[argv.index("--userid") + 1] == "wxid_staff"
-    assert argv[argv.index("--userid") + 1] != "123@chatroom"

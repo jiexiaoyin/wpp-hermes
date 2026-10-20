@@ -540,7 +540,7 @@ _MUTE_SAMPLES = (
 
 #: 必须原样留下的：群性质 / 语言风格 / 话题清单（这些是资产）。
 _MUTE_KEEPERS = (
-    "益融数码门店群，主要聊报价与售后",
+    "示例数码门店群，主要聊报价与售后",
     "语气亲切、口语化，偶尔用表情",
     "宜接: 询价、以旧换新；忌接: 时事政治、医疗建议",
     "群里习惯用「老板」称呼店主",
@@ -626,17 +626,17 @@ def test_i9_images_only_from_the_marked_body_and_only_http_urls(monkeypatch):
     另有"无图时请求体逐字节不变"的一条，靠 ``tools/verify_judge.py`` 门禁守着（见其
     ``case_openai_body``）：那边比的是**真发出去的字节**，这里只管抠图规则。
     """
-    txt = ("看这个\n[图片] https://oss.juhe.chat/a.jpg\n"
-           "[图片] https://oss.juhe.chat/a.jpg\n"        # 重复
+    txt = ("看这个\n[图片] https://oss.example.com/a.jpg\n"
+           "[图片] https://oss.example.com/a.jpg\n"        # 重复
            "[图片] ftp://oss.juhe.ch/x.jpg\n"            # scheme 不对
-           "[图片] /root/.hermes/.env\n"                 # 本机路径
+           "[图片] ~/.hermes/.env\n"                 # 本机路径
            "[图片] data:image/png;base64,AAAA\n"         # 内联数据不算直链
            "[图片] HTTP://OSS.JUHE.CHAT/b.JPG\n")        # scheme 大小写
-    assert HF.extract_hf_image_urls(txt, 5) == ["https://oss.juhe.chat/a.jpg",
+    assert HF.extract_hf_image_urls(txt, 5) == ["https://oss.example.com/a.jpg",
                                                 "HTTP://OSS.JUHE.CHAT/b.JPG"]
-    assert HF.extract_hf_image_urls(txt, 1) == ["https://oss.juhe.chat/a.jpg"]
+    assert HF.extract_hf_image_urls(txt, 1) == ["https://oss.example.com/a.jpg"]
     assert HF.extract_hf_image_urls(txt, 0) == []
-    assert HF.extract_hf_image_urls("@张三 https://oss.juhe.chat/c.jpg", 5) == [], \
+    assert HF.extract_hf_image_urls("@张三 https://oss.example.com/c.jpg", 5) == [], \
         "没有 [图片] 标记就不算图（裸链不是图）"
     assert HF.extract_hf_image_urls("", 5) == [] and HF.extract_hf_image_urls(None, 5) == []
     assert HF.HF_VISION_DEFAULTS["maxImages"] == 1, "缺省只送 1 张（成本/超时）"

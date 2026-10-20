@@ -29,7 +29,7 @@
 现在两条一律 **fail-closed**：拿不到"这就是管理员"的证据就不执行。
 要在某账号上启用管理命令，就在账号配置里写 ``"adminUsers": ["<你的 wxid>"]`` ——
 历史配置还会把**机器人自己的 wxid** 一起写进这个列表（``accounts/default.json``
-就是 ``["q139198824", "wxid_eezdbu1ytws422"]``），因为 vendor 常那样标 sender。
+就是 ``["wxid_owner_demo", "wxid_bot_demo"]``），因为 vendor 常那样标 sender。
 """
 
 from __future__ import annotations

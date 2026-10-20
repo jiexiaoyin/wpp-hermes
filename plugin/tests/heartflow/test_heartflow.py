@@ -640,7 +640,7 @@ def test_judge_missing_api_key_warns_and_returns_none(monkeypatch, caplog):
 
 
 def test_judge_missing_model_raises_not_falls_back():
-    """v1.4.0 老板拍板"消除 plugin hardcode"：模型名必须由 accounts JSON 给。
+    """v1.4.0 项目约定"消除 plugin hardcode"：模型名必须由 accounts JSON 给。
 
     静默回落某个模型的表现是"换了模型但线上没换"，只在账单与判分分布上看得见。
     """
@@ -1907,7 +1907,7 @@ def test_no_eager_heartflow_import_in_the_package_init():
 def test_adapter_imports_heartflow_lazily():
     """适配器只在函数体内 import 心流（加载期纪律；注册失败会被吞成 WARNING）。
 
-    ⚠️ **不 import 适配器**：它顶层依赖 Hermes 的 ``gateway`` 包，本机没有（只在 .183 有）。
+    ⚠️ **不 import 适配器**：它顶层依赖 Hermes 的 ``gateway`` 包，本机没有（只在 真机 有）。
     按路径读源码即可 —— 要验的本来就是"源码长什么样"。
     """
     adapter_py = Path(__file__).resolve().parents[2] / "platform" / "adapter.py"
@@ -1933,7 +1933,7 @@ def test_the_real_module_is_the_one_that_is_loaded():
 # ===== 17. 适配器四处的接线（源级：本机装不了 Hermes，装得了的话就该行为级测） =====
 #
 # 为什么要**源级**钉：适配器顶层 ``from gateway.config import Platform``，本机没有那个包
-# （只在 .183 的 Hermes 进程里存在）。而接线的**位置**恰恰是这里最容易烂的地方 ——
+# （只在 真机 的 Hermes 进程里存在）。而接线的**位置**恰恰是这里最容易烂的地方 ——
 # 顺序换一下、挪到判断之前、漏掉一条分支，全是"跑得通但语义变了"，真机验收
 # （V7/V8）也未必抓得到：心流照旧"在工作"，只是喂给它的现场记录是伪造的。
 

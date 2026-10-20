@@ -14,7 +14,7 @@ Hermes 调工具**只有一条路**：
 ``plugins/spotify/tools.py:89`` 的 ``def handle(args: dict, **kw) -> str``；
 ``plugins/AGENTS.md`` 也把 ``handle(args)`` 写作契约。
 
-## 本插件原来错在哪（2026-10-02 在 ``.183`` 真 Hermes 的 registry 上派发实测）
+## 本插件原来错在哪（2026-10-02 在 ``真机`` 真 Hermes 的 registry 上派发实测）
 
 py2 的全部 **299 个 handler** 都是 ``fn(**params)`` 形状 —— 一个位置参数都不收：
 

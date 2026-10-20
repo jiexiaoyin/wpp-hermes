@@ -352,7 +352,7 @@ def test_nickname_mention_needs_a_boundary():
 
 
 def test_a_quote_reply_is_not_tagged_as_a_file():
-    """★ .183 真机：一条纯文本的引用回复被加上 ``[文件]`` 前缀。
+    """★ 真机 真机：一条纯文本的引用回复被加上 ``[文件]`` 前缀。
 
     现场形态（``wpp_messages`` 2026-10-18）：厂商把这条件推成 ``msg_type=49``，
     ``app.category == "quote"``，``content`` 是回复正文。正文里没有「转账/接龙/
@@ -368,8 +368,8 @@ def test_a_quote_reply_is_not_tagged_as_a_file():
         "reference": {
             "new_msg_id": "4174361559566713352",
             "svr_id": "4174361559566713352",
-            "from_user_id": "q139198824",
-            "display_name": "接晓银",
+            "from_user_id": "wxid_owner_demo",
+            "display_name": "示例联系人",
         },
     })
     msg = parse_message(ACCT, src)
@@ -382,7 +382,7 @@ def test_a_legacy_refermsg_quote_is_not_tagged_as_a_file():
     """旧版 vendor 把引用信息塞在 ``content`` 的 ``<refermsg>`` XML 里，同样不是文件。"""
     xml = ("<msg><appmsg><title>回复正文</title><type>57</type>"
            "<refermsg><svrid>4174</svrid><fromusr>wxid_boss</fromusr>"
-           "<displayname>接晓银</displayname><content>旧消息</content></refermsg>"
+           "<displayname>示例联系人</displayname><content>旧消息</content></refermsg>"
            "</appmsg></msg>")
     msg = parse_message(ACCT, _v1(type=49, content=xml))
     assert msg is not None and msg.reply_to.get("svrid") == "4174"
@@ -395,7 +395,7 @@ def test_addmsgs_wrapped_quote_is_extracted():
     JSON 字符串 —— 引用解析必须解包，否则这一路 ``reply_to`` 恒空（且不报错）。"""
     app = {"category": "quote",
            "reference": {"svr_id": "9001", "from_user_id": "wxid_q",
-                         "display_name": "接晓银"}}
+                         "display_name": "示例联系人"}}
     src = {
         "MsgId": {"string": "msg-1"},
         "FromUserName": {"string": "wxid_boss"},
@@ -407,13 +407,13 @@ def test_addmsgs_wrapped_quote_is_extracted():
     msg = parse_message(ACCT, src)
     assert msg is not None
     assert msg.reply_to == {"svrid": "9001", "from_wxid": "wxid_q",
-                            "quote_content": "", "display_name": "接晓银"}
+                            "quote_content": "", "display_name": "示例联系人"}
 
 
 def test_addmsgs_wrapped_refermsg_xml_is_extracted():
     xml = ("<msg><appmsg><title>回复正文</title><type>57</type>"
            "<refermsg><svrid>4174</svrid><fromusr>wxid_boss</fromusr>"
-           "<displayname>接晓银</displayname></refermsg></appmsg></msg>")
+           "<displayname>示例联系人</displayname></refermsg></appmsg></msg>")
     src = {
         "MsgId": {"string": "msg-2"},
         "FromUserName": {"string": "wxid_boss"},
@@ -505,9 +505,9 @@ def test_the_nested_from_user_shape_also_gets_the_push_fallback():
 
 
 @pytest.mark.parametrize("push,want", [
-    ("接晓银 : 你好", "接晓银"),          # 私聊
+    ("示例联系人 : 你好", "示例联系人"),          # 私聊
     ("戴永刚 : 收到", "戴永刚"),          # 群里没 @ 的消息
-    ("接晓银：你好", ""),                 # 冒号后无空白 ⇒ 不猜（可能是正文）
+    ("示例联系人：你好", ""),                 # 冒号后无空白 ⇒ 不猜（可能是正文）
 ])
 def test_plain_push_content_prefix_is_used_as_the_sender_nickname(push, want):
     """v1 私聊常常也只带 wxid；``push_content`` 里的「昵称 : 正文」是微信客户端

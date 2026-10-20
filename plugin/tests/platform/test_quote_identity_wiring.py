@@ -468,8 +468,8 @@ def test_the_adapter_imports_the_identity_module_once() -> None:
 # 实例属性。**不是**在测"调用了没有"——下面每一条都在看**返回值**。
 
 
-ACCT = types.SimpleNamespace(id="acct-42", nickname="益融小助理")
-GROUP = "57737516566@chatroom"
+ACCT = types.SimpleNamespace(id="acct-42", nickname="示例小助理")
+GROUP = "123456789@chatroom"
 SENDER = "wxid_sender"
 
 

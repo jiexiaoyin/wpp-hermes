@@ -83,7 +83,7 @@ def test_a_relay_with_the_word_hongbao_still_triggers(text):
     ``red packet detected: … url=missing``（看着像 vendor 没给 url）。
 
     注意这里断言的是 ``(True, "group_solitaire")`` 而**不是**"没被判红包就行" ——
-    被降级成 ``heartflow_candidate`` 同样是回归（接龙是老板拍板的 100% 必回，
+    被降级成 ``heartflow_candidate`` 同样是回归（接龙是项目约定的 100% 必回，
     交给心流就回到了"看心情回不回"）。
     """
     msg = _group(content=text, msg_type=MT_APP)

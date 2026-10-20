@@ -119,7 +119,7 @@ def test_a_broken_connection_also_skips(monkeypatch):
 
 
 def test_require_live_db_turns_the_skip_into_a_failure(monkeypatch):
-    """★ .183 上的口径：本该有真库的机器上，缺席=**红**（跳过是诚实，不是通过）。"""
+    """★ 真机 上的口径：本该有真库的机器上，缺席=**红**（跳过是诚实，不是通过）。"""
     monkeypatch.setenv("WECHATPRO_DB_NAME", "wechatpro_test")
     monkeypatch.setenv("WPP_REQUIRE_LIVE_DB", "1")
     monkeypatch.setattr(db, "is_available", lambda: False)

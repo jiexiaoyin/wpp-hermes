@@ -13,7 +13,7 @@
 
 ## 为什么每个子步骤独立 try/except
 
-历史事故（已在 .183 复现）：旧实现把全部工具注册包在**同一个** try 里，而
+历史事故（已在 真机 复现）：旧实现把全部工具注册包在**同一个** try 里，而
 ``from . import wecom_tools`` 会在**模块加载期**解析 ``wecom-cli.js`` 并抛
 ``FileNotFoundError`` ⇒ 被外层 except 吞成一行 WARNING ⇒ 其后的
 **wecom 7 + wpp_extras 3 = 10 个工具全部静默不注册**。
@@ -92,7 +92,7 @@ def _register_platform(ctx: Any) -> None:
         emoji="💬",
         allow_update_command=True,
         platform_hint=(
-            "You are chatting via WeChatPadPro (personal WeChat, vendor wx.juhe.chat). "
+            "You are chatting via WeChatPadPro (personal WeChat). "
             "Group chats: reply with at-mentions (@nickname). Plain text only. "
             "Current account resolves from the session metadata."
         ),

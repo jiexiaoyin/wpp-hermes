@@ -1,4 +1,4 @@
-"""全员群成员 → 统一白名单（2026-10-19 老板拍板）。
+"""全员群成员 → 统一白名单（2026-10-19 项目约定）。
 
 ## 规则
 
@@ -31,7 +31,7 @@
 
 账号 JSON 里写::
 
-    "employeeGroupIds": ["44971342037@chatroom"],
+    "employeeGroupIds": [],
     "employeeDenyList": ["wxid_never_add"]
 
 可配多个群（并集）。``employeeDenyList`` 可选（字符串或列表）。没配群 ⇒ 不跑同步，

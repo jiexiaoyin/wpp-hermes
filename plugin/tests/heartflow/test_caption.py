@@ -25,8 +25,8 @@ from plugin.data import repo_hf, repo_messages
 from plugin.inbound.heartflow import caption as C
 from plugin.inbound.heartflow import profile as P
 
-IMG = "https://oss.juhe.chat/a.jpg"
-IMG2 = "https://oss.juhe.chat/b.jpg"
+IMG = "https://oss.example.com/a.jpg"
+IMG2 = "https://oss.example.com/b.jpg"
 
 GOOD_PROFILE = json.dumps({
     "nature": "手机零售商客户售后群",

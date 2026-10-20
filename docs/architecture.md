@@ -11,7 +11,7 @@ Hermes 的一个**平台适配器插件**：把 WeChatPadPro（下称 vendor）�
 Hermes 的 `BasePlatformAdapter`，让 agent 能收发微信群/私聊消息。
 
 ```
-微信客户端 ── vendor（wx.juhe.chat / 127.0.0.1:28062）
+微信客户端 ── vendor（your-vendor.example / 127.0.0.1:28062）
                  │ ① 入站 webhook（HMAC v2 签名）
                  │ ② 入站 WebSocket（兜底通道）
                  │ ③ HTTP API（出站发送、群管理、查询）
@@ -21,7 +21,7 @@ Hermes 的 `BasePlatformAdapter`，让 agent 能收发微信群/私聊消息。
         │  adapter ─ 编排           │
         │  inbound/ ─ 解析/判定/旁路 │
         │  platform/ ─ 协议与传输    │
-        │  toolkit/ ─ 302 个工具定义 │
+        │  toolkit/ ─ 约 290 个工具定义 │
         └──────────────────────────┘
                  ▼
         Hermes gateway（handle_message）→ LLM → send()
@@ -97,12 +97,12 @@ send(chat_id, content, reply_to, metadata)
 | 2 | 去重器必须是 `MessageDeduplicator` 实例且挂**命名属性** | 重连后变空 → vendor 重放被二次回答 |
 | 3 | `connect()` 永久失败要 `_set_fatal_error(retryable=False)` | runner 每 300s 重试，fd 泄漏 |
 | 4 | webhook 主路径**双因素**（HMAC v2 + 路径 token）；business **只** token | 配错 = 100% 403，消息静默丢失 |
-| 5 | 落库只落**白名单内**的消息 | 隐私口径（老板拍板） |
+| 5 | 落库只落**白名单内**的消息 | 隐私口径（项目约定） |
 | 6 | 自消息回推**不进心流缓冲** | bot 自己的话被记两份，judge 上下文掺水 |
 | 7 | 凭据读 `secret_env`/`gate_env`，不读 `os.environ` | multiplex 下 A profile 用 B 的 key |
 | 8 | 阻塞 IO（DB、文件、< 1MB 也要注意）走 `asyncio.to_thread` | 事件循环停摆，WS 心跳和所有账号一起排队 |
-| 9 | 工具 schema 只补**高危/高频**描述 | 302 个工具每条多 30 字符 = 每轮多付 token |
-| 10 | 生成物（`vendor_defs*.py`）只改源表 `tools/vendor_source/` 再重生成 | `--check` 拒，下次部署被覆盖 |
+| 9 | 工具 schema 只补**高危/高频**描述 | 近 300 个工具每条多 30 字符 = 每轮多付 token |
+| 10 | 生成物（`vendor_defs*.py`）由维护者从端点蓝本重生成，不手改 | 下次重生成被覆盖 |
 
 ---
 
@@ -137,7 +137,7 @@ plugin/
 ├── inbound/                  解析 / 判定 / 旁路（心流·黑话·好感度）/ 落库
 ├── outbound/                 分片、白名单、@self 剥离、拒绝话术识别
 ├── core/                     账号、客户端、指标、netguard、webhook_paths
-├── toolkit/                  302 个工具定义（vendor_defs*.py 是生成物）
+├── toolkit/                  约 290 个工具定义（vendor_defs*.py 是生成物）
 └── neutral/                  通道无关契约 + OSS 上传
 ```
 
@@ -155,13 +155,12 @@ plugin/
 | 心流不说话 | `_try_heartflow` 日志 | 预算/冷却/重复内容闸 |
 | 重连后重复回答 | 去重器属性名 | 必须是 `MessageDeduplicator` 实例 |
 
-**探针**（不改生产）：
+**检查命令**（只读，不改生产）：
 
 ```bash
-python tools/probe_registration.py     # 302 工具与 plugin.yaml 逐名对账
-python tools/verify_tree.py            # 结构守卫（包形状 / 顶层文件数）
-python tools/gen_vendor_defs.py --check # 生成物与源表一致
-bash tools/gates.sh --only lint        # 只跑匹配的门禁项
+python3 "$HERMES_HOME/plugins/wechatpadpro-platform/setup_wizard.py" --check --json
+hermes plugins doctor "$HERMES_HOME/plugins/wechatpadpro-platform"
+python -m pytest plugin/tests -q       # 本地契约测试
 ```
 
 **日志位置**：`~/.hermes/profiles/<profile>/logs/gateway.log`（profile 自己的）+
@@ -170,16 +169,20 @@ bash tools/gates.sh --only lint        # 只跑匹配的门禁项
 
 ---
 
-## 8. 部署
+## 8. 安装与升级
 
 ```bash
-bash sync.sh                    # 备份 → rsync → 语法复检 → md5 逐位
-bash sync.sh --check            # 只核对 dev 与生产是否一致
-bash sync.sh --rollback <备份>   # 回滚
-hermes gateway restart          # 必须在**外部 shell** 跑
+# 首次安装
+bash scripts/install.sh
+
+# 升级：覆盖插件目录后跑验收
+git pull
+bash scripts/install.sh --upgrade
+hermes plugins doctor "$HERMES_HOME/plugins/wechatpadpro-platform"
 ```
 
-**为什么不带重启**：网关进程内执行重启会把发起命令一起杀掉（安全策略也拦）。
-`sync.sh` 跑到"代码已就位"为止，重启由人做。
+**重启在外部 shell 做**：网关进程内执行重启会把发起命令一起杀掉，安全策略也会拦。
+改了 `.env` 不需要重新复制代码，重启即可生效。
 
-**改了 `.env` 不需要重新部署**，重启即可生效。
+**回滚**：升级前把 `$HERMES_HOME/plugins/wechatpadpro-platform` 整个目录备份一份，
+需要时换回并重启。

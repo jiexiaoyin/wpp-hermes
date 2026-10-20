@@ -21,7 +21,7 @@
 ## 边界（别误判）
 
 - 网关/vendor **真实响应样本**不在本仓：这里按蓝本语义构造，真机由
-  ``tools/probe_adapter_contract.py``（``.183`` 上 70 项真机契约，含本文件这五条）
+  ``tools/probe_adapter_contract.py``（``真机`` 上 70 项真机契约，含本文件这五条）
   与后续真机发送复核。
 - ``createTime`` 蓝本也取（撤回要用），本树**没有**撤回路径（``wpp_revoke_msg`` 的 id
   来自调用方参数）⇒ 故意不搬，别当漏项补。
@@ -145,7 +145,7 @@ def test_list_head_msg_id_is_a_client_id():
 
 
 def test_legacy_top_level_fields_still_work():
-    """旧实现认的字段**一个都不许丢** —— .183 上 ``probe_adapter_contract`` 直接验它们。"""
+    """旧实现认的字段**一个都不许丢** —— 真机 上 ``probe_adapter_contract`` 直接验它们。"""
     assert O.extract_msg_id({"Data": {"NewMsgId": 7}}) == "7"
     assert O.extract_msg_id({"Data": {"Newmsgid": 8}}) == "8"
     assert O.extract_msg_id({"Data": {"Msgid": 9}}) == "9"

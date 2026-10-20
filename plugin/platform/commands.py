@@ -728,7 +728,7 @@ def _employee_group_ids(account_id: str, adapter: Any = None) -> list[str]:
 def _handle_whitelist(account_id: str, args: list[str], *, adapter: Any = None) -> str:
     """``/whitelist status``（``/outbound`` 同义）：统一白名单总览。
 
-    2026-10-19 老板拍板后**没有独立的出站名单**：``allowFrom`` / ``groupAllowFrom``
+    2026-10-19 项目约定后**没有独立的出站名单**：``allowFrom`` / ``groupAllowFrom``
     / ``adminUsers`` 同时管收发，``WECHATPRO_SEND_ALLOWLIST`` 只是额外补充。
     这里只印**来源与计数**；明细用 ``/user list`` ``/group list``。
     """

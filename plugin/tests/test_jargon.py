@@ -442,7 +442,7 @@ def test_only_short_ascii_abbreviations_survive_the_filter() -> None:
 
 
 def test_chinese_terms_survive_the_filter_after_the_2026_10_19_deviation() -> None:
-    """★ 中文候选现在**能到 LLM**（2026-10-19 老板拍板，有意偏离 TS）。
+    """★ 中文候选现在**能到 LLM**（2026-10-19 项目约定，有意偏离 TS）。
 
     TS 的 ``HARD_BLOCK_RE`` 含 ``[一-鿿]``，中文永远到不了 LLM；py2 原先照搬，
     真机上等于"黑话插件开着，中文黑话永远学不到"。放宽后仍拦 @提及/方括号/URL/空白。

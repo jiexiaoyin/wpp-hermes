@@ -25,7 +25,7 @@
 
 1. **无 ``authcode`` ⇒ 该账号不参与连接**（warn，不 raise —— 随仓库分发的空壳
    ``default.json`` 就是这个状态，不能因此让插件起不来）。
-2. **``agent`` 必填、且禁止 ``"main"``** ⇒ **raise**。2026-09-01 老板拍板，
+2. **``agent`` 必填、且禁止 ``"main"``** ⇒ **raise**。2026-09-01 项目约定，
    防多账号串号（fallback 到 main 会让两个微信号共用一个 agent 上下文）。
 3. **``self.token = 首个账号的 authcode``** ⇒ 供 Hermes 的 multiplex 冲突检测
    （``gateway.run._adapter_credential_fingerprint`` 读 ``token``）识别
@@ -42,6 +42,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -56,28 +57,29 @@ ACCOUNTS_DIR = PLUGIN_DIR / "accounts"
 #: 禁止的 agent 名 —— fallback 到 main 会让多账号共用一个 agent 上下文（串号）
 FORBIDDEN_AGENT = "main"
 
-#: ⚠️ 生产 bot「益融小助理」。以它为身份的实例**绝不能连厂商** ——
-#: 厂商的客户端实例锁会把生产踢下线 + webhook 被劫持（红线 2）。
-PRODUCTION_WXID = "wxid_eezdbu1ytws422"
-#: 逃生阀：确需在受控环境下以生产身份连接时才置 1（**默认禁止**）
+#: 受保护账号的 **wxid 列表**（逗号/空白分隔）。默认空 —— 由部署方在自己的
+#: ``.env`` 里写明，公开仓库不携带任何生产标识。
+PROTECTED_WXIDS_ENV = "WECHATPRO_PROTECTED_WXIDS"
+#: 受保护账号**凭据的指纹**（``sha256(authcode)[:12]``，逗号/空白分隔）。默认空。
+PROTECTED_FINGERPRINTS_ENV = "WECHATPRO_PROTECTED_FINGERPRINTS"
+#: 逃生阀：确需在受控环境下以受保护身份连接时才置 1（**默认禁止**）
 ALLOW_PRODUCTION_ENV = "WECHATPRO_ALLOW_PRODUCTION_WXID"
 
-#: ⚠️ 生产实例**凭据的指纹**（``sha256(authcode)[:12]``，与 :func:`fingerprint` 和厂商的
-#: 客户端实例锁**同款口径**）。只存**单向指纹**，不存密钥：它不可用于连接，只用于
-#: "这把锁是不是生产那把"的比对（运维还能拿它跟厂商面板上的实例锁对着看）。
-#:
-#: **为什么光有 wxid 不够**（P2-a / C4）：``selfWxid`` 是配置里**写的一句话** ——
-#: 缺省（"还没填"）、写错（复制了别的账号的）、经 ``WECHATPRO_ACCOUNTS_JSON`` 注入的
-#: 空壳，都能让它不再是 ``wxid_eezdbu1ytws422``，而**起决定作用的是 authcode**
-#: （厂商按客户端密钥加实例锁）：拿着生产 authcode 连上去 = 把生产踢下线 + 劫持它的
-#: webhook（红线 2），此时配置里的 selfWxid 写什么都一样。
-#:
-#: ⚠️ 生产轮换 authcode 后**必须同步更新这张表**，否则这道门退化成"只认 wxid"
-#: （那是 fail-open）。所以 :func:`refusal_reason` 的措辞要把**两种触发**分开写，
-#: 让运维一眼看出是哪一道门在拦，别改配置绕过去。
-PRODUCTION_CREDENTIAL_FINGERPRINTS = frozenset({
-    "654c31808b5f",   # 生产 bot「益融小助理」的 authcode（WECHATPRO_AUTHCODE）
-})
+
+def _env_set(name: str) -> frozenset[str]:
+    """读逗号/空白分隔的集合型环境变量（大小写归一、去空）。"""
+    raw = str(os.environ.get(name) or "")
+    return frozenset(x for x in raw.replace(",", " ").split() if x)
+
+
+def protected_wxids() -> frozenset[str]:
+    """受保护账号的 wxid 集合（空集合 = 这道门未启用）。"""
+    return _env_set(PROTECTED_WXIDS_ENV)
+
+
+def protected_fingerprints() -> frozenset[str]:
+    """受保护实例的凭据指纹集合（空集合 = 这道门未启用）。"""
+    return frozenset(x.lower() for x in _env_set(PROTECTED_FINGERPRINTS_ENV))
 
 
 class AccountError(RuntimeError):
@@ -89,6 +91,21 @@ class AccountError(RuntimeError):
 
 def _env(name: str, default: str = "") -> str:
     return str(os.environ.get(name) or default)
+
+
+def _derive_ws_url(api_base: str) -> str:
+    """由 API base 推导 WS 地址（``https://host`` → ``wss://host/ws/sync``）。
+
+    外部分支部署不一定知道厂商的 WS 路径；``WECHATPRO_WS_URL`` 没配时按这套
+    约定推导，仍是错的就由连接层报错（不在这里静默给一个厂商专属默认值）。
+    """
+    parsed = urlsplit(api_base)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise AccountError(
+            f"apiBaseUrl / WECHATPRO_API_BASE 不是合法的 http(s) URL: {api_base!r}"
+        )
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    return f"{scheme}://{parsed.netloc}/ws/sync"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -201,19 +218,20 @@ class Account:
 
         两道判据缺一不可：
 
-        1. ``self_wxid`` 命中生产 wxid（原有那道）；
-        2. **凭据指纹**命中生产 authcode（新加的那道）—— 见
-           :data:`PRODUCTION_CREDENTIAL_FINGERPRINTS` 的说明：selfWxid 只是配置里的
-           一句话，缺省/写错/被 env 注入都能绕开第 1 道，而"连上去会怎样"由 authcode
-           决定（厂商按客户端密钥上实例锁）。
+        1. ``self_wxid`` 命中 ``WECHATPRO_PROTECTED_WXIDS``（原有那道）；
+        2. **凭据指纹**命中 ``WECHATPRO_PROTECTED_FINGERPRINTS``（更可靠的那道）。
+
+        两集合默认都是空的 —— 由部署方在自己的 ``.env`` 里配置，公开仓库不携带
+        任何生产标识。``selfWxid`` 只是配置里的一句话，缺省/写错/被 env 注入都能
+        绕开第 1 道；而"连上去会怎样"由 authcode 决定（厂商按客户端密钥上实例锁）。
 
         这里**不看 enabled** —— 判定"是不是那个身份"与"这次要不要连"是两件事
         （"要不要连"在 :func:`refusal_reason` / :func:`red_line_reason` 里判）。
         """
-        if self.self_wxid == PRODUCTION_WXID:
+        if self.self_wxid and self.self_wxid in protected_wxids():
             return True
         ft = self.credential_fingerprint
-        return ft != "-" and ft in PRODUCTION_CREDENTIAL_FINGERPRINTS
+        return ft != "-" and ft in protected_fingerprints()
 
     @property
     def webhook_url(self) -> str:
@@ -421,9 +439,8 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         )
 
     webhook_host = _env("WECHATPRO_WEBHOOK_HOST", str(cfg.get("webhookHost") or "127.0.0.1"))
-    # ⚠️ 这里**刻意不给默认域名**。旧 config.py:82 硬编码 `https://hermes.juhe.chat`
-    #    作兜底，与 plugin.yaml 自称的 "No default is applied" 自相矛盾；未配就是
-    #    空串，由 ``Account.webhook_url`` 显式处理。
+    # ⚠️ webhook 的对外地址**刻意不给默认域名**：未配就是空串，
+    #    由 ``Account.webhook_url`` 显式处理。
     public_url = _resolve_secret(cfg, "webhookPublicUrl", "WECHATPRO_WEBHOOK_PUBLIC_URL")
 
     # ③ ``ai.judgeModel`` / ``ai.timeoutMs`` 作为三个 LLM 功能的默认值
@@ -440,16 +457,26 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
             merged["timeoutMs"] = _ai["timeoutMs"]
         return merged
 
+    # ④ 厂商地址：**没有内置默认值**。公开仓库不携带我们的厂商域名；
+    #    未配置就给出可操作的错误，而不是把陌生人导向我们的服务器。
+    api_base_url = str(cfg.get("apiBaseUrl") or "").strip() or _env("WECHATPRO_API_BASE").strip()
+    if not api_base_url:
+        raise AccountError(
+            f"账号 {account_id!r} 未配置 apiBaseUrl。请在账号 JSON 写 apiBaseUrl，"
+            f"或在 .env 设置 WECHATPRO_API_BASE（例如 https://your-vendor.example）。"
+        )
+    ws_url = str(cfg.get("wsUrl") or "").strip() or _env("WECHATPRO_WS_URL").strip()
+    if not ws_url:
+        ws_url = _derive_ws_url(api_base_url)
+
     return Account(
         id=account_id,
         agent=agent,
         enabled=_as_bool(cfg.get("enabled"), True),
         authcode=authcode,
         token_key=token_key,
-        api_base_url=str(cfg.get("apiBaseUrl") or "").strip()
-        or _env("WECHATPRO_API_BASE", "https://wx.juhe.chat"),
-        ws_url=str(cfg.get("wsUrl") or "").strip()
-        or _env("WECHATPRO_WS_URL", "wss://wx.juhe.chat/ws/sync"),
+        api_base_url=api_base_url,
+        ws_url=ws_url,
         self_wxid=str(cfg.get("selfWxid") or "").strip(),
         nickname=str(cfg.get("nickname") or "").strip() or "微信助手",
         webhook_host=webhook_host,
@@ -472,7 +499,7 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         blacklist_groups=_as_str_tuple(cfg.get("blacklistGroups")),
         # W7-6 起这个键**真的生效**（到达层聚合窗口）。默认值对齐 TS ``core/constants.ts:62``
         # 的 ``DEFAULT_DEBOUNCE_MS = 500`` —— 本树原先写 1500 是 v1.3.74 **之前**的旧值
-        # （2026-08-22 老板拍板降到 500：webhook 到达延迟中位数 < 200ms，等 1.5s 纯属浪费）。
+        # （2026-08-22 项目约定降到 500：webhook 到达延迟中位数 < 200ms，等 1.5s 纯属浪费）。
         # 那时这键没人读，写多少都不影响；现在它进了收信链路，**按 TS 的现值**才对齐。
         debounce_ms=_as_int(cfg.get("debounceMs"), 500),
         heartflow=_with_ai_defaults(_as_dict(cfg.get("heartflow"))),
@@ -516,8 +543,9 @@ def _production_reason(acct: Account) -> str | None:
     """生产身份红线的拒因（**没触红线返回 None**，逃生阀已开也返回 None）。"""
     if not acct.is_production_identity or _env_bool(ALLOW_PRODUCTION_ENV):
         return None
-    if acct.self_wxid == PRODUCTION_WXID:
-        which = (f"selfWxid 就是生产 bot「益融小助理」（{PRODUCTION_WXID}）")
+    if acct.self_wxid and acct.self_wxid in protected_wxids():
+        which = (f"selfWxid 命中受保护账号列表（{acct.self_wxid}，"
+                 f"见 {PROTECTED_WXIDS_ENV}）")
     else:
         which = (f"它的 authcode 是生产实例那把锁（指纹 {acct.credential_fingerprint}，"
                  f"与实例锁 sha256[:12] 同款口径）—— **selfWxid 写对也没用**，"
@@ -556,8 +584,8 @@ def red_line_reason(acct: Account) -> str | None:
 
     ⚠️ 判据里**含"本来会不会连"**（``enabled`` ∧ 有凭据）：这个问题问的是
     "要不要当场炸"，而 ``enabled=false`` 的账号无论如何都不会连上去，
-    把它算成红线只会让 dev 机起不来（``/root/.hermes`` 上那份把 ``selfWxid``
-    写成生产号、``enabled=false`` 的 ``default.json`` 就是这种"摆着不连"的形态）。
+    把它算成红线只会让开发机起不来（某台机器上那份把 ``selfWxid`` 写成生产号、
+    ``enabled=false`` 的 ``default.json`` 就是这种“摆着不连”的形态）。
     **"这个账号的身份是不是生产"**是另一个问题，读 :attr:`Account.is_production_identity`。
     """
     if not acct.enabled or not acct.has_credentials:

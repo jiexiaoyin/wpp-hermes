@@ -9,7 +9,7 @@
 所以本文件把 ``migrate()`` 驱动在一个内存 stub 上（``_StubDb``）：它只实现
 ``query`` / ``execute`` 两个口子，按**真的 DDL 文本**更新自己的 information_schema
 视图。断言的是**框架发了什么、发了之后状态对不对**（幂等 / 只 ADD / checksum 生命周期）,
-**不是** MySQL 自己会怎么做。真库上的那一段由 ``tools/probe_v2*.py`` 在 .183 跑（V2/V2b）。
+**不是** MySQL 自己会怎么做。真库上的那一段由 ``tools/probe_v2*.py`` 在 真机 跑（V2/V2b）。
 
 ## 本文件守的六件事（每条都对应一次真实事故）
 
@@ -624,7 +624,7 @@ def _stub_col_row(defn: str, is_pk: bool = False) -> dict:
     与 ``migrations._expected_col_parts`` 是两条独立的路（那条读 schema.sql 的期望态，
     这条读"桩以为库里是什么"）。
 
-    ★ 这里按 **MariaDB** 建模，不是按 SQL 教科书 —— 三条实测差异（2026-10-02 在 .183
+    ★ 这里按 **MariaDB** 建模，不是按 SQL 教科书 —— 三条实测差异（2026-10-02 在 真机
     真库上对着 ``wechatpro_test`` 读出来的），少一条就会让本桩**假绿**：
 
     1. **主键列恒 NOT NULL**：``id INT AUTO_INCREMENT PRIMARY KEY`` 里没写 ``NOT NULL``，
@@ -663,7 +663,7 @@ def _stub_col_row(defn: str, is_pk: bool = False) -> dict:
 class _StubDb:
     """``migrate()`` 的最小驱动面：**只理解本框架会发的三类语句**。
 
-    它**故意不是** SQL 引擎：真库行为（InnoDB、collation、filesort）由 .183 上的
+    它**故意不是** SQL 引擎：真库行为（InnoDB、collation、filesort）由 真机 上的
     ``tools/probe_v2*.py`` 验。这里只回答两个问题：框架发了什么？发完之后状态对不对？
 
     ``transaction()`` 不是摆设：D4 之后 migration 循环走 ``conn.transaction()``，
@@ -1000,7 +1000,7 @@ def test_display_widths_and_case_are_not_drift():
     assert _drift(cols) == []
 
 
-#: ★ MariaDB 的三种「服务端说法与我们写法不同」——**都不是漂移**，2026-10-02 在 .183
+#: ★ MariaDB 的三种「服务端说法与我们写法不同」——**都不是漂移**，2026-10-02 在 真机
 #: 真库上实测出来的（本桩原来按 SQL 教科书建模，于是 158 列全绿而真库一次报 77 条）：
 #: 1. 主键列（行内 / 表级）没写 ``NOT NULL``，服务端恒回 ``NO``；
 #: 2. 可空列的默认值回来是**字符串 ``"NULL"``**（MySQL 回 SQL ``NULL``）；

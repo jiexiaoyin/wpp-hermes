@@ -65,13 +65,13 @@ def _pipeline(text: str = "你好") -> MagicMock:
 async def test_builds_a_group_event_with_resolved_names():
     adapter = _adapter()
     msg = _msg(chatroom_id="123@chatroom", content="在吗")
-    with patch("plugin.inbound.session_title.chat_display_name", return_value="益融华为群"), \
+    with patch("plugin.inbound.session_title.chat_display_name", return_value="示例华为群"), \
          patch("plugin.inbound.session_title.sender_display_name", return_value="老王"):
         event = await adapter._build_event(_acct(), msg, _pipeline("在吗"), media=([], []))
 
     assert event is not None
     assert event.text == "在吗"
-    assert event.source.chat_name == "益融华为群"
+    assert event.source.chat_name == "示例华为群"
     assert event.source.chat_type == "group"
     assert event.user_name == "老王"
     assert event.message_id == "m1"

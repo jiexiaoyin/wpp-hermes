@@ -1,0 +1,39 @@
+{
+  "_comment": "单账号最小配置范例。复制为 accounts/default.json 后按需修改；authcode/tokenKey 建议只写 *Env 名称，明文放在 <HERMES_HOME>/.env 里（文件权限 0600）。字段完整说明见 docs/configuration.md。",
+  "enabled": true,
+
+  "apiBaseUrl": "https://your-vendor.example",
+  "wsUrl": "wss://your-vendor.example/ws/sync",
+
+  "authcode": "",
+  "authcodeEnv": "WECHATPRO_AUTHCODE",
+  "tokenKey": "",
+  "tokenKeyEnv": "WECHATPRO_TOKEN_KEY",
+
+  "webhookHost": "127.0.0.1",
+  "webhookPort": 4398,
+  "webhookPath": "/wechatpadpro/webhook",
+  "webhookPathToken": "replace-with-a-random-token",
+  "autoSetWebhook": true,
+  "setWebhookRetries": 3,
+
+  "selfWxid": "",
+  "nickname": "微信助手",
+
+  "allowFrom": [],
+  "groupPolicy": "open",
+  "groupAllowFrom": [],
+  "adminUsers": [],
+
+  "agent": "wpp-wechat",
+  "debounceMs": 500,
+
+  "heartflow": {"enabled": false},
+  "affection": {"enabled": false},
+  "jargon": {"enabled": false},
+  "style": {"enabled": false},
+  "tts": {"enabled": false},
+  "proactive": {"enabled": false},
+  "debounceMerge": {"enabled": false},
+  "spectre": {"quoteHint": false}
+}

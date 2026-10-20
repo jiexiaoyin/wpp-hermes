@@ -24,7 +24,7 @@ import pytest
 from plugin.inbound import quote_ref
 from plugin.platform import outbound as O
 
-ROOT_GROUP = "57737516566@chatroom"
+ROOT_GROUP = "123456789@chatroom"
 SENDER = "wxid_tsyoek04xgd822"
 NICK = "戴永刚"
 SVRID = "324472740118864204"
@@ -108,7 +108,7 @@ def test_without_any_punctuation_it_still_falls_back_to_a_hard_cut():
 # adapter.py 模块级 import Hermes 的 gateway.*，本机只能靠 conftest 的空壳；
 # 装上空壳后 ``_send_chunk`` 可以真跑。这里造壳，只替换身份/取昵称/落库三处。
 
-ACCT = types.SimpleNamespace(id="acct-42", nickname="益融小助理", self_wxid="wxid_bot")
+ACCT = types.SimpleNamespace(id="acct-42", nickname="示例小助理", self_wxid="wxid_bot")
 RESP = {"Code": 0, "Data": {"List": [{"NewMsgId": "9001", "ClientMsgid": "9001"}]}}
 
 

@@ -16,15 +16,15 @@ TS 的两处实现供对照：``src/storage/stt.ts``（本模块的蓝图，含�
 ## 依赖：缺哪样都只是"没转写"，绝不挡住消息
 
 ===========================  ==============================================  ================
-依赖                          来源                                            ``.183`` 现状
+依赖                          来源                                            真机 现状
 ===========================  ==============================================  ================
 silk 解码器二进制             ``WPP_SILK_DECODER_PATH``                        **不存在**
-                              （默认 ``/root/silk_decoder/silk/decoder``）
+                              （默认 ``~/silk_decoder/silk/decoder``）
 STT key                      ``WECHATPRO_STT_API_KEY``                        **未配**
                               （``SILICONFLOW_API_KEY`` 兜底）
 ===========================  ==============================================  ================
 
-⇒ ``.183`` 上"没有 vendor 转写的语音"转不出文字，模型只看到 ``[语音]`` 一行。
+⇒ 真机 上"没有 vendor 转写的语音"转不出文字，模型只看到 ``[语音]`` 一行。
 这**不是静默的**：:func:`unavailable_reason` 探测缺哪一样，调用方在**第一条**这样的
 语音上打一条 WARNING（之后降 DEBUG —— 每条语音都喊会把日志淹掉，一条都不喊才是
 本仓反复吃过的亏）。⚠️ 出站方向的 encoder 在 :mod:`plugin.platform.silk_encoder`。
@@ -32,7 +32,7 @@ STT key                      ``WECHATPRO_STT_API_KEY``                        **
 ## 为什么解码要外部二进制
 
 微信语音是 SILK（SKP_SILK），不是 ffmpeg 认的常规编码 —— TS 侧同样是 shell 出去调
-``decodeSilkToPcm``。纯 Python 重写 SKP_SILK 不划算，且 .183 上本来就没有。
+``decodeSilkToPcm``。纯 Python 重写 SKP_SILK 不划算，且当时的真机上本来就没有。
 
 ## 为什么 HTTP 收在 ``_post_wav`` 一层
 
@@ -51,11 +51,15 @@ import logging
 import os
 import struct
 import tempfile
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 #: silk 解码器二进制。默认值与 TS ``WPP_SILK_DECODER_PATH`` 一致（与 encoder 同目录）。
-SILK_DECODER_PATH = os.environ.get("WPP_SILK_DECODER_PATH", "/root/silk_decoder/silk/decoder")
+SILK_DECODER_PATH = os.environ.get(
+    "WPP_SILK_DECODER_PATH",
+    str(Path.home() / "silk_decoder" / "silk" / "decoder"),
+)
 
 #: SiliconFlow STT 端点与模型（与 TS ``stt.ts`` 的默认值逐字一致）。
 STT_URL = os.environ.get("SILICONFLOW_STT_URL", "https://api.siliconflow.cn/v1/audio/transcriptions")
@@ -85,7 +89,7 @@ RETRY_SLEEP_S = 1.0
 #:
 #: 401 重试看着奇怪（凭证错重试不会变对），但这是 TS 的原样语义：401 在这个 vendor
 #: 上出现过"抖动"（同 key 隔一会儿就通）。照搬它，代价是配错 key 时每条语音多等 3 秒，
-#: 收益是与蓝本行为一致 —— 改这里要先在 .183 上验，别凭直觉。
+#: 收益是与蓝本行为一致 —— 改这里要先在真机上验，别凭直觉。
 RETRYABLE_STATUSES = frozenset({401, 429})
 
 #: 解码器超时（TS ``silk.ts``：10s，防 native binary hang）。
@@ -170,7 +174,7 @@ def note_degradation_once(reason: str) -> None:
 
 
 def reset_degradation_latch() -> None:
-    """清掉"喊过了"的闸（测试用；也让 .183 上手动重新探测成为可能）。"""
+    """清掉“喊过了”的闸（测试用；也让真机上手动重新探测成为可能）。"""
     global _WARNED_DEGRADED
     _WARNED_DEGRADED = False
 

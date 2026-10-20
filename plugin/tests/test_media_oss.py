@@ -347,7 +347,7 @@ async def test_the_secret_never_travels_on_the_command_line(monkeypatch, cred_fi
 
     ⚠️ 它同时是一份**如实记录**：本模块把 AK/SK 读进 ``OssConfig`` 之后**一个字节都不往下传**
     （与 TS 同款），真机上能上传成功的那一半**全靠 ``~/.ossutilconfig``** ——
-    2026-10-03 在 ``.183`` 落 OSS 时就是靠这条才想明白"只放 JSON 为什么不够"。
+    2026-10-03 在 ``真机`` 落 OSS 时就是靠这条才想明白"只放 JSON 为什么不够"。
     """
     seen: list[list[str]] = []
 

@@ -397,8 +397,8 @@ def test_preload_does_not_even_query_when_the_gate_is_off(monkeypatch):
 def test_resolve_defaults_and_fallbacks():
     r = d.resolve_dedupe_cfg(None)
     assert r.as_dict() == d.HF_DEDUPE_DEFAULTS
-    assert r.window_sec == 21600, "6 小时窗（老板拍板）"
-    assert r.sim_threshold == 0.85, "相似阈值 0.85（老板拍板）"
+    assert r.window_sec == 21600, "6 小时窗（项目约定）"
+    assert r.sim_threshold == 0.85, "相似阈值 0.85（项目约定）"
     assert r.proactive_only is True, "只对心流主动插话生效"
 
     # 非法：相似度越界 ⇒ 回落；窗口/豁免 ≤0 ⇒ 回落；historyMax 钳到 500

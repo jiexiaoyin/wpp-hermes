@@ -2,7 +2,7 @@
 
 替代旧的 ``test_multi_account.py``（2026-08-31 的旧脚手架，第 7 步删除；它要求
 ``runner.py`` 先往 ``sys.modules`` 里塞 ``_harness``，且把 ``PLUGIN_DIR`` 写死成
-``/root/.hermes/plugins/wechatpadpro`` —— 在 dev 树上根本没有那个目录）。
+``~/.hermes/plugins/wechatpadpro`` —— 在 dev 树上根本没有那个目录）。
 
 ## 覆盖面与**不覆盖**的边界（写在最前面，免得下一个人误判）
 
@@ -12,7 +12,7 @@
 - **多账号路由**（``_parse_chat_id`` 的 ``<account_id>:<peer>`` 首冒号切分）与
   **``WPP_TOOLS_ONLY=1`` 纯工具模式**住在 ``platform/adapter.py``，它模块级
   ``from gateway.config import Platform``（Hermes 独有）⇒ **本机 import 不了**。
-  覆盖它们的是 ``tools/probe_adapter_contract.py``（.183，真 Hermes 上 57 项契约）
+  覆盖它们的是 ``tools/probe_adapter_contract.py``（真机，真 Hermes 上 57 项契约）
   与门禁里的 ``adapter-seams`` 变异套件（按调用点源码形状验）。本文件**不再假装**测过。
 - 本文件也**不**读 ``plugin/accounts/default.json``（含 authcode，见 .gitignore 红线）：
   每个用例把 ``WECHATPRO_ACCOUNTS_DIR`` 指到 tmp_path。
@@ -51,6 +51,14 @@ def _isolated_accounts_dir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setenv("WECHATPRO_ACCOUNTS_DIR", str(d))
     monkeypatch.delenv("WECHATPRO_ACCOUNTS_JSON", raising=False)
+    # 厂商地址现在是必填项（公开仓库不带默认域名）。测试统一给一个占位地址；
+    # 专门测「未配置」的用例自己 delenv 覆盖。
+    monkeypatch.setenv("WECHATPRO_API_BASE", "https://vendor.test")
+    monkeypatch.delenv("WECHATPRO_WS_URL", raising=False)
+    # 受保护身份集合默认空；守卫类用例自己 setenv。
+    monkeypatch.delenv(A.PROTECTED_WXIDS_ENV, raising=False)
+    monkeypatch.delenv(A.PROTECTED_FINGERPRINTS_ENV, raising=False)
+    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
     OV._runtime_overrides.clear()
     yield d
     OV._runtime_overrides.clear()
@@ -67,11 +75,15 @@ def _cfg(**kw) -> dict:
     return base
 
 
+#: 守卫测试用的**编造**受保护 wxid（真实生产 wxid 不进公开仓）。
+PROTECTED_WXID = "wxid_protected_test"
+
+
 # ==================================================== 1. 四层解析
 
 def test_defaults_are_the_documented_ones(_isolated_accounts_dir, monkeypatch):
     """默认值即规格：改这里就是改线上默认行为。"""
-    for k in ("WECHATPRO_AUTHCODE", "WECHATPRO_API_BASE", "WECHATPRO_WS_URL",
+    for k in ("WECHATPRO_AUTHCODE", "WECHATPRO_WS_URL",
               "WECHATPRO_WEBHOOK_HOST", "WECHATPRO_WEBHOOK_PUBLIC_URL"):
         monkeypatch.delenv(k, raising=False)
     _write(_isolated_accounts_dir, "default", _cfg())
@@ -81,8 +93,9 @@ def test_defaults_are_the_documented_ones(_isolated_accounts_dir, monkeypatch):
     # W7-6：500 不是随手改的 —— 它是 TS ``core/constants.ts:62`` 的现值
     # （2026-08-22 由 1500 降下来的那个），而这个键从 W7-6 起**真的进了收信链路**。
     assert acct.debounce_ms == 500
-    assert acct.api_base_url == "https://wx.juhe.chat"
-    assert acct.ws_url == "wss://wx.juhe.chat/ws/sync"
+    # 地址没有内置默认值：取 fixture 给的占位；WS 未配时按 API base 推导。
+    assert acct.api_base_url == "https://vendor.test"
+    assert acct.ws_url == "wss://vendor.test/ws/sync"
     assert acct.webhook_host == "127.0.0.1"
     assert acct.webhook_port == 4398
     assert acct.webhook_path == "/wechatpadpro/default/webhook"
@@ -244,7 +257,7 @@ def _acct(**kw) -> A.Account:
 
 def test_refusal_reasons_are_four_distinct_words(_isolated_accounts_dir, monkeypatch):
     """四种"不能连"各回各的因由 —— 运维面靠它分辨，别合并成一句。"""
-    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+    monkeypatch.setenv(A.PROTECTED_WXIDS_ENV, PROTECTED_WXID)
 
     off = A.resolve("default", {"agent": "wpp-a", "enabled": False, "authcode": "c"})
     assert "enabled=false" in A.refusal_reason(off)
@@ -253,9 +266,9 @@ def test_refusal_reasons_are_four_distinct_words(_isolated_accounts_dir, monkeyp
     assert "无 authcode" in A.refusal_reason(no_cred)
 
     prod = A.resolve("default", {"agent": "wpp-a", "authcode": "c",
-                                 "selfWxid": A.PRODUCTION_WXID})
+                                 "selfWxid": PROTECTED_WXID})
     reason = A.refusal_reason(prod)
-    assert reason and "生产 bot" in reason and A.PRODUCTION_WXID in reason
+    assert reason and "受保护" in reason and PROTECTED_WXID in reason
     assert A.ALLOW_PRODUCTION_ENV in reason, "拒因里要写清逃生阀叫什么"
 
     ok = A.resolve("default", {"agent": "wpp-a", "authcode": "c", "selfWxid": "wxid_other"})
@@ -265,40 +278,39 @@ def test_refusal_reasons_are_four_distinct_words(_isolated_accounts_dir, monkeyp
         A.assert_connectable(prod)
 
 
-def test_the_production_wxid_guard_can_only_be_lifted_explicitly(_isolated_accounts_dir, monkeypatch):
-    """红线 2：生产身份**默认拒连**，逃生阀必须显式置 1（且只在受控环境下用）。"""
-    cfg = {"agent": "wpp-a", "authcode": "c", "selfWxid": A.PRODUCTION_WXID}
-    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+def test_the_protected_wxid_guard_can_only_be_lifted_explicitly(_isolated_accounts_dir, monkeypatch):
+    """红线 2：受保护身份**默认拒连**，逃生阀必须显式置 1（且只在受控环境下用）。"""
+    monkeypatch.setenv(A.PROTECTED_WXIDS_ENV, PROTECTED_WXID)
+    cfg = {"agent": "wpp-a", "authcode": "c", "selfWxid": PROTECTED_WXID}
     assert A.refusal_reason(A.resolve("default", cfg)) is not None
 
     monkeypatch.setenv(A.ALLOW_PRODUCTION_ENV, "1")
     assert A.refusal_reason(A.resolve("default", cfg)) is None
 
 
-def test_the_production_wxid_is_a_literal_in_the_source():
-    """守卫的判据必须是**源码里的字面量** —— 从 env 读就等于没有守卫。"""
-    import ast
-    from pathlib import Path
+def test_the_protected_wxid_comes_from_env_not_source(monkeypatch):
+    """公开仓不携带生产标识：集合默认空，由部署方在 ``.env`` 里配置。
 
-    src = Path(A.__file__).read_text(encoding="utf-8")
-    lits = {n.value for n in ast.walk(ast.parse(src))
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-    assert A.PRODUCTION_WXID in lits, "生产 wxid 必须硬编码在 core/accounts.py"
-    assert A.PRODUCTION_WXID != "" and not A.PRODUCTION_WXID.startswith("wxid_test")
+    （旧实现把生产 wxid 硬编码在源码里。那样虽然"守得住"，但公开仓会泄漏
+    生产 bot 标识，而且第三方用户根本不该被这道门影响。）
+    """
+    monkeypatch.delenv(A.PROTECTED_WXIDS_ENV, raising=False)
+    assert A.protected_wxids() == frozenset()
+
+    monkeypatch.setenv(A.PROTECTED_WXIDS_ENV, " wxid_a, wxid_b  wxid_c ")
+    assert A.protected_wxids() == frozenset({"wxid_a", "wxid_b", "wxid_c"})
 
 
 # --------------------------------------------------------- C4：凭据那道判据
 
 def _prod_by_credential(monkeypatch, code: str = "fake-prod-code") -> str:
-    """把"生产凭据指纹"指到一个**编造的**码上。
+    """把"受保护凭据指纹"指到一个**编造的**码上。
 
     真 authcode 不进仓、不进测试（钦定铁律：三条在用生产密钥永不可动），
-    所以这里验的是**机制**：指纹命中 ⇒ 拒。真实那把指纹是不是写对了，
-    由 ``test_the_production_credential_fingerprint_is_a_literal_in_the_source``
-    与 .183 上的真机自查各自守一半。
+    所以这里验的是**机制**：指纹命中 ⇒ 拒。生产部署把真实指纹写进
+    ``WECHATPRO_PROTECTED_FINGERPRINTS``，由运维面守护。
     """
-    monkeypatch.setattr(A, "PRODUCTION_CREDENTIAL_FINGERPRINTS",
-                        frozenset({A.fingerprint(code)}))
+    monkeypatch.setenv(A.PROTECTED_FINGERPRINTS_ENV, A.fingerprint(code))
     return code
 
 
@@ -323,7 +335,7 @@ def test_a_production_authcode_is_refused_even_when_selfwxid_looks_innocent(
     assert "红线 2" in reason
     assert acct.credential_fingerprint in reason, "拒因要写**指纹**（不是 authcode 本身）"
     assert code not in reason, "拒因里永不出现明文凭据"
-    assert A.PRODUCTION_WXID not in reason, "selfWxid 不是这条路的原因，别写串"
+    assert PROTECTED_WXID not in reason, "selfWxid 不是这条路的原因，别写串"
 
     with pytest.raises(A.AccountError):
         A.assert_no_red_line([acct])
@@ -340,7 +352,7 @@ def test_an_empty_authcode_never_matches_a_production_fingerprint(_isolated_acco
     acct = A.resolve("default", {"agent": "wpp-a"})
     assert acct.credential_fingerprint == "-"
     assert acct.is_production_identity is False
-    assert A.fingerprint("") == "-" and "-" not in A.PRODUCTION_CREDENTIAL_FINGERPRINTS
+    assert A.fingerprint("") == "-" and "-" not in A.protected_fingerprints()
 
 
 def test_the_escape_hatch_lifts_the_credential_guard_too(_isolated_accounts_dir, monkeypatch):
@@ -364,13 +376,13 @@ def test_a_red_line_account_is_a_raise_not_a_skip(_isolated_accounts_dir, monkey
     ``red_line_reason`` 是那条分开的判据：它**只**认红线，
     ``connect()`` 靠它决定"当场炸"而不是"跳过"（C4 的核心）。
     """
-    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+    monkeypatch.setenv(A.PROTECTED_WXIDS_ENV, PROTECTED_WXID)
     monkeypatch.delenv("WECHATPRO_AUTHCODE", raising=False)
 
     off = A.resolve("default", {"agent": "wpp-a", "authcode": "c", "enabled": False})
     nocred = A.resolve("default", {"agent": "wpp-a"})
     prod = A.resolve("default", {"agent": "wpp-a", "authcode": "c",
-                                 "selfWxid": A.PRODUCTION_WXID})
+                                 "selfWxid": PROTECTED_WXID})
 
     for a in (off, nocred):
         assert A.refusal_reason(a) is not None, "它们确实不能连"
@@ -383,49 +395,38 @@ def test_a_red_line_account_is_a_raise_not_a_skip(_isolated_accounts_dir, monkey
 def test_an_account_that_cannot_connect_is_not_a_red_line(_isolated_accounts_dir, monkeypatch):
     """★ ``enabled=false`` / 无凭据的生产身份**不算**红线（否则 dev 机起不来）。
 
-    ``/root/.hermes`` 上那份 ``default.json`` 就把 ``selfWxid`` 写成生产号、
+    ``~/.hermes`` 上那份 ``default.json`` 就把 ``selfWxid`` 写成生产号、
     同时 ``enabled=false`` + 另一把 authcode —— **摆着不连**是合法形态。
     判据写成"看身份就 raise"的话，那台机器上插件直接起不来（红线的正确后果
     只有一个：**别连**，而不是**别启动**）。
     """
-    monkeypatch.delenv(A.ALLOW_PRODUCTION_ENV, raising=False)
+    monkeypatch.setenv(A.PROTECTED_WXIDS_ENV, PROTECTED_WXID)
     monkeypatch.delenv("WECHATPRO_AUTHCODE", raising=False)
 
     off = A.resolve("default", {"agent": "wpp-a", "authcode": "c", "enabled": False,
-                                "selfWxid": A.PRODUCTION_WXID})
+                                "selfWxid": PROTECTED_WXID})
     A.assert_no_red_line([off])                      # 不抛
     assert A.red_line_reason(off) is None, "它没在连，谈不上触红线"
     assert "enabled=false" in A.refusal_reason(off), "但仍然不可连 —— 理由是「没启用」"
 
-    nocred = A.resolve("default", {"agent": "wpp-a", "selfWxid": A.PRODUCTION_WXID})
+    nocred = A.resolve("default", {"agent": "wpp-a", "selfWxid": PROTECTED_WXID})
     A.assert_no_red_line([nocred])                   # 不抛
     assert A.red_line_reason(nocred) is None
 
     on = A.resolve("default", {"agent": "wpp-a", "authcode": "c",
-                               "selfWxid": A.PRODUCTION_WXID})
+                               "selfWxid": PROTECTED_WXID})
     with pytest.raises(A.AccountError) as ei:
         A.assert_no_red_line([off, nocred, on])
-    assert A.PRODUCTION_WXID in str(ei.value)
+    assert PROTECTED_WXID in str(ei.value)
 
 
-def test_the_production_credential_fingerprint_is_a_literal_in_the_source():
-    """与 wxid 那道同款：指纹必须是**源码字面量**，且是 ``sha256[:12]`` 的口径。
+def test_protected_fingerprints_are_env_driven_and_normalized(monkeypatch):
+    """指纹集合从 env 读、大小写归一；默认空集合 = 这道门由部署方启用。"""
+    monkeypatch.delenv(A.PROTECTED_FINGERPRINTS_ENV, raising=False)
+    assert A.protected_fingerprints() == frozenset()
 
-    这张表是**单向**的（只有指纹，没有 authcode），所以它进仓是安全的；
-    但也正因为它进仓，**轮换 authcode 后必须同步改这里** ——
-    改漏的症状是这道门退化成"只认 wxid"（fail-open，且一句日志都没有）。
-    """
-    import ast
-    import re
-    from pathlib import Path
-
-    assert A.PRODUCTION_CREDENTIAL_FINGERPRINTS, "空集合 = 这道门不存在（fail-open 的另一种写法）"
-    src = Path(A.__file__).read_text(encoding="utf-8")
-    lits = {n.value for n in ast.walk(ast.parse(src))
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-    for fp in A.PRODUCTION_CREDENTIAL_FINGERPRINTS:
-        assert re.fullmatch(r"[0-9a-f]{12}", fp), f"指纹口径必须是 sha256[:12]：{fp!r}"
-        assert fp in lits, "判据必须硬编码在 core/accounts.py，不能从 env 读"
+    monkeypatch.setenv(A.PROTECTED_FINGERPRINTS_ENV, "ABCDEF123456, 0a1b2c3d4e5f")
+    assert A.protected_fingerprints() == frozenset({"abcdef123456", "0a1b2c3d4e5f"})
 
 
 def test_the_adapter_refuses_to_start_on_a_red_line_account():

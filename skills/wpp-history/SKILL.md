@@ -218,7 +218,7 @@ LIMIT 20;
 群里**自己发的消息也会入库**（`from_wxid` 是自己的 wxid，direction='outbound'）。统计活跃时要排除：
 
 ```sql
-WHERE from_wxid != 'wxid_eezdbu1ytws422'  -- 排除自己 (WPP 账号 selfWxid)
+WHERE from_wxid != 'wxid_bot_demo'  -- 排除自己 (WPP 账号 selfWxid)
 ```
 
 ### 4. 时间戳转换
@@ -293,9 +293,9 @@ LIMIT 50 OFFSET 100   -- 第 3 页
 ### DB 连接
 
 ```bash
-# 凭证在 ~/.hermes/skills/phoneerp/credentials/phoneerp_db.json (host 127.0.0.1 user root db phoneerp)
-# WPP 消息在 wechatpro 库 (user wechatpro, password env WECHATPRO_DB_PASSWORD)
-mysql -h 127.0.0.1 -u wechatpro -p"$WECHATPRO_DB_PASSWORD" wechatpro -e "SELECT ..."
+# 数据库连接参数来自 WECHATPRO_DB_HOST / _PORT / _USER / _NAME / _PASSWORD
+mysql -h "${WECHATPRO_DB_HOST:-127.0.0.1}" -u "${WECHATPRO_DB_USER:-wechatpro}" \
+  -p"$WECHATPRO_DB_PASSWORD" "${WECHATPRO_DB_NAME:-wechatpro}" -e "SELECT ..."
 ```
 
 ## 与 gewe-history 的差异（适配说明）

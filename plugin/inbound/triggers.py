@@ -149,7 +149,7 @@ def should_process(msg: WppMessage, cfg: dict) -> tuple[bool, str]:
     / ``groupAllowFrom`` / ``allowFrom`` / ``allowAllUsers`` / ``msgTypeTrigger``
     / ``keywordTrigger`` / ``quoteBotTrigger``。
 
-    触发逻辑（2026-09-01 老板拍板·简洁版，**保留**）::
+    触发逻辑（2026-09-01 项目约定·简洁版，**保留**）::
 
         @机器人      → 100% 必须回复（无需心流判断）
         接龙消息      → 100% 必须回复（无需心流判断）

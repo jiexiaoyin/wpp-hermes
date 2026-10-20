@@ -23,7 +23,7 @@
 ### ② ``_is_mentioned`` 的裸昵称子串匹配被收紧
 
 旧实现最后一行是 ``self_nickname in content`` —— **不带 ``@`` 也命中** ⇒ 任何一句
-顺口提到"益融小助理"的废话都会触发回复。TS 蓝本（``parser/mention.ts
+顺口提到"示例小助理"的废话都会触发回复。TS 蓝本（``parser/mention.ts
 isBotMentionedByText``）要求昵称必须带 ``@`` 前缀。这里跟 TS 走，**并补上**结构性
 信号 ``<atuserlist>`` XML（比文本启发式可靠）。⚠️ 这是**有意收紧**，见 ``_is_mentioned``
 的 docstring —— 若日后发现真的漏 @（尤其非 ``wxid_`` 形态的微信号），排查入口在那。
@@ -255,7 +255,7 @@ _GROUP_PUSH_NAME_RE = re.compile(
 )
 
 #: vendor 普通消息的推送文案是 ``昵称 : 正文``（含私聊和群聊里没 @ 的消息）。
-#: 例子：``接晓银 : 你好``、``戴永刚 : 收到``。
+#: 例子：``示例联系人 : 你好``、``戴永刚 : 收到``。
 _PUSH_NAME_COLON_RE = re.compile(r"^\s*([^:：\n]{1,32}?)\s*[:：]\s+")
 
 
@@ -265,13 +265,13 @@ def _nickname_from_push_content(src: dict) -> str:
     两种已知形状：
 
     * 群 @：``戴永刚在群聊中@了你`` → ``戴永刚``
-    * 普通消息：``接晓银 : 你好`` → ``接晓银``（私聊与群聊都会出现）
+    * 普通消息：``示例联系人 : 你好`` → ``示例联系人``（私聊与群聊都会出现）
 
     为什么必须补这一级：vendor 的 v1 消息常常**只给 wxid 不给昵称**
     （``sender_id`` 有值、``fromNickname``/``senderName`` 全空），但
     ``push_content`` 里带着微信客户端生成的发送者前缀。缺了昵称，agent 只能
     拿 wxid 猜人；2026-10-18 群内实测它把戴永刚叫成了"接总"，私聊会话在
-    WebUI 里也只能显示 ``q139198824`` 而不是"接晓银"。
+    WebUI 里也只能显示 ``wxid_owner_demo`` 而不是"示例联系人"。
 
     **只从 push 取**（正文 ``content`` 是用户自己打的字，不能拿来猜昵称）。
     名片消息的 ``[名片]xxx`` 不带"在群聊中@了你"，也不会匹配 ``昵称 :``
@@ -557,7 +557,7 @@ def is_bot_mentioned_by_text(content: str, bot_wxid: str, bot_nickname: str = ""
 
     ⚠️ **与旧 Python 实现的差异**：旧的 ``_is_mentioned`` 末行是
     ``self_nickname in content`` —— 裸子串，不带 ``@`` 也命中。这里跟 TS 走：
-    昵称分支**必须带 ``@``**（``@益融小助理`` 命中，句子里顺口提到昵称不命中），
+    昵称分支**必须带 ``@``**（``@示例小助理`` 命中，句子里顺口提到昵称不命中），
     另外补上 TS 的结构性信号 ``<atuserlist>`` XML 兜底。
     """
     if not content:
@@ -770,7 +770,7 @@ class InboundPipeline:
 
         # ★ 引用回复（49 里的 appmsg type=57）**不是文件**：正文就是回复的那句话，
         #   被引用内容走 ``reply_to``（→ Hermes 的 reply_to_text / reply_to_message_id）。
-        #   .183 真机 2026-10-18：纯文本的引用回复被标成 ``[文件]``，模型据此回
+        #   真机 真机 2026-10-18：纯文本的引用回复被标成 ``[文件]``，模型据此回
         #   「你发的是卡片/文件类消息，我这边只读到文字」—— 一个正常回复被说成附件。
         #   判据复用 ``extract_quote_ref`` 的三条来源（``app.reference`` /
         #   ``reply_context`` / ``<refermsg>`` XML），与 TS ``quote.ts`` 同口径。

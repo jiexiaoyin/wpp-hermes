@@ -16,7 +16,7 @@
 
 ``conftest.py`` 默认禁网（``socket.connect`` 直接炸），而这条线要验的是**判据**而不是
 TCP。所以 §2 直接调生成出来的 handler 方法（用假 connection 对象喂 ``headers`` /
-``path`` / ``rfile``），§3 只验注册与调用形状。真正的"厂商推过来收得到"归 .183 真机。
+``path`` / ``rfile``），§3 只验注册与调用形状。真正的"厂商推过来收得到"归 真机 真机。
 """
 
 from __future__ import annotations

@@ -71,14 +71,14 @@ def test_no_admin_users_means_nobody_executes():
     真机上的 ``accounts/live-test.json`` 就是 ``"adminUsers": []`` —— 旧实现在这种账号上
     对任何能往 filehelper 写字的人执行管理命令。
     """
-    assert FA.verdict([], "q139198824") == FA.NO_ADMIN_CONFIGURED
-    assert FA.verdict(None, "q139198824") == FA.NO_ADMIN_CONFIGURED
+    assert FA.verdict([], "wxid_owner_demo") == FA.NO_ADMIN_CONFIGURED
+    assert FA.verdict(None, "wxid_owner_demo") == FA.NO_ADMIN_CONFIGURED
     assert FA.verdict((), "") == FA.NO_ADMIN_CONFIGURED
 
 
 def test_blank_admin_entries_do_not_count_as_configuration():
     """只写了空白项 = 没配（否则 ``["  "]`` 会变成"配了但谁都不匹配"，看着像配好了）。"""
-    assert FA.verdict(["", "   "], "q139198824") == FA.NO_ADMIN_CONFIGURED
+    assert FA.verdict(["", "   "], "wxid_owner_demo") == FA.NO_ADMIN_CONFIGURED
 
 
 def test_empty_sender_is_never_an_admin():
@@ -86,28 +86,28 @@ def test_empty_sender_is_never_an_admin():
 
     旧判据 ``sender and sender not in admin`` 对空串短路 ⇒ 不进拒绝分支 ⇒ 照常执行。
     """
-    assert FA.verdict(["q139198824"], "") == FA.NOT_ADMIN
-    assert FA.verdict(["q139198824"], None) == FA.NOT_ADMIN
-    assert FA.verdict(["q139198824"], "   ") == FA.NOT_ADMIN, "纯空白等同空"
+    assert FA.verdict(["wxid_owner_demo"], "") == FA.NOT_ADMIN
+    assert FA.verdict(["wxid_owner_demo"], None) == FA.NOT_ADMIN
+    assert FA.verdict(["wxid_owner_demo"], "   ") == FA.NOT_ADMIN, "纯空白等同空"
 
 
 def test_unknown_sender_is_rejected():
-    assert FA.verdict(["q139198824"], "wxid_stranger") == FA.NOT_ADMIN
+    assert FA.verdict(["wxid_owner_demo"], "wxid_stranger") == FA.NOT_ADMIN
 
 
 def test_configured_admin_is_allowed_with_surrounding_whitespace():
-    assert FA.verdict(["q139198824"], "q139198824") == FA.ALLOW
-    assert FA.verdict([" q139198824 "], "q139198824") == FA.ALLOW
-    assert FA.verdict(["q139198824"], " q139198824 ") == FA.ALLOW
+    assert FA.verdict(["wxid_owner_demo"], "wxid_owner_demo") == FA.ALLOW
+    assert FA.verdict([" wxid_owner_demo "], "wxid_owner_demo") == FA.ALLOW
+    assert FA.verdict(["wxid_owner_demo"], " wxid_owner_demo ") == FA.ALLOW
 
 
 def test_the_bots_own_wxid_can_be_an_admin():
     """历史配置把**机器人自己的 wxid** 也写进 ``adminUsers``
-    （``accounts/default.json`` = ``["q139198824", "wxid_eezdbu1ytws422"]``）——
+    （``accounts/default.json`` = ``["wxid_owner_demo", "wxid_bot_demo"]``）——
     vendor 在 filehelper 会话里常把 sender 标成机器人自己，所以这条是**在用**的路径，
     不能因为"看着别扭"被清掉。
     """
-    assert FA.verdict(["q139198824", "wxid_eezdbu1ytws422"], "wxid_eezdbu1ytws422") == FA.ALLOW
+    assert FA.verdict(["wxid_owner_demo", "wxid_bot_demo"], "wxid_bot_demo") == FA.ALLOW
 
 
 def test_verdicts_are_stable_strings():
@@ -118,8 +118,8 @@ def test_verdicts_are_stable_strings():
 
 def test_verdict_accepts_any_iterable_of_scalars():
     """配置来自 JSON：元组/列表/生成器都得吃（``accounts.py`` 存的是 ``tuple[str, ...]``）。"""
-    assert FA.verdict(iter(["q139198824"]), "q139198824") == FA.ALLOW
-    assert FA.verdict(("q139198824",), "q139198824") == FA.ALLOW
+    assert FA.verdict(iter(["wxid_owner_demo"]), "wxid_owner_demo") == FA.ALLOW
+    assert FA.verdict(("wxid_owner_demo",), "wxid_owner_demo") == FA.ALLOW
 
 
 # ===== 2. 接线（AST 形状） =====

@@ -244,7 +244,7 @@ def test_path_traversal_in_the_account_id_is_refused(adir, bdir, bad):
 # ==================================================== 4. 原子替换 / 权限 / 备份
 
 def test_the_file_ends_up_mode_600(adir, bdir):
-    """★ 这份文件里有 authcode。实测 ``.183`` 上原来是 644（同机任何人可读）。"""
+    """★ 这份文件里有 authcode。实测 ``真机`` 上原来是 644（同机任何人可读）。"""
     p = _write(adir, "default", _cfg())
     os.chmod(p, 0o644)
     S.write_account_key("default", "heartflow", {"enabled": True})
@@ -259,7 +259,7 @@ def test_no_temp_file_is_left_behind(adir, bdir):
 
 
 def test_a_backup_of_the_previous_content_is_kept(adir, bdir):
-    """★ 写前必须备份（老板定的备份根，命名沿用 ``<name>.pre-<tag>-<epoch>``）。"""
+    """★ 写前必须备份（约定的备份根，命名沿用 ``<name>.pre-<tag>-<epoch>``）。"""
     p = _write(adir, "default", _cfg())
     before = p.read_bytes()
     S.write_account_key("default", "heartflow", {"enabled": False})

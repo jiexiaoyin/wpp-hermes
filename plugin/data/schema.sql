@@ -2,7 +2,7 @@
 --
 -- ## 出处与「双写陷阱」
 --
--- 前 15 张表的 DDL **逐字搬自** TS 侧 `/root/dev/wechatpadpro-openclaw/db/schema.sql`
+-- 前 15 张表的 DDL **逐字搬自** TS 侧 `~/dev/wechatpadpro-openclaw/db/schema.sql`
 -- （v1.11.0）；16 号表 `wpp_hf_image_caption` 搬自 TS v1.16.0（`src/storage/db/mysql.ts`
 -- 行内 DDL，TS 的 db/schema.sql 尚未同步该表）。TS 自己在 240/253 行写着「⚠️ 与 src/storage/db/mysql.ts 的行内 DDL
 -- 必须同步（改一处必改另一处）」—— 那是个**双写陷阱**：它已经把
@@ -381,7 +381,7 @@ CREATE TABLE IF NOT EXISTS wpp_affection (
 
 -- ============================================================ 说话风格学习 (2, Python 独有)
 
--- 群说话风格卡（2026-10-19 老板拍板：学群友的说话风格，用到 bot 自己身上）
+-- 群说话风格卡（2026-10-19 项目约定：学群友的说话风格，用到 bot 自己身上）
 -- 与心流群画像的分工：画像是「群是什么、bot 该不该说」，风格卡是「话怎么说」
 -- （句长 / 语气词 / 口头禅 / 表情 / 称呼 / 标点）。存摘要，**不存原文**。
 -- 注入回复侧走 Hermes channel_prompt（临时 system prompt，不进 transcript）。

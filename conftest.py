@@ -4,15 +4,15 @@
 
 1. **禁网**：默认把 ``socket.connect`` 打掉。心流的 judge 热路径 / 预算 / 去重
    都不该产生任何网络 IO —— 这条不是为了跑得快，是为了让"某处偷偷发了个请求"
-   **在测试里就炸**，而不是等到 .183 上才发现。
+   **在测试里就炸**，而不是等到 真机 上才发现。
 2. **禁生产库**：带 ``db`` 标记的用例（真库用例，见 ``test_db_live.py``）必须显式
    声明 ``WECHATPRO_DB_NAME`` 且**必须以 ``_test`` 结尾**；指到生产库名 ``wechatpro``
    或没设就**当场 fail / skip**，绝不放行。缺省值就是 ``wechatpro``（生产库名），
    而"忘了设环境变量"是最容易发生、后果最重的一种失误 —— 所以判据是**必须显式声明**。
-   库连不上（本机没有那个库；真测试库在 .183 上）⇒ **大声跳过**，那不算通过。
-3. **禁生产 bot**：任何用例里出现 ``wxid_eezdbu1ytws422``（益融小助理，生产号）
-   一律 fail。铁律：**绝不能**拿生产号连调试实例（厂商的客户端实例锁会把生产踢下线
-   并劫持它的 webhook）。
+   库连不上（本机没有那个库；真测试库在 真机 上）⇒ **大声跳过**，那不算通过。
+3. **禁生产 bot**：配置了 ``WPP_TEST_PROD_WXID``（或未跟踪的 ``conftest_local.py``）时，
+   任何用例的环境变量里出现该 wxid 一律 fail。铁律：**绝不能**拿生产号连调试实例
+   （厂商的客户端实例锁会把生产踢下线并劫持它的 webhook）。公开仓默认不配置。
 
 外加一条心流专用的：**每个用例前后清空心流内存缓存**（见 :func:`_reset_hf_caches`）。
 """
@@ -38,8 +38,21 @@ PROD_DB_NAME = "wechatpro"
 #: 允许真库用例连的库名后缀（``wechatpro_test``）。**必须显式**，不给"看着像"留口子。
 TEST_DB_SUFFIX = "_test"
 
-#: 生产 bot 的 wxid（益融小助理）。出现即 fail。
-PROD_SELF_WXID = "wxid_eezdbu1ytws422"
+#: 生产 bot 的 wxid。公开仓**不带**任何生产标识 —— 本机通过
+#: ``WPP_TEST_PROD_WXID`` 或未跟踪的 ``conftest_local.py`` 注入；
+#: 未配置时这条护栏自动跳过（第三方用户没有生产号需要防）。
+def _local_prod_wxid() -> str:
+    value = os.environ.get("WPP_TEST_PROD_WXID", "").strip()
+    if value:
+        return value
+    try:
+        from conftest_local import PROD_SELF_WXID as local  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001 — 没有本地覆盖是公开仓的正常状态
+        return ""
+    return str(local or "").strip()
+
+
+PROD_SELF_WXID = _local_prod_wxid()
 
 
 # --------------------------------------------------------------------- 安全护栏
@@ -72,7 +85,7 @@ def _env_guard(request) -> None:
     if not name:
         _skip_or_fail(
             f"⏭  真库用例跳过：未显式设 WECHATPRO_DB_NAME（缺省值 {PROD_DB_NAME!r} 是**生产库**，绝不使用）。"
-            f" 这不是通过 —— 真测试库在 .183 上，例: WECHATPRO_DB_NAME=wechatpro_test "
+            f" 这不是通过 —— 真测试库在 真机 上，例: WECHATPRO_DB_NAME=wechatpro_test "
             f"WECHATPRO_DB_HOST=127.0.0.1")
     if name == PROD_DB_NAME:
         raise AssertionError(
@@ -86,7 +99,7 @@ def _env_guard(request) -> None:
 
 
 def _skip_or_fail(msg: str) -> None:
-    """真库缺席时**跳过**；但门禁在 .183 上会设 ``WPP_REQUIRE_LIVE_DB=1`` ⇒ 那时缺席=**红**。
+    """真库缺席时**跳过**；但门禁在 真机 上会设 ``WPP_REQUIRE_LIVE_DB=1`` ⇒ 那时缺席=**红**。
 
     为什么要有这个开关：跳过是"本机没有参照物"的诚实表达（照 ``tools/gates.sh`` 里 TS 差分
     那条的口径），但到了**本该有真库**的机器上还跳过，就变成"看起来绿"。两种情形必须分开。
@@ -112,7 +125,7 @@ def _require_reachable_test_db() -> None:
     if not ok:
         _skip_or_fail(
             f"⏭  真库用例跳过：测试库不可达（{db.health().get('detail') or db.describe()}）。"
-            " 这不是通过 —— 真测试库在 .183 上。")
+            " 这不是通过 —— 真测试库在 真机 上。")
 
 
 def _release_db() -> None:
@@ -161,12 +174,20 @@ def _reset_hf_caches() -> None:
 @pytest.fixture(autouse=True)
 def _test_env(request, monkeypatch):
     """每个用例的默认环境：安全护栏 + 禁网 + 清心流缓存。"""
-    # 生产 bot 不得出现在测试里（扫已设的环境变量，够用了）
-    for k, v in os.environ.items():
-        assert PROD_SELF_WXID not in str(v), (
-            f"环境变量 {k} 里出现生产 bot {PROD_SELF_WXID} —— 绝不能用生产号连调试实例")
+    # 生产 bot 不得出现在测试里（扫已设的环境变量，够用了）。
+    # 未配置生产号（公开仓默认）时跳过这条护栏。
+    if PROD_SELF_WXID:
+        for k, v in os.environ.items():
+            assert PROD_SELF_WXID not in str(v), (
+                f"环境变量 {k} 里出现生产 bot {PROD_SELF_WXID} —— 绝不能用生产号连调试实例")
 
     _env_guard(request)
+    # 厂商地址现在是必填项（公开仓库不带默认域名）。测试统一给占位值；
+    # 专门测「未配置」的用例自己 delenv 覆盖。受保护身份集合同理默认清空。
+    monkeypatch.setenv("WECHATPRO_API_BASE", "https://vendor.test")
+    for k in ("WECHATPRO_WS_URL", "WECHATPRO_PROTECTED_WXIDS",
+              "WECHATPRO_PROTECTED_FINGERPRINTS", "WECHATPRO_ALLOW_PRODUCTION_WXID"):
+        monkeypatch.delenv(k, raising=False)
     if "network" not in request.keywords and "db" not in request.keywords:
         # 真库用例要连 localhost —— 它的 host 由 R3 白名单 + 库名三道闸管着（见 _env_guard）
         _forbid_sockets(monkeypatch)

@@ -1396,7 +1396,7 @@ XIAOWEI_GATE = RuntimeGate(
 #: （``friendcircle-meta.ts:45-47``「朋友圈发布是对外公开操作, 不能任何人触发 …… 工具层
 #: 不暴露发布」）⇒ TS 的 AI 根本调不到发布。py2 仍暴露但带开关 + 白名单。
 #: 这是**安全面上的既存差异**，本项只做收口、**不擅自撤注册**（撤掉是减少一个 AI 能力，
-#: 属于要老板拍板的决定）—— 已上报。
+#: 属于要项目约定的决定）—— 已上报。
 FRIEND_CIRCLE_PUBLISH_GATE = RuntimeGate(
     label="朋友圈发布",
     key="friendCirclePublishEnabled",

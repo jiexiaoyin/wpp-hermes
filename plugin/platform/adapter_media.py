@@ -179,7 +179,7 @@ class MediaMixin:
                     # SILK 头是 b"\x02#"；其余当 AMR（vendor 只出这两种）
                     ext = ".silk" if data[:2] == b"\x02#" else ".amr"
                     # ⚠️ 传上去的是**原始 silk/amr**，不是 TS 那种 mp3：TS 的 ``voice.ts``
-                    # 先 ffmpeg 转码再传，而 py2 侧无 ffmpeg（``.183`` 上也没有）。
+                    # 先 ffmpeg 转码再传，而 py2 侧无 ffmpeg（``真机`` 上也没有）。
                     # 后果仅限"点开那个 URL 播不出声"——模型看到的是 ``[语音] <url>`` 一行
                     # 加下面的 ``[转写]``，语义由转写承载 ⇒ 如实降级，不假称是 mp3。
                     await self._publish_media(acct, msg, kind=KIND_VOICES,
@@ -286,7 +286,7 @@ class MediaMixin:
         **降级与 TS 同款**：缺凭据 / 缺 ossutil / 上传失败 / 空字节 ⇒
         ``upload_media_bytes`` 返 ``None`` ⇒ 这里**只出声、正文一个字不加**，
         调用方照旧返回本地缓存路径。⚠️ 这条降级路径**必须**保持"与加富化之前逐字节
-        相同"（``.183`` 上既没 ossutil 也没凭据，现状就是它）。
+        相同"（``真机`` 上既没 ossutil 也没凭据，现状就是它）。
         "写 URL、写 ``oss_url`` 键、注入正文"三件事在 :func:`_inject_media_enrich_line`
         里**一起**发生（那里也解释了为什么不能只做一半）。
         """
@@ -512,7 +512,7 @@ class MediaMixin:
 
         1. 入参已是 ``.silk`` 且不超 :data:`silk_encoder.MAX_SILK_BYTES` ⇒ 直接发；
         2. 否则试 :func:`silk_encoder.encode_to_silk`（需要 ffmpeg + encoder 二进制，
-           ``.183`` 上两者都没有 ⇒ 直接返回 ``None``）；
+           ``真机`` 上两者都没有 ⇒ 直接返回 ``None``）；
         3. 还不行，或厂商仍拒收 ⇒ **发文件**（老板 6-12 定的偏好：
            "成功发为语音, 失败降级文件"）。
 

@@ -1142,7 +1142,7 @@ async def run_sweep(adapter: Any, account_id: str, now_sec: int | None = None) -
     except Exception as exc:  # noqa: BLE001 —— 防御性兜底
         log.warning("[WPP HF] layer pass failed (不影响调阈): %s", exc)
 
-    # 4) v1.9.0 占比外环（老板拍板：bot 发言占比 > 目标 ⇒ 收紧当日预算）：
+    # 4) v1.9.0 占比外环（项目约定：bot 发言占比 > 目标 ⇒ 收紧当日预算）：
     #    DB 聚合只在这里做，结果落内存 → judge 读侧零 DB IO。与调阈开关无关。
     try:
         maybe_recompute_hf_share_guard(account_id, cfg, ts)

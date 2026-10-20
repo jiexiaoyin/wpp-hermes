@@ -25,7 +25,7 @@ Python 侧改成**单向推导**：
 
 ## 适用范围
 
-``.183`` 是**全新空库** ⇒ legacy 表建空表即可，**不做 ETL**（计划原文）。
+``真机`` 是**全新空库** ⇒ legacy 表建空表即可，**不做 ETL**（计划原文）。
 因此 ``_MIGRATIONS`` 为空 —— 能用 DDL 表达的（加列/加索引）一律走
 ``ensure_schema_complete``，那是幂等且可重建的；``_MIGRATIONS`` 只留
 **不可由 DDL 重建的一次性动作**（数据回填、改名搬值）。
@@ -175,7 +175,7 @@ class TableSpec:
     indexes: list[tuple[str, str]] = field(default_factory=list)   # (索引名, 完整定义)
     #: 主键列（小写）。**体检要用**：主键列在服务端恒为 ``NOT NULL``，而 schema.sql
     #: 里写 ``PRIMARY KEY (id)`` 时列定义本身往往**不写 NOT NULL** ⇒ 不认这条就会
-    #: 报假漂移（2026-10-02 在 .183 真库上实测到 7 条）。
+    #: 报假漂移（2026-10-02 在 真机 真库上实测到 7 条）。
     pk: list[str] = field(default_factory=list)
 
 
@@ -415,7 +415,7 @@ _INDEX_COL_SUFFIX_RE = re.compile(r"\(\s*\d+\s*\)$")
 #:
 #: ``json``：MariaDB 的 ``JSON`` 是 ``LONGTEXT`` 的**别名**（加一条 ``json_valid``
 #: CHECK），``information_schema.COLUMNS.COLUMN_TYPE`` 报回来就是 ``longtext``。
-#: 2026-10-02 在 ``.183`` 真库上实测：``schema.sql`` 写 ``config_json JSON``，
+#: 2026-10-02 在 ``真机`` 真库上实测：``schema.sql`` 写 ``config_json JSON``，
 #: 线上报 ``longtext`` ⇒ 一次体检 4 条假漂移。
 #: 代价：真的把 ``json`` 写成 ``text``（丢掉 ``json_valid`` 校验）**报不出来** ——
 #: 接受，因为 R8 本来就不许我们 MODIFY，报了也只能看（而且 ``u`` 前缀的变化仍会报）。
@@ -452,7 +452,7 @@ def _norm_type(raw: str) -> str | None:
 def _live_has_default(got: dict) -> bool:
     """线上这一列**有没有**默认值 —— 把 MariaDB 的 ``'NULL'`` 也算作"没有"。
 
-    ⚠️ 这是 MariaDB 与 MySQL 的一个真实差异（2026-10-02 在 ``.183`` 实测）：
+    ⚠️ 这是 MariaDB 与 MySQL 的一个真实差异（2026-10-02 在 ``真机`` 实测）：
     列定义写 ``display_name VARCHAR(128)``（即 ``DEFAULT NULL``）时，
     MySQL 的 ``COLUMN_DEFAULT`` 是 SQL ``NULL``，而 **MariaDB 回来的是字符串
     ``"NULL"``** ⇒ ``is not None`` 恒真 ⇒ 一次体检 66 条假"线上有默认值"。
@@ -694,7 +694,7 @@ class Migration:
     ``CREATE/ALTER`` 的一律进 ``schema.sql``（那里是幂等且可重建的）。
     ``fn(conn)`` 必须自己保证可重复执行。
 
-    ⚠️ **DDL 不受事务保护** —— 这条在 2026-10-02 被 ``.183`` 真库当场上了一课：
+    ⚠️ **DDL 不受事务保护** —— 这条在 2026-10-02 被 ``真机`` 真库当场上了一课：
 
     旧写法（裸 ``START TRANSACTION``）固然是坏的（``execute`` 会把它自己提交掉），
     但换成真事务之后，"中途炸掉 ⇒ 半套 schema 被回滚"**依然不成立**：MariaDB/MySQL 的
@@ -716,7 +716,7 @@ class Migration:
     fn: Callable[[object], None]
 
 
-#: 空得有理由：``.183`` 是新库，没有历史数据要回填。
+#: 空得有理由：``真机`` 是新库，没有历史数据要回填。
 #: 模板（将来要加时照抄，version 从 1 起，禁止复用已用过的号）：
 #:
 #:     def _backfill_xxx(conn):

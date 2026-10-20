@@ -114,7 +114,7 @@ def test_a_loop_dies_inside_one_mute_window():
     allowed = refused = 0
     rounds_to_mute = None
     for i in range(1, 41):                      # 最多 40 轮 = 10 分钟
-        d = limiter.guard("a", "57737516566@chatroom", "wxid_eezdbu1ytws422",
+        d = limiter.guard("a", "123456789@chatroom", "wxid_bot_demo",
                           "group_mention")
         if d.allowed:
             allowed += 1
@@ -287,8 +287,8 @@ def test_reset_clears_one_account_or_everything():
 def test_the_trip_is_visible_at_warning_level(caplog):
     """掐停必须打 **WARNING**。
 
-    ⚠️ ``.183`` 的 ``journalctl`` **只采 WARNING+**（INFO 只在
-    ``/root/.hermes/logs/gateway.log`` 那个文件里）。写 debug/info ⇒ 出事时现场
+    ⚠️ ``真机`` 的 ``journalctl`` **只采 WARNING+**（INFO 只在
+    ``~/.hermes/logs/gateway.log`` 那个文件里）。写 debug/info ⇒ 出事时现场
     什么都看不见，而"看不见"正是这次事故拖了 4 分钟才被发现的原因。
     """
     limiter, _ = _limiter()

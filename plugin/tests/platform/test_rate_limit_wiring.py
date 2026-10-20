@@ -15,7 +15,7 @@
 3. **判定点排得太晚**（在 ④z 落库 / ④a 心流缓冲 / ④c 媒体富化之后）：被掐的那几条
    照样进台账、进裁判的现场记录、照样下载上传媒体 —— 闸拦住了回复，却拦不住污染与花费。
 4. **判了不丢**（只 log 不 return）：日志里 WARNING 一行行地打，回路照样刷。
-5. **WARNING 写成 debug/info**：``.183`` 的 journald 只采 WARNING+ ⇒ 现场看不见
+5. **WARNING 写成 debug/info**：``真机`` 的 journald 只采 WARNING+ ⇒ 现场看不见
    （这次事故拖了 4 分钟才发现，根因之一就是"看不见"）。
 6. **参数在适配器里又写一遍**：两份阈值迟早不一致，而失效方向是"闸永远拦不住"。
 """
@@ -151,7 +151,7 @@ def test_c4_the_guard_sits_between_the_drop_gate_and_everything_else():
 def test_c5_a_refused_message_is_dropped_with_a_warning():
     """判了必须**丢**（``return``），且必须打 **WARNING**。
 
-    ``.183`` 的 ``journalctl`` 只采 WARNING+（INFO 只在 ``/root/.hermes/logs/gateway.log``
+    ``真机`` 的 ``journalctl`` 只采 WARNING+（INFO 只在 ``~/.hermes/logs/gateway.log``
     那个文件里）⇒ 写 debug 就等于"出事时现场什么也看不见"。只 log 不 return 更坏：
     日志里一行行 WARNING，回路照样刷。
     """

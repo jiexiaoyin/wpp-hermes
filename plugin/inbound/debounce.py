@@ -76,7 +76,7 @@ from .parser import MT_REVOKE, MT_SYSTEM, MT_TEXT, MT_VOICE, WppMessage
 
 log = logging.getLogger(__name__)
 
-#: 聚合窗口（TS ``core/constants.ts:62`` ``DEFAULT_DEBOUNCE_MS`` —— 2026-08-22 老板拍板
+#: 聚合窗口（TS ``core/constants.ts:62`` ``DEFAULT_DEBOUNCE_MS`` —— 2026-08-22 项目约定
 #: 由 1500ms 降到 500ms：webhook 到达延迟中位数 < 200ms，等 1.5s 纯属浪费）。
 DEFAULT_DEBOUNCE_MS = 500
 

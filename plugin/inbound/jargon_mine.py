@@ -21,7 +21,7 @@
 ## 四处需要记住的判断
 
 1. **``model`` 缺失 ⇒ 抛、不降级**（``jargon.ts:543-548`` 逐字保留其理由）：
-   TS 在 v1.4.0 12:28 老板拍板"消除 plugin hardcode"后把这里改成**直接抛错**，
+   TS 在 v1.4.0 12:28 项目约定"消除 plugin hardcode"后把这里改成**直接抛错**，
    为的是逼出账面上的模型配置。抛出点**在任何 try 之外** ⇒ 整轮挖掘中止、
    由 fire-and-forget 的收尾回调记一行 warn（**每轮一次**，不是静默）。
    py2 的账号默认值里 ``model`` 是空串 ⇒ 没配就是这条路。
@@ -58,7 +58,7 @@
 * **``cfg.maxRetries`` / ``cfg.minJudgeIntervalSec``**：TS（``command grep -c`` = 0）与
   py2 **都没有**对应实现（``call_judge`` 自己不重试，也没有 judge 间隔闸）⇒ 死键。
   dev 的 ``boss2.example.json`` 里那两行**已删**（原因写进 ``_jargon_note``）；
-  ⚠️ ``.183`` 上**已部署**的账号文件里可能还有（本轮之前的历史状态，无人读、无害）——
+  ⚠️ ``真机`` 上**已部署**的账号文件里可能还有（本轮之前的历史状态，无人读、无害）——
   别把它当成"py2 有这个功能"。**没有**在本项里凭空实现重试。
 """
 
@@ -402,7 +402,7 @@ async def jargon_llm(prompt: str, cfg: JargonCfg, creds: Any) -> str | None:
         raise JargonConfigError(
             "[WPP JARGON] 账号未配 jargon.model —— 拒绝凭空挑模型。"
             "请在 accounts/<id>.json 的 jargon 段写明 model（对齐 TS v1.4.0 12:28 "
-            "老板拍板：消除 plugin hardcode）")
+            "项目约定：消除 plugin hardcode）")
 
     try:
         return await call_judge(

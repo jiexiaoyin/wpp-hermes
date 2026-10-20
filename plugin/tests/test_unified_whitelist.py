@@ -3,7 +3,7 @@
 判据不测"函数被调用了"，而是测三件会真正失效的事：
 
 1. 出站放行集合确实 = 账号 ``allowFrom`` ∪ ``groupAllowFrom`` ∪ ``adminUsers`` ∪ env；
-   否则「周州能私聊机器人、机器人一转发就被拦」的割裂还在。
+   否则「联系人甲能私聊机器人、机器人一转发就被拦」的割裂还在。
 2. 全员群同步是**两键一次原子写**，且厂商失败时**一个字节都不写** ——
    网络抖动不能把员工误删出名单。
 3. ``/user sync`` 与 ``/whitelist status`` 走的是同一条聚合逻辑，回执说人话。
@@ -42,12 +42,12 @@ def test_unified_allowlist_unions_account_sources_and_env(monkeypatch):
     got = netguard.unified_allowlist(
         profile_home="/x",
         accounts=[
-            _Acct(allow=("u1", "jsnjzhou"), groups=("g1@chatroom",),
+            _Acct(allow=("u1", "wxid_contact_demo"), groups=("g1@chatroom",),
                   admins=("admin",)),
             _Acct(allow=("u2",), groups=("g2@chatroom",)),
         ],
     )
-    assert got == ("env_only", "u1", "jsnjzhou", "g1@chatroom", "admin",
+    assert got == ("env_only", "u1", "wxid_contact_demo", "g1@chatroom", "admin",
                    "u2", "g2@chatroom")
 
 
@@ -66,7 +66,7 @@ def test_guard_error_points_to_the_command_not_the_env_file(monkeypatch):
     monkeypatch.setattr(netguard, "unified_allowlist", lambda *_a, **_k: ("u1",))
     netguard.check_outbound_allowed("u1")
     with pytest.raises(netguard.GuardError) as exc:
-        netguard.check_outbound_allowed("jsnjzhou")
+        netguard.check_outbound_allowed("wxid_contact_demo")
     msg = str(exc.value)
     assert "/user add" in msg and "/user sync" in msg
     assert "WECHATPRO_SEND_ALLOWLIST" not in msg, \
@@ -80,8 +80,8 @@ def test_parse_members_filters_self_rooms_official_and_system_accounts():
         "Code": 0,
         "Data": {"NewChatroomData": {"ChatRoomMember": [
             {"UserName": "wxid_bot", "NickName": "机器人"},
-            {"UserName": "jsnjzhou", "NickName": "周州"},
-            {"UserName": "q139198824", "NickName": "接晓银"},
+            {"UserName": "wxid_contact_demo", "NickName": "联系人甲"},
+            {"UserName": "wxid_owner_demo", "NickName": "示例联系人"},
             {"UserName": "gh_123", "NickName": "公众号"},
             {"UserName": "123@chatroom", "NickName": "群"},
             {"UserName": "filehelper", "NickName": "文件传输助手"},
@@ -89,7 +89,7 @@ def test_parse_members_filters_self_rooms_official_and_system_accounts():
         ]}},
     }
     assert employee_sync.parse_members(payload, exclude=("wxid_bot",)) == [
-        ("jsnjzhou", "周州"), ("q139198824", "接晓银")]
+        ("wxid_contact_demo", "联系人甲"), ("wxid_owner_demo", "示例联系人")]
 
 
 def test_plan_sync_keeps_manual_entries_and_removes_only_stale_auto_entries():
@@ -146,7 +146,7 @@ def test_deny_list_accepts_string_or_list():
 
 PAYLOAD = {"Code": 0, "Data": {"NewChatroomData": {"ChatRoomMember": [
     {"UserName": "wxid_bot", "NickName": "机器人"},
-    {"UserName": "jsnjzhou", "NickName": "周州"},
+    {"UserName": "wxid_contact_demo", "NickName": "联系人甲"},
     {"UserName": "wxid_staff", "NickName": "员工"},
 ]}}}
 
@@ -191,7 +191,7 @@ def _patch_account_store(monkeypatch, raw):
 
 @_sync
 async def test_sync_once_writes_both_keys_atomically_and_reloads(monkeypatch):
-    raw = {"selfWxid": "wxid_bot", "allowFrom": ["boss", "jsnjzhou"],
+    raw = {"selfWxid": "wxid_bot", "allowFrom": ["boss", "wxid_contact_demo"],
            "employeeAllowFrom": []}
     writes = _patch_account_store(monkeypatch, raw)
     adapter = _FakeAdapter(raw)
@@ -202,7 +202,7 @@ async def test_sync_once_writes_both_keys_atomically_and_reloads(monkeypatch):
     assert res["members"] == 1 and res["added"] == 1
     # 首次同步没有台账 ⇒ 现有 allowFrom 一律按"手工项"保护，只把新成员记成自动项。
     assert writes == [("acct", {
-        "allowFrom": ["boss", "jsnjzhou", "wxid_staff"],
+        "allowFrom": ["boss", "wxid_contact_demo", "wxid_staff"],
         "employeeAllowFrom": ["wxid_staff"],
     })]
     assert adapter.reloaded == ["acct"]
@@ -222,8 +222,8 @@ async def test_sync_once_reads_the_account_deny_list(monkeypatch):
     assert res["ok"] is True
     assert res["removed"] == 1
     assert writes == [("acct", {
-        "allowFrom": ["boss", "jsnjzhou"],
-        "employeeAllowFrom": ["jsnjzhou"],
+        "allowFrom": ["boss", "wxid_contact_demo"],
+        "employeeAllowFrom": ["wxid_contact_demo"],
     })]
 
 
@@ -260,18 +260,18 @@ async def test_user_sync_command_reports_the_change(monkeypatch):
     adapter = _CmdAdapter(raw)
     out = await commands.handle_command_async("acct", "/user sync", adapter=adapter)
     assert "✅" in out and "新增 2" in out
-    assert writes and writes[0][1]["allowFrom"] == ["boss", "jsnjzhou", "wxid_staff"]
+    assert writes and writes[0][1]["allowFrom"] == ["boss", "wxid_contact_demo", "wxid_staff"]
 
 
 def test_whitelist_status_reports_every_source(monkeypatch):
     monkeypatch.setattr(commands, "_allowlist_items",
                         lambda _aid, key: {
-                            "allowFrom": ["boss", "jsnjzhou"],
+                            "allowFrom": ["boss", "wxid_contact_demo"],
                             "groupAllowFrom": ["g1@chatroom", "g2@chatroom"],
                         }[key])
     monkeypatch.setattr(commands, "_account_file_cfg",
                         lambda _aid: {"adminUsers": ["boss"],
-                                      "employeeAllowFrom": ["jsnjzhou"]})
+                                      "employeeAllowFrom": ["wxid_contact_demo"]})
     monkeypatch.setattr(netguard, "env_allowlist", lambda *_a, **_k: ("env_only",))
     adapter = _CmdAdapter({"adminUsers": ["boss"]})
     out = commands.handle_command("acct", "/whitelist status", adapter=adapter)

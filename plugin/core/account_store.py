@@ -25,7 +25,7 @@
    - 备份（:func:`backup_dir`，沿用既有 ``<name>.pre-<tag>-<epoch>`` 命名）——
      写错了能拿回来；
    - ``临时文件 + os.replace`` + fsync —— 断电/被杀不会留一个截断的 JSON；
-   - ``0o600`` —— 这个文件里有 authcode。实测 ``.183`` 上那份是 ``644``（同机任何
+   - ``0o600`` —— 这个文件里有 authcode。实测 ``真机`` 上那份是 ``644``（同机任何
      用户可读），本模块顺带把它收紧。
 
 ## 落盘之后**还要**清掉同键的内存覆盖
@@ -95,12 +95,12 @@ def account_path(account_id: str) -> Path:
 
 
 def backup_dir() -> Path:
-    """备份目录：``WECHATPRO_ACCOUNT_BACKUP_DIR`` → ``/data``（老板定的备份根）→
+    """备份目录：``WECHATPRO_ACCOUNT_BACKUP_DIR`` → ``/data``（约定的备份根）→
     ``~/.hermes/backups``（宿主上没有 ``/data`` 时）。
 
     为什么要有兜底：``/data`` 是**宿主机**的约定（生产机上就是挂在那儿），
     而本插件的 dev 树跑在任何装得下 Hermes 的机器上。兜底路径与
-    ``.183`` 上既有的 ``~/.hermes/backups/``（``.env.pre-*`` / ``default.json.pre-*``
+    ``真机`` 上既有的 ``~/.hermes/backups/``（``.env.pre-*`` / ``default.json.pre-*``
     都躺在那儿）是同一处，运维不用记第二个地方。
     """
     override = str(os.environ.get(BACKUP_DIR_ENV) or "").strip()

@@ -348,7 +348,7 @@ def test_reach_cap_none_when_it_would_not_bite():
 
 
 def test_reach_cap_uses_band_min_as_hard_floor():
-    """``maxScore + step`` 低于老板定的质量底线 0.5 ⇒ 抬到 0.5（护栏不许把阈值压进垃圾分域）。"""
+    """``maxScore + step`` 低于约定的质量底线 0.5 ⇒ 抬到 0.5（护栏不许把阈值压进垃圾分域）。"""
     r = L.hf_reachability_cap([0.18, 0.39] + [0.2] * 18, 0.8, params())
     assert r is not None and r["cap"] == 0.5 and r["maxScore"] == 0.39
 

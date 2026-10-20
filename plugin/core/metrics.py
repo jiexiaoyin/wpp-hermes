@@ -274,7 +274,7 @@ COUNTER_MESSAGES_RECEIVED = "messages_received_total"
 #: 路径不认识（404）。
 COUNTER_MESSAGES_REJECTED_PATH = "messages_rejected_path_total"
 #: 路径/secret 鉴权失败（403）。
-COUNTER_MESSAGES_REJECTED_SECRET = "messages_rejected_secret_total"
+COUNTER_MESSAGES_REJECTED_AUTH = "messages_rejected_secret_total"
 #: 请求体超限 / Content-Length 非法 / chunked 读失败（400/413）。
 COUNTER_MESSAGES_REJECTED_BODY_SIZE = "messages_rejected_body_size_total"
 #: 已成功调度进主事件循环。
@@ -331,7 +331,7 @@ def inc_webhook_rejected_path() -> None:
 
 
 def inc_webhook_rejected_secret() -> None:
-    inc_counter(COUNTER_MESSAGES_REJECTED_SECRET)
+    inc_counter(COUNTER_MESSAGES_REJECTED_AUTH)
 
 
 def inc_webhook_rejected_body_size() -> None:
@@ -441,7 +441,7 @@ PRE_DECLARED_COUNTERS: tuple[str, ...] = (
     COUNTER_DB_MIGRATION_FAILURES,
     COUNTER_MESSAGES_RECEIVED,
     COUNTER_MESSAGES_REJECTED_PATH,
-    COUNTER_MESSAGES_REJECTED_SECRET,
+    COUNTER_MESSAGES_REJECTED_AUTH,
     COUNTER_MESSAGES_REJECTED_BODY_SIZE,
     COUNTER_MESSAGES_PROCESSED,
     COUNTER_MESSAGES_DISPATCH_FAILED,

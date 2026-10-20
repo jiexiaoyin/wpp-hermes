@@ -22,7 +22,7 @@ Hermes 网关在插件**之上**还有一道用户授权，**没有环境白名�
 ## 不覆盖的边界（别误判）
 
 - **网关那一侧的判据**（``authz_mixin.py`` 怎么用这几个属性）不在本仓，
-  由 ``.183`` 上的真机复测覆盖。
+  由 ``真机`` 上的真机复测覆盖。
 - ``_is_group_allowed`` **故意不实现**：中心授权不调它（只有 whatsapp/qqbot 等在
   自己适配器内部用），群 ID 的过滤仍由 ``inbound/triggers.py`` ⑥ 的
   ``groupAllowFrom`` 逐账号把守。见 ``adapter.py`` 那段注释。
@@ -239,10 +239,10 @@ def test_real_account_fields_line_up(_isolated_accounts_dir):
     cfg = {
         "id": "live-test",
         "agent": "wpp-wechat-livetest",
-        "selfWxid": "q139198824",
+        "selfWxid": "wxid_owner_demo",
         "groupPolicy": "allowlist",
-        "groupAllowFrom": ["57737516566@chatroom"],
-        "allowFrom": ["wxid_eezdbu1ytws422"],
+        "groupAllowFrom": ["123456789@chatroom"],
+        "allowFrom": ["wxid_bot_demo"],
     }
     (_isolated_accounts_dir / "live-test.json").write_text(
         json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
@@ -250,7 +250,7 @@ def test_real_account_fields_line_up(_isolated_accounts_dir):
 
     assert AP.group_policy([acct]) == AP.ALLOWLIST
     assert AP.dm_policy([acct]) == AP.ALLOWLIST
-    assert AP.is_dm_allowed([acct], "wxid_eezdbu1ytws422") is True
+    assert AP.is_dm_allowed([acct], "wxid_bot_demo") is True
     assert AP.is_dm_allowed([acct], "wxid_stranger") is False
 
 

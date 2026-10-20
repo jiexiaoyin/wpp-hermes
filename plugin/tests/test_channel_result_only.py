@@ -48,8 +48,8 @@ def bare(monkeypatch, stubbed):
         adapter_mod.DEFAULT_ACCOUNT: SimpleNamespace(
             id=adapter_mod.DEFAULT_ACCOUNT,
             self_wxid="wxid_self",
-            nickname="益融小助理",
-            admin_users=("q139198824", "wxid_self"),
+            nickname="示例小助理",
+            admin_users=("wxid_owner_demo", "wxid_self"),
         ),
     }
     inst._clients = {}
@@ -68,7 +68,7 @@ def test_interim_process_message_is_dropped(bare):
 def test_approval_prompt_is_not_dropped(bare):
     """审批提示虽带 ``_interim_send``，但它是必要交互；要放行到真实发送路径。"""
     result = asyncio.run(bare.send(
-        "default:q139198824", "允许执行 rm -rf /tmp/x 吗？",
+        "default:wxid_owner_demo", "允许执行 rm -rf /tmp/x 吗？",
         metadata={"_interim_send": True, "is_approval_prompt": True}))
     # 没连接 ⇒ 走到“账号未连接”，证明不是被过程闸提前吞掉。
     assert result.success is False
@@ -95,7 +95,7 @@ def test_group_notice_is_routed_to_admin_dm(bare, monkeypatch):
     result = asyncio.run(bare.send_private_notice(
         "default:room_test@chatroom", "someone", "⚠️ 网关告警"))
     assert result.success is True
-    assert sent == [("default:q139198824", "⚠️ 网关告警")]
+    assert sent == [("default:wxid_owner_demo", "⚠️ 网关告警")]
 
 
 def test_dm_notice_stays_in_place(bare, monkeypatch):
@@ -108,8 +108,8 @@ def test_dm_notice_stays_in_place(bare, monkeypatch):
 
     monkeypatch.setattr(bare, "send", fake_send)
     asyncio.run(bare.send_private_notice(
-        "default:q139198824", "q139198824", "⚠️ 网关告警"))
-    assert sent == ["default:q139198824"]
+        "default:wxid_owner_demo", "wxid_owner_demo", "⚠️ 网关告警"))
+    assert sent == ["default:wxid_owner_demo"]
 
 
 def test_platform_registers_low_display_tier():

@@ -1,63 +1,39 @@
 {
-  "_comment": "WPP 第二账号示例 (2026-09-01 接老板拍板: 多账号能力设计). 复制本文件为 accounts/<your_id>.json, 填自己的 authcode/env + 独立的 agent profile. 多账号隔离原则 (与 wpp-openclaw 一致): 1. accounts/<id>.json 每个账号一个独立配置文件 2. 每个账号用独立 authcode (从 WECHATPRO_AUTHCODE_<id> env 读取) 3. agent 字段必填, 禁止 'main' (防 fallback main 串号) 4. 账号绑专属 agent profile (e.g. 'wpp-wechat-boss2'), 多 profile 通过 hermes multiplex 隔离 5. 账号间 authcode/token/selfWxid/nickname/allowFrom 全部独立. ⚠️ 启用方法: 1) 把 'enabled' 改成 true; 2) 配 WECHATPRO_AUTHCODE_BOSS2 env (在 wpp-wechat-boss2 profile 的 .env); 3) 创建 /root/.hermes/profiles/wpp-wechat-boss2/ profile (基于 wpp-wechat 复制); 4) 重启 gateway.",
-  "_design_notes": {
-    "schema_source": "对齐 wpp-openclaw v1.5.2 accounts/default.json + 接总立 2026-09-01 拍板的 cfg.agent 字段",
-    "isolation_layers": [
-      "L1 vendor 服务端 (authcode 识别账号)",
-      "L2 plugin 进程 (authcode 锁在 WppClient 实例)",
-      "L3 hermes multiplex (每个 profile 独立进程副本)",
-      "L4 oss_archive skill ALLOWED_ACCOUNTS 白名单 (拒绝未注册账号)"
-    ],
-    "agent_binding_rule": "agent 字段 = 专属 hermes profile 名 (e.g. 'wpp-wechat-boss2'), 必须建对应的 /root/.hermes/profiles/<agent>/ 目录",
-    "env_naming": "凭据 env 用 WECHATPRO_<FIELD>_<UPPER_ACCOUNT_ID> 格式, e.g. WECHATPRO_AUTHCODE_BOSS2"
-  },
+  "_comment": "第二账号范例（多账号隔离）。复制为 accounts/<your_id>.json。每个账号必须使用独立 authcode、独立 selfWxid、独立 webhookPort，并绑定自己的 agent profile；agent 禁止写 'main'。强烈建议只写 authcodeEnv/tokenKeyEnv，明文放对应 profile 的 .env。",
   "enabled": false,
-  "_enabled_note": "默认 false — 老板确认要启用时再改 true, 避免误启动",
 
-  "tokenKey": "",
-  "tokenKeyEnv": "WECHATPRO_TOKEN_KEY_BOSS2",
-
-  "apiBaseUrl": "https://wx.juhe.chat",
-  "wsUrl": "wss://wx.juhe.chat/ws/sync",
+  "apiBaseUrl": "https://your-vendor.example",
+  "wsUrl": "wss://your-vendor.example/ws/sync",
 
   "authcode": "",
-  "authcodeEnv": "WECHATPRO_AUTHCODE_BOSS2",
+  "authcodeEnv": "WECHATPRO_AUTHCODE_SECOND",
+  "tokenKey": "",
+  "tokenKeyEnv": "WECHATPRO_TOKEN_KEY_SECOND",
 
   "webhookHost": "127.0.0.1",
   "webhookPort": 4399,
-  "_webhookPort_note": "每个账号必须独立端口 (default 4398), 避免 webhook 冲突",
-  "webhookPath": "/wechatpadpro/boss2/webhook",
-  "webhookPathToken": "boss2token_replace_me",
+  "webhookPath": "/wechatpadpro/second/webhook",
+  "webhookPathToken": "replace-with-a-random-token",
   "webhookPublicUrl": "",
-  "webhookPublicUrlEnv": "WECHATPRO_WEBHOOK_PUBLIC_URL_BOSS2",
-
+  "webhookPublicUrlEnv": "WECHATPRO_WEBHOOK_PUBLIC_URL_SECOND",
   "autoSetWebhook": true,
   "setWebhookRetries": 3,
 
-  "allowFrom": [
-    "q139198824"
-  ],
-  "_allowFrom_note": "只允许老板私聊触发, 不开群白名单 (谨慎启用)",
-
+  "allowFrom": ["wxid_owner"],
   "groupPolicy": "disabled",
   "groupAllowFrom": [],
+  "adminUsers": ["wxid_owner"],
+  "blacklistGroups": [],
 
-  "selfWxid": "wxid_replace_me_boss2",
-  "nickname": "益融小助理-老板副号",
+  "selfWxid": "wxid_replace_me_second",
+  "nickname": "微信助手-副号",
 
+  "agent": "wpp-wechat-second",
   "debounceMs": 1500,
 
-  "agent": "wpp-wechat-boss2",
-  "_agent_note": "必填, 禁止 'main'. 对应 /root/.hermes/profiles/wpp-wechat-boss2/ 目录",
-
   "mcpEnabled": false,
-  "webhookBusinessPath": "/wechatpadpro/boss2/webhook/business",
-  "webhookSecretEnv": "WECHATPRO_WEBHOOK_SECRET_BOSS2",
-
-  "adminUsers": [
-    "q139198824"
-  ],
-  "blacklistGroups": [],
+  "webhookBusinessPath": "/wechatpadpro/second/webhook/business",
+  "webhookSecretEnv": "WECHATPRO_WEBHOOK_SECRET_SECOND",
 
   "chatroomDebug": false,
   "dmPairingEnabled": false,
@@ -67,8 +43,7 @@
 
   "heartflow": {
     "enabled": false,
-    "_heartflow_note": "新账号默认关闭心流, 跑稳后再开",
-    "model": "deepseek-v4-flash",
+    "model": "your-model-name",
     "whitelistGroups": [],
     "replyThreshold": 0.6,
     "minReplyIntervalSec": 0,
@@ -76,21 +51,14 @@
     "maxRetries": 1,
     "timeoutMs": 5000,
     "independentTrigger": false,
-    "_businessContext_note": "judge 的业务背景。groupBusinessContexts 按群覆盖；群值缺失/空白时回落到这里。",
     "businessContext": "",
-    "groupBusinessContexts": {
-      "12345678901@chatroom": "本群是门店销售全员群，常发成交截图/销售晒单；晒单=报喜，应积极回应。"
-    },
-    "_profile_note": "画像生成与注入。applyQuietHours=true 才会把画像建议的静默段并入预算（单段≤6h、合计≤8h，超限整段丢弃；只影响心流主动搭话，不影响 @/私聊）。",
-    "profile": {
-      "enabled": true,
-      "applyQuietHours": false
-    }
+    "groupBusinessContexts": {},
+    "profile": {"enabled": true, "applyQuietHours": false}
   },
 
   "affection": {
     "enabled": false,
-    "model": "deepseek-v4-flash",
+    "model": "your-model-name",
     "timeoutMs": 5000,
     "maxRetries": 1,
     "replyThreshold": 0.6,
@@ -100,8 +68,7 @@
 
   "jargon": {
     "enabled": false,
-    "_jargon_note": "群黑话挖掘 (W7-4, 移植 wpp-openclaw v1.11.0 jargon.ts 729 行). 三层: ①统计预筛(零 LLM) ②一次批量验证 ③三步推断含义 → 落库 wpp_jargon_terms. enabled 默认 false (对齐 TS defaultJargonConfig). ⚠️ model 缺失 ⇒ 该轮挖掘**报错中止**并每轮记一行 warn —— 这是 TS v1.4.0 12:28 老板拍板'消除 plugin hardcode'后的有意行为, 不是兜底失败: 宁可吵, 不许凭空挑模型. 没配 key (DEEPSEEK_API_KEY/MINIMAX_*_API_KEY) 则静默不挖 (零外呼). 已删的两个键 maxRetries/minJudgeIntervalSec 是旧死键, TS 与 py2 都没有对应实现.",
-    "model": "deepseek-v4-flash",
+    "model": "your-model-name",
     "timeoutMs": 5000,
     "mineIntervalSec": 60,
     "minMessages": 10,
@@ -110,8 +77,7 @@
 
   "style": {
     "enabled": false,
-    "_style_note": "说话风格学习 (2026-10-19). 从群聊入站文本里归纳句长/语气词/口头禅/表情/称呼/标点, 作为临时 system prompt 注入回复侧; 只学摘要不存原文, 样本匿名, 命中隐私/提示词注入/辱骂的条目直接丢弃. enabled 默认 false (fail-closed); model 缺失 ⇒ 不生成并告警. 每群 refreshHours 小时重生成一次, 单轮最多 maxPerRun 个群, 样本不足/调用失败有退避. 运维: /style status|list|show|rollback.",
-    "model": "deepseek-v4-flash",
+    "model": "your-model-name",
     "lookbackDays": 14,
     "minMsgs": 80,
     "minSenders": 3,
@@ -127,7 +93,6 @@
 
   "tts": {
     "enabled": false,
-    "_tts_note": "TTS 情绪路由 (2026-10-19). provider 走 Hermes 已注册的 TTS 后端 (阿里 Token Plan = tokenplan, 模型 qwen-audio-3.0-tts-plus), 不再 fork mmx. 当前会话情绪由好感度模块给出, 映射成 input.instruction + parameters.rate. enabled 默认 false; autoVoice=0 表示不自动发语音 (只保留 wpp_send_ai_voice 工具). autoVoice>0 时按概率把回复转语音, 仅限 [autoVoiceMinChars, autoVoiceMaxChars] 且白名单内. fallbackMmx 默认 false, 只有 provider 挂了才考虑.",
     "provider": "tokenplan",
     "voice": "",
     "maxChars": 300,
@@ -139,15 +104,10 @@
     "fallbackMmx": false
   },
 
-  "debounceMerge": {
-    "enabled": false,
-    "_debounceMerge_note": "消息防抖合并 (2026-10-19, 默认 false). 只合并**私聊**和『@了机器人 / 引用机器人』的群消息, 且批内全部是纯文本 (无媒体/无 reply_to); 超过 maxChars 不截断, 原样逐条处理. 合并没有取消语义 —— 已入队的历史消息不会撤回.",
-    "maxChars": 2000
-  },
+  "debounceMerge": {"enabled": false, "maxChars": 2000},
 
   "proactive": {
     "enabled": false,
-    "_proactive_note": "私聊主动关心 (2026-10-19, 默认 false, fail-closed). allowFrom 为空 = 永不发送. 仅在对方最后说话且已静默 minIdleHours 小时、当天出站数 < maxPerDay、且不在 quietHours 时, 才让模型写一句 (≤maxChars) 发过去. model 缺失时回落到 ai.judgeModel.",
     "allowFrom": [],
     "maxPerDay": 1,
     "minIdleHours": 20,
@@ -158,19 +118,13 @@
     "timeoutMs": 8000
   },
 
-  "spectre": {
-    "quoteHint": false,
-    "_spectre_note": "SpectreCore 轻量项 (2026-10-19). quoteHint=true 时, 若触发消息引用了别条消息, 在 system prompt 里补一句『用户在引用…』并建议 wpp_quote_reply 引用回复. /mute 临时禁言是运行时命令, 不需要这里配置."
-  },
+  "spectre": {"quoteHint": false},
 
   "llmIntentEnabled": true,
-  "llmIntentModel": "deepseek-v4-flash",
+  "llmIntentModel": "your-model-name",
   "llmIntentTimeoutMs": 5000,
   "groupContextWindow": 10,
-
-  "_w3_note": "群聊上下文/意图 (W3, 移植 wpp-openclaw v1.11.0 dispatcher.ts+intent-*.ts). 总闸 = groupContextEnabled (上面第 65 行, 默认 false, 必须显式 true 才注入群聊上下文). 候选池 = 触发消息之前 groupContextWindow 条 (1..100, 默认 10), 图片最多 3 张. llmIntentEnabled 关着时 LLM 那一半不跑, 且 embedding 那半也不会跑 (embedding 是 LLM 的'省一次调用'快路径, 不是独立开关). 降级: LLM 失败/无 key 时 media 意图只注入媒体消息, topic 意图不注入.",
   "embeddingApiKeyEnv": "",
-  "_embedding_note": "embedding 凭据链: embeddingApiKeyEnv -> 该环境变量 -> embeddingApiKey -> 空. 没有隐式兜底 (不配就是关). 阿里 dashscope OpenAI 兼容端点, 模型 text-embedding-v4 (1024 维). 例: 在 profile 的 .env 里放 BAILIAN_EMBEDDING_API_KEY=..., 这里填 embeddingApiKeyEnv=BAILIAN_EMBEDDING_API_KEY",
   "embeddingModel": "",
   "embedIntentTopN": 5,
   "embedIntentThreshold": 0.3

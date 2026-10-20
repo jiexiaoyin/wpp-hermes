@@ -13,7 +13,7 @@ Hermes 的 ``plugin_validate`` 会在隔离 probe 子进程里 import 整个插�
 **没有** MCP SDK。TS 用 ``@modelcontextprotocol/sdk``，py2 这里只用 stdlib，
 保持「模块级零第三方依赖」的既有约束。
 
-⚠️ 2026-10-18 实测：Hermes 的运行时解释器（``/root/.hermes/tools/python-...``）
+⚠️ 2026-10-18 实测：Hermes 的运行时解释器（``~/.hermes/tools/python-...``）
 **连 aiohttp / httpx / requests 都没有**。早先这里用 ``import aiohttp``，结果每次
 调用都抛 ``ModuleNotFoundError``，又被调用方的宽 ``except`` 吞掉 ⇒ vendor MCP
 永远静默回退到本地缓存，看起来像「MCP 没启用」。现改为 stdlib

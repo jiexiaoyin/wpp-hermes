@@ -21,10 +21,10 @@
 
 ## 本机的现实
 
-``.183`` 上 **既没有 ffmpeg 也没有 silk encoder 二进制**（``/root/silk_decoder`` 不存在）
+当时的真机上 **既没有 ffmpeg 也没有 silk encoder 二进制**（``~/silk_decoder`` 不存在）
 ⇒ 这里的 :func:`encode_to_silk` 永远返回 ``None``，出站语音走**降级发文件**
 （这正是老板 6-12 16:36 定的偏好："成功发为语音, 失败降级文件"）。
-所以本模块在 .183 上的可测路径就是「探测不可用 → None」—— 也就是生产路径，
+所以本模块在真机上的可测路径就是「探测不可用 → None」—— 也就是生产路径，
 不是死码。
 
 ## 编码链（对齐 TS ``dispatch/silk-encoder.ts`` v1.3.48/1.3.51）
@@ -42,11 +42,15 @@ import os
 import re
 import shutil
 import tempfile
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 #: silk encoder 二进制。默认值与 TS ``WPP_SILK_ENCODER_PATH`` 一致。
-SILK_ENCODER_PATH = os.environ.get("WPP_SILK_ENCODER_PATH", "/root/silk_decoder/silk/encoder")
+SILK_ENCODER_PATH = os.environ.get(
+    "WPP_SILK_ENCODER_PATH",
+    str(Path.home() / "silk_decoder" / "silk" / "encoder"),
+)
 
 #: 厂商实际接受的 silk 上限。矩阵见模块 docstring（60000 是实测推断值，留一点余量）。
 MAX_SILK_BYTES = 60_000
