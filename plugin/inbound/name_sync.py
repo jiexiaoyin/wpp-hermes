@@ -22,6 +22,11 @@ log = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SEC = 6 * 3600.0
 
+#: 群**成员昵称**同步：**事件驱动**，不做定时轮询（老板 2026-10-20 拍板）。
+#: 触发点只有两个：① 机器人被拉进群（``group_invite``）拉该群全量；
+#: ② 群里有进群/退群系统消息（``join_events``）拉该群一次。
+#: 定时轮询是错的 —— 10 个群每轮 10 次外呼换来的只是"绝大多数轮次没有变化"。
+
 
 def _group_rows(payload: dict) -> list[dict]:
     """兼容 ``GroupList``（id 列表）/ ``group_details`` / ``items`` 三种形状。"""
@@ -78,9 +83,76 @@ async def sync_once(client, account_id: str) -> int:
     return written
 
 
+def apply_member_rows(account_id: str, chatroom_id: str,
+                      members: list[tuple[str, str]]) -> int:
+    """把 ``(wxid, 群昵称)`` 写进 ``wpp_chatroom_members``（阻塞 DB ⇒ 调用方 to_thread）。"""
+    from ..data import repo_messages
+
+    written = 0
+    for wxid, nick in members:
+        try:
+            repo_messages.upsert_chatroom_member(
+                account_id, chatroom_id, wxid, nickname=nick or "")
+            written += 1
+        except Exception as exc:  # noqa: BLE001 —— 单个成员失败不拖累整批
+            log.debug("[WPP:%s] 成员昵称入库失败 %s/%s: %s",
+                      account_id, chatroom_id, wxid, exc)
+    return written
+
+
+async def sync_members(client, account_id: str,
+                       chatroom_ids: list[str] | None = None) -> int:
+    """拉群成员昵称并 upsert 进 ``wpp_chatroom_members``。返回写入行数。
+
+    ``chatroom_ids`` 给了就只拉这几个群（**进群事件 / 新人加入时用**）；
+    不给则拉全部群（首次补历史数据 / 机器人被拉进群时用）。
+
+    单群失败只记 debug，不影响其它群：一个群拉不到，不该让整轮昵称刷新归零。
+    """
+    from . import employee_sync
+
+    if chatroom_ids is None:
+        payload = await client.call("/Group/List", method="GET", audit=False)
+        code = payload.get("Code")
+        if code is not None and code != 0:
+            raise RuntimeError(f"/Group/List Code={code}")
+        chatroom_ids = [
+            str(r.get("id") or r.get("chatroom_id") or "").strip()
+            for r in _group_rows(payload)
+        ]
+    written = 0
+    for chatroom_id in chatroom_ids:
+        if not chatroom_id.endswith("@chatroom"):
+            continue
+        try:
+            detail = await client.call(
+                employee_sync.MEMBER_ENDPOINT, {"QID": chatroom_id}, audit=False)
+            dcode = detail.get("Code")
+            if dcode is not None and dcode != 0:
+                raise RuntimeError(f"Code={dcode}")
+            members = employee_sync.parse_members(detail)
+            if members:
+                written += await asyncio.to_thread(
+                    apply_member_rows, account_id, chatroom_id, members)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 —— 单群失败不拖累整轮
+            log.debug("[WPP:%s] 群成员同步失败 %s: %s", account_id, chatroom_id, exc)
+    if written:
+        # 昵称刚刷新，让候选名字立刻生效（否则 5 分钟 TTL 内仍显示旧值）。
+        from . import session_title
+        session_title.clear_name_cache()
+        log.info("[WPP:%s] 群成员昵称同步完成：%d 条（%d 个群）",
+                 account_id, written, len(chatroom_ids))
+    return written
+
+
 async def sync_forever(client, account_id: str,
                        interval_sec: float = SYNC_INTERVAL_SEC) -> None:
-    """连接期常驻任务：先同步一轮，之后定期刷新；``CancelledError`` 原样抛出。"""
+    """连接期常驻任务：先同步一轮群名，之后定期刷新；``CancelledError`` 原样抛出。
+
+    成员昵称**不在这里**跑 —— 它是事件驱动的（见模块顶部注释）。
+    """
     while True:
         try:
             await sync_once(client, account_id)

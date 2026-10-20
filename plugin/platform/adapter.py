@@ -1044,6 +1044,49 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             except Exception as exc:  # noqa: BLE001
                 log.warning("[WPP:%s] 群名同步启动失败（不影响收发）: %s", acct.id, exc)
 
+    async def _maybe_member_event(self, acct, msg) -> None:
+        """进群/退群系统通知 → 拉该群成员昵称增量（**事件驱动，不做定时轮询**）。
+
+        老板 2026-10-20 拍板：机器人进群时拉一次全量、有新人加入时拉一次该群，
+        不要按小时扫全部群。系统通知只带昵称不带 wxid，所以必须回查成员列表
+        才能把「张三进群了」变成 ``(wxid, 昵称)`` 落库。
+
+        任何失败都只记日志 —— 记账坏了绝不能让收信链路失败。
+        """
+        from ..inbound import join_events, name_sync
+
+        try:
+            ev = join_events.parse(msg)
+        except Exception as exc:  # noqa: BLE001 —— 解析器坏了不该挡住这条消息
+            log.debug("[WPP:%s] 成员事件解析失败: %s", acct.id, exc)
+            return
+        if ev is None:
+            return
+        if ev.kind == "unknown_system":
+            # 厂商换文案时的唯一观测点：先留痕，拿到样本再补正则。
+            log.info("[WPP:%s] 未识别的群系统通知（群 %s）：%s",
+                     acct.id, ev.chatroom_id, ev.raw)
+            return
+
+        client = self._clients.get(acct.id)
+        if client is None:
+            log.debug("[WPP:%s] 成员事件跳过：client 未就绪（群 %s）",
+                      acct.id, ev.chatroom_id)
+            return
+
+        # self_join = 机器人自己被拉进群：新群还没 id，只能拉全部群。
+        targets = None if ev.kind == "self_join" else [ev.chatroom_id]
+        try:
+            written = await name_sync.sync_members(client, acct.id, targets)
+            log.info("[WPP:%s] 成员变动 %s（群 %s，%s）⇒ 刷新 %d 条昵称",
+                     acct.id, ev.kind, ev.chatroom_id or "全部",
+                     ev.member_name or "?", written)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 —— 昵称刷新失败不影响收发
+            log.warning("[WPP:%s] 成员变动后刷新昵称失败（群 %s）: %s",
+                        acct.id, ev.chatroom_id, exc)
+
     def _employee_group_ids(self, account_id: str) -> list[str]:
         """当前账号配置的全员群 id（每轮现读，命令改完不用重连）。"""
         from ..inbound import employee_sync
@@ -1231,6 +1274,13 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             log.debug("[WPP:%s] 群 %s 临时禁言中，丢弃 %s",
                       acct.id, msg.chatroom_id, msg.msg_id)
             return
+
+        # ③d 群成员变动（进群/退群）—— **必须**在 ④ 触发判定之前：
+        #     系统通知不满足任何触发路，④ 会 fail-closed 丢掉它，于是"有人进群"
+        #     永远进不了 ``wpp_chatroom_members``（2026-10-20 实测：移动群新人
+        #     进群零记录，成员表停在 8-11，心流 prompt 里只剩 ``wxid_xxx``）。
+        #     这里只做**记账**，不改变 msg 的后续去向 —— 系统消息该丢还是丢。
+        await self._maybe_member_event(acct, msg)
 
         # ④ 触发判定（硬门 + 四路 OR，见 inbound.triggers）
         ok, reason = pipeline.decide(msg)

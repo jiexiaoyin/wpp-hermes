@@ -21,7 +21,6 @@ import pytest
 
 from plugin.inbound import name_sync
 
-
 # ---------------------------------------------------------------- _group_rows
 
 @pytest.mark.parametrize("key", ["group_details", "items", "GroupList", "groups"])
@@ -176,7 +175,108 @@ async def test_sync_forever_survives_a_failed_round():
         raise asyncio.CancelledError
 
     with patch("plugin.inbound.name_sync.sync_once", _fail_then_cancel):
-        with pytest.raises(asyncio.CancelledError):
-            await name_sync.sync_forever(client, "default", interval_sec=0)
+        with patch("plugin.inbound.name_sync.sync_members", AsyncMock(return_value=0)):
+            with pytest.raises(asyncio.CancelledError):
+                await name_sync.sync_forever(client, "default", interval_sec=0)
 
     assert calls["n"] == 2, "第一轮失败后必须继续跑第二轮"
+
+
+# ------------------------------------------------------------- sync_members
+
+def test_apply_member_rows_writes_each_member():
+    """单个成员写库失败不能拖累整批（事务粒度是行）。"""
+    from plugin.data import repo_messages
+
+    calls = []
+
+    def _upsert(account_id, chatroom_id, wxid, **kw):
+        calls.append((account_id, chatroom_id, wxid, kw.get("nickname")))
+        if wxid == "wxid_bad":
+            raise RuntimeError("db down")
+        return 1
+
+    with patch.object(repo_messages, "upsert_chatroom_member", _upsert):
+        written = name_sync.apply_member_rows(
+            "default", "1@chatroom",
+            [("wxid_a", "张三"), ("wxid_bad", "坏"), ("wxid_b", "李四")])
+
+    assert written == 2, "失败那条跳过，其余照写"
+    assert ("default", "1@chatroom", "wxid_a", "张三") in calls
+    assert ("default", "1@chatroom", "wxid_b", "李四") in calls
+
+
+@pytest.mark.asyncio
+async def test_sync_members_upserts_every_group():
+    """群列表 → 逐群拉成员 → 全部入库。"""
+    client = MagicMock()
+
+    async def _call(path, params=None, **_kw):
+        if path == "/Group/List":
+            return {"Code": 0, "Data": {"group_details": [
+                {"id": "1@chatroom"}, {"id": "2@chatroom"}]}}
+        return {"Code": 0, "Data": {"NewChatroomData": {"ChatRoomMember": [
+            {"UserName": "wxid_x", "NickName": "甲"}]}}}
+
+    client.call = _call
+    with patch("plugin.inbound.name_sync.apply_member_rows", return_value=1) as m:
+        with patch("plugin.inbound.session_title.clear_name_cache") as clr:
+            written = await name_sync.sync_members(client, "default")
+
+    assert written == 2, "两个群各写一条"
+    assert [c.args[1] for c in m.call_args_list] == ["1@chatroom", "2@chatroom"]
+    clr.assert_called_once(), "刷新后必须清名字缓存"
+
+
+@pytest.mark.asyncio
+async def test_sync_members_skips_a_failing_group():
+    """一个群拉不到，不该让整轮昵称刷新归零。"""
+    client = MagicMock()
+
+    async def _call(path, params=None, **_kw):
+        if path == "/Group/List":
+            return {"Code": 0, "Data": {"group_details": [
+                {"id": "1@chatroom"}, {"id": "2@chatroom"}]}}
+        if params["QID"] == "1@chatroom":
+            return {"Code": -8}
+        return {"Code": 0, "Data": {"NewChatroomData": {"ChatRoomMember": [
+            {"UserName": "wxid_y", "NickName": "乙"}]}}}
+
+    client.call = _call
+    with patch("plugin.inbound.name_sync.apply_member_rows", return_value=1) as m:
+        with patch("plugin.inbound.session_title.clear_name_cache"):
+            written = await name_sync.sync_members(client, "default")
+
+    assert written == 1
+    assert m.call_args.args[1] == "2@chatroom"
+
+
+@pytest.mark.asyncio
+async def test_sync_members_raises_on_group_list_error():
+    """``/Group/List`` 的 Code 非 0 必须抛 —— 否则永远 0 条且无人知晓。"""
+    client = MagicMock()
+    client.call = AsyncMock(return_value={"Code": -1})
+
+    with pytest.raises(RuntimeError):
+        await name_sync.sync_members(client, "default")
+
+
+@pytest.mark.asyncio
+async def test_sync_forever_does_not_touch_members():
+    """成员昵称是**事件驱动**的（老板 2026-10-20 拍板）—— 群名轮询里不许顺手扫全群。"""
+    client = MagicMock()
+    rounds = {"n": 0}
+
+    async def _once(*_a, **_k):
+        rounds["n"] += 1
+        if rounds["n"] > 1:
+            raise asyncio.CancelledError
+
+    with patch("plugin.inbound.name_sync.sync_once", _once):
+        with patch("plugin.inbound.name_sync.sync_members",
+                   AsyncMock(return_value=3)) as mm:
+            with pytest.raises(asyncio.CancelledError):
+                await name_sync.sync_forever(client, "default", interval_sec=0)
+
+    mm.assert_not_called()
+

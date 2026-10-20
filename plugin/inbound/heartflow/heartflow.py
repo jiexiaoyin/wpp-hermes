@@ -1132,6 +1132,28 @@ def note_sent(account_id: str, group_id: str, text: str, *, success: bool,
 # ================================================================ 接入口
 
 
+def _sender_display_name(account_id: str, group_id: str, msg: Any) -> str:
+    """发送者可读名：vendor 昵称 → 群成员昵称 → 通讯录 → wxid 兜底。
+
+    心流 prompt 里的 ``发送者:`` 直接决定模型会不会称呼人。入站帧常只带 wxid
+    （``from_nickname`` 空），单靠它模型看到的就是一串 ``wxid_xxx``，于是回复里
+    不点名（2026-10-20 移动群实测：晒单被夸但没称呼）。
+
+    ``session_title.sender_display_name`` 本来就查群成员表 + 通讯录，且 300s
+    进程内缓存 —— 直接用那条链，别在这里重写一份昵称解析。
+    """
+    wxid = getattr(msg, "from_wxid", "") or ""
+    pushed = getattr(msg, "from_nickname", "") or ""
+    try:
+        from .. import session_title as _titles
+        name = _titles.sender_display_name(
+            account_id, group_id, is_group=True, user_id=wxid, fallback=pushed)
+    except Exception as exc:  # noqa: BLE001 —— 名字只影响措辞，不能让心流整条失败
+        log.debug("[WPP HF] 发送者昵称解析失败，沿用 wxid: %s", exc)
+        name = pushed or wxid
+    return name or "未知"
+
+
 async def maybe_engage(adapter: Any, acct: Any, msg: Any, pipeline: Any = None) -> bool:
     """心流接管入口（``adapter._try_heartflow`` 调）—— 返回 ``True`` = 放行给主 LLM。
 
@@ -1177,7 +1199,7 @@ async def maybe_engage(adapter: Any, acct: Any, msg: Any, pipeline: Any = None) 
             chat_id=group_id,
             bot_nickname=nickname,
             content=content,
-            sender_name=getattr(msg, "from_nickname", "") or getattr(msg, "from_wxid", "") or "未知",
+            sender_name=_sender_display_name(account_id, group_id, msg),
             chat_context=build_chat_context_summary(group_id, cfg, now_ms),
             recent_messages=format_raw_messages(
                 get_raw_buffer(group_id, _int_or(cfg.get("contextMessagesCount"),
