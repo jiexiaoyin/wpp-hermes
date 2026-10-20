@@ -1,5 +1,5 @@
 {
-  "_comment": "单账号最小配置范例。复制为 accounts/default.json 后按需修改；authcode/tokenKey 建议只写 *Env 名称，明文放在 <HERMES_HOME>/.env 里（文件权限 0600）。字段完整说明见 docs/configuration.md。",
+  "_comment": "单账号最小配置范例。复制为 accounts/default.json 后按需修改；authcode/tokenKey 建议只写 *Env 名称，明文放在 <HERMES_HOME>/.env 里（文件权限 0600）。准入默认全部放行，可选 dmPolicy/groupPolicy：open|allowlist|blacklist|pairing（群可再选 disabled）。数据库默认 SQLite（WECHATPRO_DB_BACKEND=sqlite），OSS/心流/MCP 等能力默认关闭。字段完整说明见 docs/configuration.md。",
   "enabled": true,
 
   "apiBaseUrl": "https://your-vendor.example",
@@ -20,15 +20,21 @@
   "selfWxid": "",
   "nickname": "微信助手",
 
+  "dmPolicy": "open",
   "allowFrom": [],
+  "blacklistUsers": [],
   "groupPolicy": "open",
   "groupAllowFrom": [],
+  "blacklistGroups": [],
   "adminUsers": [],
+  "mcpEnabled": false,
 
   "agent": "wpp-wechat",
   "debounceMs": 500,
 
-  "heartflow": {"enabled": false},
+  "heartflow": {"enabled": false, "profile": {"enabled": true}},
+  "embeddingModel": "text-embedding-v4",
+  "embeddingApiKeyEnv": "DASHSCOPE_API_KEY",
   "affection": {"enabled": false},
   "jargon": {"enabled": false},
   "style": {"enabled": false},

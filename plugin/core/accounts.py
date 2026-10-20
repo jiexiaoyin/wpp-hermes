@@ -169,7 +169,13 @@ class Account:
     set_webhook_retries: int
 
     # -- 准入策略 --------------------------------------------------
+    #: 私聊准入模式：``open``（默认，全部放行）/ ``allowlist`` / ``blacklist`` / ``pairing``。
+    #: 未显式配置时按旧口径兼容：``allowAllUsers=true`` 全放行；``allowFrom`` 非空即白名单；
+    #: 两者都没有 ⇒ **默认全放行**（2026-10-20 老板要求，旧行为是 fail-closed）。
+    dm_policy: str
     allow_from: tuple[str, ...]
+    #: 私聊黑名单（``dmPolicy=blacklist`` 或任何模式下都先拒）。
+    blacklist_users: tuple[str, ...]
     group_policy: str
     group_allow_from: tuple[str, ...]
     admin_users: tuple[str, ...]
@@ -490,7 +496,10 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         or f"/wechatpadpro/{account_id}/webhook/business",
         auto_set_webhook=_as_bool(cfg.get("autoSetWebhook"), True),
         set_webhook_retries=_as_int(cfg.get("setWebhookRetries"), 3),
+        # 私聊准入模式；未显式配置时为空串，交给 triggers 走旧口径兼容分支。
+        dm_policy=str(cfg.get("dmPolicy") or "").strip().lower(),
         allow_from=_as_str_tuple(cfg.get("allowFrom")),
+        blacklist_users=_as_str_tuple(cfg.get("blacklistUsers")),
         # 2026-10-19 审阅修复：大小写必须归一。triggers/access_policy 按小写字面量比较，
         # 而这里原先只 strip ⇒ 写 "Disabled"/"Allowlist" 会在触发层整条绕过群策略。
         group_policy=str(cfg.get("groupPolicy") or "open").strip().lower(),
@@ -511,10 +520,9 @@ def resolve(account_id: str, extra: dict[str, Any] | None = None) -> Account:
         debounce_merge=_as_dict(cfg.get("debounceMerge")),
         spectre=_as_dict(cfg.get("spectre")),
         llm_intent_enabled=_as_bool(cfg.get("llmIntentEnabled"), False),
-        # TS ``mcp-meta.ts:mcpEnabledForCurrentAccount`` 是 ``!== false`` —— 缺省**开**，
-        # 只有显式 false 才关。旧 py2 解析成默认 false 且没人消费（死键），
-        # 2026-10-18 接上 vendor MCP 后按 TS 语义改回默认开。
-        mcp_enabled=_as_bool(cfg.get("mcpEnabled"), True),
+        # 2026-10-20 老板要求「其他相关能力默认关闭」—— MCP 也是可选能力，
+        # 只有账号显式 ``mcpEnabled=true`` 才启用（生产账号已显式写 true）。
+        mcp_enabled=_as_bool(cfg.get("mcpEnabled"), False),
         group_context_enabled=_as_bool(cfg.get("groupContextEnabled"), False),
         dm_pairing_enabled=_as_bool(cfg.get("dmPairingEnabled"), False),
         friend_circle_publish_enabled=_as_bool(cfg.get("friendCirclePublishEnabled"), False),

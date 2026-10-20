@@ -1217,6 +1217,13 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         if await self._maybe_command(acct, msg):
             return
 
+        # ③b2 配对码兑换（私聊 ``/pair <code>``）—— 必须在 ④ 触发判定**之前**：
+        #       ``dmPolicy=pairing`` 下未配对用户的普通消息会被准入拒掉，但
+        #       ``/pair`` 本身是"进门"动作，不能也被拒。
+        if not msg.is_group and (acct.dm_policy == "pairing" or acct.dm_pairing_enabled):
+            if await self._maybe_pair(acct, msg):
+                return
+
         # ③c 临时禁言（``/mute``，内存态）：到点自动恢复。整条丢弃 —— 包括 @机器人，
         #     否则"禁言期间别人一 @ 就破防"，这个开关就没有意义。filehelper 命令在
         #     ③b 已经走掉，不受影响。
@@ -1353,6 +1360,42 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
                                   msg.peer_id):
             metrics.inc_dispatch_dispatched()
             await self.handle_message(event)
+
+    async def _maybe_pair(self, acct: accounts_mod.Account, msg: WppMessage) -> bool:
+        """私聊 ``/pair <code>`` → 兑换并写入已配对名单（返回 True = 已接管）。
+
+        与 filehelper 管理命令分开：配对是**给陌生人用的**，不能要求 ``adminUsers``；
+        它唯一的凭据就是 1 小时有效的配对码。回复走原始 client（不走出站白名单）——
+        因为此时用户**尚未配对**，走 ``self.send`` 会被白名单闸拦下，用户永远看不到
+        "配对成功/失败"。
+        """
+        from . import pairing
+
+        content = (msg.content or "").strip()
+        if not pairing.is_pair_command(content):
+            return False
+
+        code = pairing.extract_pair_code(content)
+        sender = msg.from_wxid or ""
+        if not code:
+            reply = "用法：/pair <8位配对码>（配对码请向管理员索取）"
+        else:
+            ok, why = pairing.redeem_pairing_code(acct.id, code)
+            if ok:
+                pairing.add_paired(acct.id, sender)
+                reply = "配对成功，现在可以直接和我聊天了。"
+            else:
+                reply = f"配对失败：{why}"
+
+        client = self._clients.get(acct.id)
+        if client is None:
+            log.warning("[WPP:%s] 配对回复未发送（账号未连接）: %s", acct.id, sender)
+            return True
+        try:
+            await client.send_text(to_wxid=sender, content=reply)
+        except Exception as exc:  # noqa: BLE001 —— 回复失败不影响兑换结果
+            log.warning("[WPP:%s] 配对回复发送失败: %s", acct.id, exc)
+        return True
 
     async def _maybe_command(self, acct: accounts_mod.Account, msg: WppMessage) -> bool:
         """filehelper 管理命令 → 就地回复并**终止**这条消息（返回 True = 已接管）。
@@ -2568,10 +2611,21 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
 
     def _pipeline_cfg(self, acct: accounts_mod.Account) -> dict:
         """给 :class:`InboundPipeline` / ``should_process`` 的配置视图。"""
+        paired: list[str] = []
+        if acct.dm_policy == "pairing" or acct.dm_pairing_enabled:
+            try:
+                from . import pairing
+
+                paired = pairing.load_paired(acct.id)
+            except Exception as exc:  # noqa: BLE001 —— 读配对名单失败不阻塞收信
+                log.warning("[WPP:%s] 读取已配对名单失败: %s", acct.id, exc)
         return {
             "selfWxid": acct.self_wxid,
             "nickname": acct.nickname,
+            "dmPolicy": acct.dm_policy,
             "allowFrom": list(acct.allow_from),
+            "blacklistUsers": list(acct.blacklist_users),
+            "pairedUsers": paired,
             "groupPolicy": acct.group_policy,
             "groupAllowFrom": list(acct.group_allow_from),
             "blacklistGroups": list(acct.blacklist_groups),

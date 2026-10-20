@@ -74,7 +74,7 @@ import shutil  # noqa: F401 —— 测试会 monkeypatch ``media_oss.shutil.whic
 import time
 from typing import Any
 
-from ..core.env_compat import secret_env
+from ..core.env_compat import gate_env, secret_env
 from ..neutral import media_oss as _neutral
 from ..neutral.media_oss import (  # noqa: F401 —— 兼容旧 import
     _UNSAFE_NAME_RE,
@@ -146,12 +146,29 @@ def clear_oss_config_cache() -> None:
     _neutral.clear_oss_config_cache()
 
 
+def oss_enabled() -> bool:
+    """OSS 媒体转存开关（**默认关闭**，2026-10-20 老板要求）。
+
+    ``WECHATPRO_OSS_ENABLED``：
+
+    * 未设置 / ``0/false/off/no`` —— 关闭（即使凭据齐全也不上传）；
+    * ``1/true/on/yes`` —— 开启（仍需凭据齐全）。
+
+    旧行为是"有凭据就自动开启"，那让 OSS 变成事实上的默认能力。现在必须显式开启：
+    既有部署升级时要在 ``.env`` 补 ``WECHATPRO_OSS_ENABLED=1``（向导会写）。
+    """
+    raw = str(gate_env("WECHATPRO_OSS_ENABLED", "") or "").strip().lower()
+    return raw in ("1", "true", "on", "yes")
+
+
 def load_oss_config(*, path: str | None = None, now: float | None = None) -> OssConfig | None:
     """读 OSS 凭据。**任何失败都返 None**（缺文件 / 坏 JSON / 字段缺），只有齐全才进缓存。
 
     凭据来源的**解析**在本模块（profile secret scope → 兼容文件），缓存与校验在
     :func:`plugin.neutral.media_oss.load_oss_config`。
     """
+    if not oss_enabled():
+        return None
     if path is None:
         raw = _oss_config_from_env()
         if raw is not None:

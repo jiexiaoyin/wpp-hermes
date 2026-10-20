@@ -8,7 +8,7 @@
 | Python | `>= 3.11` |
 | vendor | 一个可用的 WeChatPadPro 兼容服务，以及 `authcode` / `tokenKey` |
 | 网络 | 插件所在机器能访问 vendor 的 HTTP / WebSocket 地址 |
-| 可选 | MariaDB、ffmpeg、silk 编解码器、LLM / STT key（缺失时对应能力降级） |
+| 可选 | MySQL/MariaDB（默认用内置 SQLite）、ossutil、ffmpeg、silk 编解码器、LLM / STT key（缺失时对应能力降级） |
 
 确认 Hermes 版本：
 
@@ -28,11 +28,14 @@ hermes plugins install <owner>/<repo>#plugin --yes-deps --enable
   `WECHATPRO_TOKEN_KEY`，写入当前 `HERMES_HOME/.env`。
 - 标了 `secret: true` 的项输入不回显。
 
-装完后补跑向导（账号文件、白名单、webhook、profile 绑定）：
+装完后补跑向导（账号文件、准入策略、数据库、心流/OSS、webhook、profile 绑定）：
 
 ```bash
 python3 "$HERMES_HOME/plugins/wechatpadpro-platform/setup_wizard.py"
 ```
+
+向导默认值：SQLite、群聊与私聊全部放行、心流/OSS/MCP 关闭。密钥输入不回显，
+写入前会备份既有 `.env` / 账号文件。
 
 ## 方式 B：安装脚本
 
@@ -95,6 +98,13 @@ git pull
 bash scripts/install.sh --upgrade
 hermes plugins doctor "$HERMES_HOME/plugins/wechatpadpro-platform"
 systemctl --user restart hermes-gateway     # 或你实际的启动方式
+```
+
+从旧版本升级（当时默认 MySQL / OSS 自动启用）时，**先在 `.env` 补**：
+
+```dotenv
+WECHATPRO_DB_BACKEND=mysql      # 不加会切到一个空 SQLite
+WECHATPRO_OSS_ENABLED=1         # 仍要用 OSS 媒体 URL 时
 ```
 
 `--upgrade` 会保留 `accounts/` 与 `.env`，只替换代码。升级前脚本会把旧插件目录

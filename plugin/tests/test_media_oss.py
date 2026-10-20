@@ -43,8 +43,13 @@ FAKE_SK = "FakeSecret00000000000000000000002"
 
 
 @pytest.fixture(autouse=True)
-def _no_cache_leak():
-    """每个用例前后都清缓存：缓存是模块级的，不清就会串味（这正是它在生产的用法）。"""
+def _no_cache_leak(monkeypatch):
+    """每个用例前后都清缓存；并默认显式打开 OSS 开关。
+
+    2026-10-20 起 OSS **默认关闭**（只有 ``WECHATPRO_OSS_ENABLED=1`` 才启用），
+    所以上传机制的用例统一先开开关；开关本身的用例覆盖在 §0。
+    """
+    monkeypatch.setenv("WECHATPRO_OSS_ENABLED", "1")
     M.clear_oss_config_cache()
     yield
     M.clear_oss_config_cache()
@@ -61,6 +66,22 @@ def cred_file(tmp_path) -> Path:
 
 def _fake_oss() -> M.OssConfig:
     return M.OssConfig(FAKE_AK, FAKE_SK, "openclaw-a", "oss-cn-hangzhou.aliyuncs.com")
+
+
+# ============================================================ 0. 开关（默认关）
+
+def test_oss_is_disabled_by_default(monkeypatch, cred_file):
+    """★ 默认关闭：凭据齐全也不用，必须显式 ``WECHATPRO_OSS_ENABLED=1``。"""
+    monkeypatch.delenv("WECHATPRO_OSS_ENABLED", raising=False)
+    assert M.oss_enabled() is False
+    assert M.load_oss_config(path=str(cred_file)) is None
+
+
+@pytest.mark.parametrize("flag", ["0", "false", "off", "no", ""])
+def test_oss_explicit_off(monkeypatch, cred_file, flag):
+    monkeypatch.setenv("WECHATPRO_OSS_ENABLED", flag)
+    assert M.oss_enabled() is False
+    assert M.load_oss_config(path=str(cred_file)) is None
 
 
 # ============================================================ 1. 凭据读取

@@ -42,9 +42,13 @@ hermes plugins doctor "$HERMES_HOME/plugins/wechatpadpro-platform"
 3. **webhook 是否可达**：vendor 侧配置的回调地址要能访问到
    `WECHATPRO_WEBHOOK_HOST:webhookPort`；反向代理要转发对应路径；
 4. **签名是否一致**：`WECHATPRO_WEBHOOK_SECRET` 必须与 vendor 侧配置一致，否则 403；
-5. **白名单**：私聊用户不在 `allowFrom` / `WECHATPRO_ALLOWED_USERS` 里会被静默丢弃；
+5. **准入**：默认全放行；如果配了 `dmPolicy: allowlist`，用户不在 `allowFrom` /
+   `WECHATPRO_ALLOWED_USERS` 里会被静默丢弃；`blacklistUsers` 一票否决；
+   `pairing` 模式只放行已配对用户；
 6. **群策略**：`groupPolicy` 为 `disabled` / `closed`，或 `allowlist` 但群不在
-   `groupAllowFrom` 里，都会不回复；拼错的值按 fail-closed 处理。
+   `groupAllowFrom` 里，都会不回复；拼错的值按 fail-closed 处理；
+7. **网关层**：`open` / `blacklist` / `pairing` 需要 `WECHATPRO_ALLOW_ALL_USERS=1`
+   才过 Hermes 中心授权；缺它时日志会出现 `Unauthorized user`，插件侧什么都看不到。
 
 WebSocket 是兜底通道；webhook 配错时它仍可能收到消息，所以"webhook 不通"不一定表现为完全静默。
 
@@ -87,13 +91,29 @@ WebSocket 是兜底通道；webhook 配错时它仍可能收到消息，所以"w
 
 ---
 
+## 媒体消息没有公网 URL（OSS）
+
+OSS 默认关闭。确认：
+
+1. `.env` 里有 `WECHATPRO_OSS_ENABLED=1`；
+2. `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` / `OSS_BUCKET` 齐全；
+3. 本机装了 `ossutil`，且 `~/.ossutilconfig` 有可用的鉴权配置。
+
+缺任何一项都只会让"这条消息不带 URL"，不影响收发；日志里有一行
+`[OSS] 上传失败（本条消息不带 URL）`。
+
+---
+
 ## 数据库相关
 
-- 不配数据库时，消息收发正常，历史检索 / 心流落库 / 审计降级；
-- `WECHATPRO_DB_HOST` 默认只允许本机；远程必须显式
-  `WECHATPRO_DB_ALLOW_REMOTE=1`；
+- 默认 SQLite：`<插件目录>/wpp.sqlite3`。确认 `WECHATPRO_DB_BACKEND` 没有被设成
+  意外值（拼错会直接报错，不会静默回落）；
+- 从旧版升级：原来的 MariaDB 部署必须补 `WECHATPRO_DB_BACKEND=mysql`，否则会连到
+  一个空 SQLite（表现为历史全没了）；
+- MySQL：`WECHATPRO_DB_HOST` 默认只允许本机；远程必须显式
+  `WECHATPRO_DB_ALLOW_REMOTE=1`；连不上时消息收发正常，历史/心流/审计降级；
 - 启动日志会打印 schema 漂移检测结果；插件**不会自动改列**；
-- 测试库名必须以 `_test` 结尾，否则测试护栏直接拒绝。
+- 测试库名必须以 `_test` 结尾，否则测试护栏直接拒绝（SQLite 只用临时文件）。
 
 ---
 

@@ -10,7 +10,8 @@
 1. **接龙排在最前**（v1.9.1）：含"红包"二字的接龙**不许**被静默（09-27 事故原样）。
 2. **关键词只在卡片（49）上采信**（v1.9.2）：纯文本里出现"红包"是人话，吞了它就是吞群友的话。
 3. **硬门顺序固定**：filehelper **必须在 self 之前**（P1-2.3），否则命令永远被拦。
-4. **群策略 fail-closed**：``allowlist`` 空表拒全部（P0-2）；私聊空白名单拒全部。
+4. **准入口径**：群/私聊默认全放行（2026-10-20）；显式 ``allowlist`` 空表拒全部
+   （P0-2）；未知模式 fail-closed；公众号/微信团队/支付等服务号永不回复。
 5. **管理员不绕过白名单**：这条没有"管理员豁免"分支 —— 群里人人都能 @，真需要就该加进白名单。
 6. **可选三路默认关**：msgType / 引用 bot / 关键词（老板 2026-09-01 撤回硬编码关键词的同一理由）。
 7. **原因串就是口径**：每条静默都有**不同的** reason，日志与观测靠它分辨关了哪一档。
@@ -138,6 +139,17 @@ def test_revoke_and_official_account_are_silent():
     assert T.should_process(_msg(from_wxid="gh_abcdef"), _cfg()) == (False, "official_account")
 
 
+def test_service_accounts_are_silent():
+    """微信团队/支付/服务通知一律不回复（2026-10-20 放行模式的硬边界）。
+
+    这些账号的 wxid 不带 ``gh_``，只靠公众号前缀挡不住；``dmPolicy=open``
+    下如果放它们进来，机器人会去跟系统通知对话。
+    """
+    for sender in sorted(T.SERVICE_WXIDS):
+        assert T.should_process(_msg(from_wxid=sender), _cfg()) == (False, "service_account"), \
+            sender
+
+
 def test_self_message_from_the_bot_is_never_answered():
     """vendor 回推自己发的消息 ⇒ 必须静默（否则自问自答死循环）。"""
     assert T.should_process(_group(from_wxid=SELF, content="@测试小助理 在吗"), _cfg()) \
@@ -220,21 +232,52 @@ def test_admin_has_no_bypass_of_the_group_allowlist():
 
 # ==================================================== §4 私聊
 
-def test_dm_is_fail_closed_when_the_allowlist_is_empty():
-    """私聊**空白名单 = 拒所有**（防 P0 联系人 fan-out 重演）。"""
-    assert T.should_process(_msg(content="你好"), _cfg()) == (False, "dm_fail_closed")
+def test_dm_is_open_by_default():
+    """2026-10-20 老板拍板：没配任何准入策略 ⇒ 私聊**默认全放行**。"""
+    assert T.should_process(_msg(content="你好"), _cfg()) == (True, "dm")
     assert T.should_process(_msg(content="你好"), _cfg(allowAllUsers=True)) == (True, "dm")
 
 
 def test_dm_allowlist_admits_and_rejects():
-    cfg = _cfg(allowFrom=["wxid_friend"])
+    cfg = _cfg(dmPolicy="allowlist", allowFrom=["wxid_friend"])
     assert T.should_process(_msg(from_wxid="wxid_friend"), cfg) == (True, "dm")
     assert T.should_process(_msg(from_wxid="wxid_other"), cfg) == (False, "dm_not_allowlisted")
+    # 旧配置（只有 allowFrom、没有 dmPolicy）仍按白名单处理。
+    legacy = _cfg(allowFrom=["wxid_friend"])
+    assert T.should_process(_msg(from_wxid="wxid_stranger"), legacy) == \
+        (False, "dm_not_allowlisted")
+
+
+def test_dm_allowlist_empty_stays_fail_closed():
+    """显式 ``allowlist`` + 空名单 = 拒所有（与群策略同一口径）。"""
+    assert T.should_process(_msg(content="你好"), _cfg(dmPolicy="allowlist")) == \
+        (False, "dm_not_allowlisted")
+
+
+def test_dm_blacklist_rejects_only_listed_users():
+    cfg = _cfg(dmPolicy="blacklist", blacklistUsers=["wxid_bad"])
+    assert T.should_process(_msg(from_wxid="wxid_bad"), cfg) == (False, "dm_blacklisted")
+    assert T.should_process(_msg(from_wxid="wxid_friend"), cfg) == (True, "dm")
+    # 黑名单在任何模式下都先拒（包括默认 open）。
+    assert T.should_process(_msg(from_wxid="wxid_bad"),
+                            _cfg(blacklistUsers=["wxid_bad"])) == (False, "dm_blacklisted")
+
+
+def test_dm_pairing_only_admits_paired_users():
+    cfg = _cfg(dmPolicy="pairing", pairedUsers=["wxid_friend"])
+    assert T.should_process(_msg(from_wxid="wxid_friend"), cfg) == (True, "dm")
+    assert T.should_process(_msg(from_wxid="wxid_other"), cfg) == (False, "dm_not_paired")
+
+
+def test_unknown_dm_policy_fails_closed():
+    """拼错的模式**不许**静默当成 open（否则一个 typo 就拆掉准入）。"""
+    assert T.should_process(_msg(content="你好"), _cfg(dmPolicy="opne")) == \
+        (False, "dm_fail_closed")
 
 
 def test_allow_all_users_wins_over_a_nonempty_allowlist():
     """``allowAllUsers=True`` 是"全放行"的总开关，与名单是否为空无关。"""
-    cfg = _cfg(allowAllUsers=True, allowFrom=["wxid_friend"])
+    cfg = _cfg(dmPolicy="allowlist", allowAllUsers=True, allowFrom=["wxid_friend"])
     assert T.should_process(_msg(from_wxid="wxid_stranger"), cfg) == (True, "dm")
 
 
@@ -511,8 +554,8 @@ def test_the_gate_matches_real_verdicts():
         (_group(from_wxid=SELF, content="我自己说的"), _cfg(), True, "self"),
         (_group(content="微信红包", msg_type=MT_APP), _cfg(), True, "red_packet"),
         (_group(msg_type=MT_REVOKE), _cfg(), True, "revoke"),
-        (_msg(content="你好"), _cfg(), True, "dm_fail_closed"),
-        (_msg(content="你好"), _cfg(allowAllUsers=True), False, "dm"),
+        (_msg(content="你好"), _cfg(), False, "dm"),
+        (_msg(content="你好"), _cfg(dmPolicy="allowlist"), True, "dm_not_allowlisted"),
     ]
     blacklisted = _cfg(blacklistGroups=["12345@chatroom"])
     cases.append((_group(content="在吗"), blacklisted, True, "group_blacklist"))

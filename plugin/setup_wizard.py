@@ -39,16 +39,46 @@ AUTHCODE_KEY = "WECHATPRO_AUTHCODE"
 TOKEN_KEY_KEY = "WECHATPRO_TOKEN_KEY"
 WEBHOOK_PUBLIC_URL_KEY = "WECHATPRO_WEBHOOK_PUBLIC_URL"
 ALLOWED_USERS_KEY = "WECHATPRO_ALLOWED_USERS"
+ALLOW_ALL_USERS_KEY = "WECHATPRO_ALLOW_ALL_USERS"
 HOME_CHANNEL_KEY = "WECHATPRO_HOME_CHANNEL"
 AGENT_KEY = "WECHATPRO_AGENT"
+DB_BACKEND_KEY = "WECHATPRO_DB_BACKEND"
+SQLITE_PATH_KEY = "WECHATPRO_SQLITE_PATH"
 DB_HOST_KEY = "WECHATPRO_DB_HOST"
 DB_PORT_KEY = "WECHATPRO_DB_PORT"
 DB_USER_KEY = "WECHATPRO_DB_USER"
 DB_NAME_KEY = "WECHATPRO_DB_NAME"
 DB_PASSWORD_KEY = "WECHATPRO_DB_PASSWORD"
+OSS_ENABLED_KEY = "WECHATPRO_OSS_ENABLED"
+OSS_ACCESS_KEY_ID_KEY = "OSS_ACCESS_KEY_ID"
+OSS_ACCESS_KEY_SECRET_KEY = "OSS_ACCESS_KEY_SECRET"
+OSS_BUCKET_KEY = "OSS_BUCKET"
+OSS_ENDPOINT_KEY = "OSS_ENDPOINT"
+OSS_CREDENTIALS_PATH_KEY = "OSS_CREDENTIALS_PATH"
+JUDGE_API_KEY_KEY = "JUDGE_API_KEY"
+JUDGE_BASE_URL_KEY = "JUDGE_BASE_URL"
+EMBEDDING_API_KEY_ENV_KEY = "WECHATPRO_EMBEDDING_API_KEY_ENV"
+
+#: 私聊/群准入模式（写进账号 JSON，不是运行时 env；向导从 env 读非交互输入）。
+DM_POLICY_KEY = "WECHATPRO_DM_POLICY"
+GROUP_POLICY_KEY = "WECHATPRO_GROUP_POLICY"
+DM_ALLOW_FROM_KEY = "WECHATPRO_DM_ALLOW_FROM"
+DM_BLACKLIST_KEY = "WECHATPRO_DM_BLACKLIST"
+GROUP_ALLOW_FROM_KEY = "WECHATPRO_GROUP_ALLOW_FROM"
+GROUP_BLACKLIST_KEY = "WECHATPRO_GROUP_BLACKLIST"
+HEARTFLOW_ENABLED_KEY = "WECHATPRO_HEARTFLOW_ENABLED"
+HEARTFLOW_MODEL_KEY = "WECHATPRO_HEARTFLOW_MODEL"
+HEARTFLOW_PROFILE_ENABLED_KEY = "WECHATPRO_HEARTFLOW_PROFILE_ENABLED"
+EMBEDDING_MODEL_KEY = "WECHATPRO_EMBEDDING_MODEL"
+EMBEDDING_BASE_URL_KEY = "WECHATPRO_EMBEDDING_BASE_URL"
+MCP_ENABLED_KEY = "WECHATPRO_MCP_ENABLED"
+
+DM_POLICIES = ("open", "allowlist", "blacklist", "pairing")
+GROUP_POLICIES = ("open", "allowlist", "blacklist", "disabled")
 
 _REQUIRED_ENV = (API_BASE_KEY, AUTHCODE_KEY, TOKEN_KEY_KEY)
-_OPTIONAL_ENV = (WS_URL_KEY, WEBHOOK_PUBLIC_URL_KEY, ALLOWED_USERS_KEY, HOME_CHANNEL_KEY)
+_OPTIONAL_ENV = (WS_URL_KEY, WEBHOOK_PUBLIC_URL_KEY, ALLOWED_USERS_KEY, HOME_CHANNEL_KEY,
+                 ALLOW_ALL_USERS_KEY)
 
 _ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 
@@ -213,11 +243,34 @@ def _effective_env(home: Path) -> dict[str, str]:
         *_REQUIRED_ENV,
         *_OPTIONAL_ENV,
         AGENT_KEY,
+        DB_BACKEND_KEY,
+        SQLITE_PATH_KEY,
         DB_HOST_KEY,
         DB_PORT_KEY,
         DB_USER_KEY,
         DB_NAME_KEY,
         DB_PASSWORD_KEY,
+        OSS_ENABLED_KEY,
+        OSS_ACCESS_KEY_ID_KEY,
+        OSS_ACCESS_KEY_SECRET_KEY,
+        OSS_BUCKET_KEY,
+        OSS_ENDPOINT_KEY,
+        OSS_CREDENTIALS_PATH_KEY,
+        JUDGE_API_KEY_KEY,
+        JUDGE_BASE_URL_KEY,
+        EMBEDDING_API_KEY_ENV_KEY,
+        DM_POLICY_KEY,
+        GROUP_POLICY_KEY,
+        DM_ALLOW_FROM_KEY,
+        DM_BLACKLIST_KEY,
+        GROUP_ALLOW_FROM_KEY,
+        GROUP_BLACKLIST_KEY,
+        HEARTFLOW_ENABLED_KEY,
+        HEARTFLOW_MODEL_KEY,
+        HEARTFLOW_PROFILE_ENABLED_KEY,
+        EMBEDDING_MODEL_KEY,
+        EMBEDDING_BASE_URL_KEY,
+        MCP_ENABLED_KEY,
         "WECHATPRO_WEBHOOK_HOST",
         "WECHATPRO_DB_ALLOW_REMOTE",
     }
@@ -422,6 +475,24 @@ def check_status(home_arg: str | None = None, profile: str | None = None,
     )
     agent = _agent_default(home, account)
 
+    db_backend = str(env.get(DB_BACKEND_KEY) or "").strip().lower()
+    if db_backend not in ("sqlite", "mysql"):
+        db_backend = "mysql" if env.get(DB_HOST_KEY) else "sqlite"
+    dm_policy = str(account.get("dmPolicy") or "").strip().lower() or (
+        "pairing" if account.get("dmPairingEnabled") is True
+        else "allowlist" if _account_list(account, "allowFrom") else "open")
+    group_policy = str(account.get("groupPolicy") or "").strip().lower() or "open"
+    hf = _heartflow(account)
+    heartflow_enabled = hf.get("enabled") is True
+    oss_enabled = _env_truthy(env.get(OSS_ENABLED_KEY, ""))
+    warnings: list[str] = []
+    if heartflow_enabled and not str(hf.get("model") or "").strip():
+        warnings.append("心流已启用但未配置 heartflow.model")
+    if oss_enabled and not (env.get(OSS_ACCESS_KEY_ID_KEY)
+                            and env.get(OSS_ACCESS_KEY_SECRET_KEY)
+                            and env.get(OSS_BUCKET_KEY)):
+        warnings.append("OSS 已启用但凭据不完整（媒体消息将不带公网 URL）")
+
     missing: list[str] = []
     if not api_base:
         missing.append(API_BASE_KEY)
@@ -457,6 +528,26 @@ def check_status(home_arg: str | None = None, profile: str | None = None,
         "agent": agent,
         "api_base": api_base,
         "ws_url": ws_url,
+        "db_backend": db_backend,
+        "access": {
+            "dm_policy": dm_policy,
+            "group_policy": group_policy,
+            "dm_allowlist_size": len(_account_list(account, "allowFrom")),
+            "dm_blacklist_size": len(_account_list(account, "blacklistUsers")),
+            "group_allowlist_size": len(_account_list(account, "groupAllowFrom")),
+            "group_blacklist_size": len(_account_list(account, "blacklistGroups")),
+            # 网关对 open/blacklist/pairing 默认全拒；缺这个 env 时消息到不了插件。
+            "gateway_allow_all": _env_truthy(env.get(ALLOW_ALL_USERS_KEY, "")),
+        },
+        "heartflow": {
+            "enabled": heartflow_enabled,
+            "model_configured": bool(str(hf.get("model") or "").strip()),
+            "profile_enabled": (hf.get("profile") or {}).get("enabled", True)
+            if isinstance(hf.get("profile"), dict) else True,
+            "embedding_model": str(account.get("embeddingModel") or ""),
+        },
+        "oss_enabled": oss_enabled,
+        "warnings": warnings,
         "configured": {
             API_BASE_KEY: bool(api_base),
             AUTHCODE_KEY: bool(authcode),
@@ -478,9 +569,11 @@ def guide_text(home_arg: str | None = None, profile: str | None = None,
         "WeChatPadPro 配置引导：",
         f"1. 在服务器终端运行：{py} {wizard} --home {status['home']}",
         "2. 按提示填写 API base、authcode、tokenKey（输入不回显）。",
-        "3. 向导会写入 .env 与 accounts/default.json，并尝试启用插件。",
-        f"4. 验证：hermes plugins doctor {status['plugin_dir']}",
-        "5. 重启 gateway 后，用允许的微信私聊发一条消息。",
+        "3. 准入默认全部放行；可选 allowlist/blacklist/pairing（群与私聊分别设置）。",
+        "4. 数据库默认 SQLite；心流、OSS 默认关闭，需要时在向导里开启。",
+        "5. 向导会写入 .env 与 accounts/default.json，并尝试启用插件。",
+        f"6. 验证：hermes plugins doctor {status['plugin_dir']}",
+        "7. 重启 gateway 后，用微信私聊发一条消息。",
     ]
     if status["missing"]:
         lines.insert(0, f"当前缺失：{', '.join(status['missing'])}")
@@ -512,6 +605,76 @@ def _ask_yes(label: str, default: bool = False) -> bool:
     return value in ("y", "yes", "1", "true")
 
 
+def _ask_choice(label: str, choices: tuple[str, ...], default: str) -> str:
+    """从固定选项里选一个；非法输入重问（不静默落到默认值）。"""
+    shown = "/".join(choices)
+    while True:
+        value = input(f"{label} ({shown}) [{default}]: ").strip().lower() or default
+        if value in choices:
+            return value
+        print(f"⚠️ 无效选项 {value!r}，请从 {shown} 中选。")
+
+
+def _split_csv(value: str) -> list[str]:
+    return [x.strip() for x in str(value or "").split(",") if x.strip()]
+
+
+def _ask_list(label: str, current: list[str], *, clear_hint: bool = True) -> list[str]:
+    """询问逗号分隔列表。回车保留 ``current``；输入 ``-`` 清空。"""
+    suffix = "（输入 - 清空）" if clear_hint else ""
+    value = _prompt(f"{label}{suffix}", ",".join(current))
+    if value.strip() == "-":
+        return []
+    return _split_csv(value)
+
+
+def _account_list(account: dict, key: str) -> list[str]:
+    raw = account.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def _dm_default(account: dict) -> str:
+    """向导里私聊模式的默认值：显式 ``dmPolicy`` 优先，其次按旧配置推断。"""
+    policy = str(account.get("dmPolicy") or "").strip().lower()
+    if policy in DM_POLICIES:
+        return policy
+    if account.get("dmPairingEnabled") is True:
+        return "pairing"
+    return "allowlist" if _account_list(account, "allowFrom") else "open"
+
+
+def _group_default(account: dict) -> str:
+    policy = str(account.get("groupPolicy") or "").strip().lower()
+    return policy if policy in GROUP_POLICIES else "open"
+
+
+def _heartflow(account: dict) -> dict:
+    value = account.get("heartflow")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _merge_section(existing: object, updates: dict) -> dict:
+    base = dict(existing) if isinstance(existing, dict) else {}
+    base.update(updates)
+    return base
+
+
+def _permissive(access: str) -> bool:
+    """该模式是否需要网关 ``WECHATPRO_ALLOW_ALL_USERS=1`` 才放得进来。"""
+    return access not in ("allowlist", "disabled", "closed")
+
+
+def _env_truthy(value: str) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _env_value(env: dict[str, str], name: str) -> str:
+    """``.env``/已知键之外的动态 env 名（如 embedding key）也允许从进程环境取。"""
+    return env.get(name) or os.environ.get(name, "") or ""
+
+
 def _collect_interactive(home: Path, env: dict[str, str], account: dict, force: bool) -> tuple[dict, dict]:
     print(f"\n配置写入目标：{home}")
     print(f"账号文件：{_account_path(home=home)}\n")
@@ -537,12 +700,48 @@ def _collect_interactive(home: Path, env: dict[str, str], account: dict, force: 
 
     public_url = _prompt("Webhook 公网地址（可留空，vendor 回调用）",
                          env.get(WEBHOOK_PUBLIC_URL_KEY, ""))
-    allowed = _prompt("允许私聊的 wxid（逗号分隔，可留空）", env.get(ALLOWED_USERS_KEY, ""))
     home_channel = _prompt("Home channel（格式 accountId:peerId，可留空）",
                            env.get(HOME_CHANNEL_KEY, ""))
     agent = _prompt("绑定 Hermes profile（agent 名，禁止 main）", _agent_default(home, account))
     if agent == "main":
         raise SystemExit("agent 不能是 main（多账号会串号）")
+
+    # ------------------------------------------------------------ 准入策略
+    print("\n准入策略（默认全部放行；按需收紧）")
+    dm_policy = _ask_choice("私聊准入模式", DM_POLICIES, _dm_default(account))
+    allow_from = _account_list(account, "allowFrom")
+    blacklist_users = _account_list(account, "blacklistUsers")
+    if dm_policy == "allowlist":
+        allow_from = _ask_list(
+            "私聊白名单 wxid（逗号分隔；空列表 = 拒绝所有私聊）",
+            allow_from or _split_csv(env.get(ALLOWED_USERS_KEY, "")))
+        if not allow_from:
+            print("⚠️ 白名单为空 ⇒ 所有私聊都会被拒（fail-closed）。")
+    elif dm_policy == "blacklist":
+        allow_from = []
+        blacklist_users = _ask_list("私聊黑名单 wxid（逗号分隔）", blacklist_users)
+    elif dm_policy == "pairing":
+        allow_from = []
+        blacklist_users = []
+        print("ℹ️ 配对模式：管理员私聊发 /genpair 取码，用户发 /pair <码> 自助加入。")
+    else:  # open：清掉遗留名单，避免“选全部放行却仍被黑名单拦”
+        allow_from = []
+        blacklist_users = []
+
+    group_policy = _ask_choice("群聊准入模式", GROUP_POLICIES, _group_default(account))
+    group_allow = _account_list(account, "groupAllowFrom")
+    blacklist_groups = _account_list(account, "blacklistGroups")
+    if group_policy == "allowlist":
+        group_allow = _ask_list(
+            "群白名单（@chatroom，逗号分隔；空列表 = 拒绝所有群）", group_allow)
+        if not group_allow:
+            print("⚠️ 群白名单为空 ⇒ 所有群消息都会被拒（fail-closed）。")
+    elif group_policy == "blacklist":
+        group_allow = []
+        blacklist_groups = _ask_list("群黑名单（@chatroom，逗号分隔）", blacklist_groups)
+    else:  # open / disabled
+        group_allow = []
+        blacklist_groups = []
 
     env_updates = {
         API_BASE_KEY: api_base,
@@ -553,11 +752,15 @@ def _collect_interactive(home: Path, env: dict[str, str], account: dict, force: 
         env_updates[WS_URL_KEY] = ws_url
     if public_url:
         env_updates[WEBHOOK_PUBLIC_URL_KEY] = public_url
-    if allowed:
-        env_updates[ALLOWED_USERS_KEY] = allowed
     if home_channel:
         env_updates[HOME_CHANNEL_KEY] = home_channel
     env_updates[AGENT_KEY] = agent
+    # 网关（Hermes 中心授权）对 open/blacklist/pairing 一律 default-deny，
+    # 必须显式开 ALLOW_ALL 才会把消息交给插件自己的闸门。
+    env_updates[ALLOW_ALL_USERS_KEY] = (
+        "1" if (_permissive(dm_policy) or _permissive(group_policy)) else "0")
+    env_updates[ALLOWED_USERS_KEY] = (
+        ",".join(allow_from) if dm_policy == "allowlist" else "")
 
     account_updates = {
         "enabled": True,
@@ -565,15 +768,32 @@ def _collect_interactive(home: Path, env: dict[str, str], account: dict, force: 
         "authcodeEnv": AUTHCODE_KEY,
         "tokenKeyEnv": TOKEN_KEY_KEY,
         "apiBaseUrl": api_base,
+        "dmPolicy": dm_policy,
+        "allowFrom": allow_from,
+        "blacklistUsers": blacklist_users,
+        "groupPolicy": group_policy,
+        "groupAllowFrom": group_allow,
+        "blacklistGroups": blacklist_groups,
     }
     if ws_url:
         account_updates["wsUrl"] = ws_url
     if public_url:
         account_updates["webhookPublicUrl"] = public_url
-    if allowed:
-        account_updates["allowFrom"] = [x.strip() for x in allowed.split(",") if x.strip()]
 
-    if _ask_yes("配置 MariaDB（可选，用于历史/心流/审计）", False):
+    # ------------------------------------------------------------ 数据库
+    # 默认 SQLite；已有 MySQL 配置（只有 DB_HOST、没有 backend 键）的旧部署
+    # 推断为 mysql，避免向导把生产库悄悄切到一个空 SQLite。
+    backend = str(env.get(DB_BACKEND_KEY) or "").strip().lower()
+    if backend not in ("sqlite", "mysql"):
+        backend = "mysql" if env.get(DB_HOST_KEY) else "sqlite"
+    backend = _ask_choice("数据库后端", ("sqlite", "mysql"), backend)
+    env_updates[DB_BACKEND_KEY] = backend
+    if backend == "sqlite":
+        sqlite_path = _prompt("SQLite 文件路径（留空 = 插件目录下 wpp.sqlite3）",
+                              env.get(SQLITE_PATH_KEY, ""))
+        if sqlite_path:
+            env_updates[SQLITE_PATH_KEY] = sqlite_path
+    else:
         db_host = _prompt("MariaDB host", env.get(DB_HOST_KEY, "127.0.0.1"))
         if db_host not in ("localhost", "127.0.0.1", "::1"):
             print("⚠️ 非本机 host：请确认已显式允许远程连接（WECHATPRO_DB_ALLOW_REMOTE=1）")
@@ -590,13 +810,86 @@ def _collect_interactive(home: Path, env: dict[str, str], account: dict, force: 
         if db_password:
             env_updates[DB_PASSWORD_KEY] = db_password
 
+    # ------------------------------------------------------------ 心流
+    hf = _heartflow(account)
+    hf_on = _ask_yes("启用心流模式（可选，默认关闭；需要向量模型 + 判定模型）",
+                     hf.get("enabled") is True)
+    hf_updates: dict = {"enabled": hf_on}
+    if hf_on:
+        hf_model = _prompt("心流判定模型（如 deepseek-chat）", str(hf.get("model") or ""))
+        if not hf_model:
+            raise SystemExit("启用心流必须配置心流判定模型（heartflow.model）")
+        hf_updates["model"] = hf_model
+        profile_cfg = hf.get("profile")
+        profile_on = _ask_yes(
+            "启用群画像 / 模型画像能力（默认开启）",
+            profile_cfg.get("enabled", True) is not False if isinstance(profile_cfg, dict) else True)
+        hf_updates["profile"] = _merge_section(profile_cfg, {"enabled": profile_on})
+
+        embedding_model = _prompt("向量模型（embedding）",
+                                  str(account.get("embeddingModel") or "text-embedding-v4"))
+        embedding_key_env = _prompt("向量模型 API Key 的环境变量名",
+                                    str(account.get("embeddingApiKeyEnv") or "DASHSCOPE_API_KEY"))
+        embedding_base = _prompt("向量模型 base URL（留空 = 默认 dashscope 兼容地址）",
+                                 str(account.get("embeddingBaseUrl") or ""))
+        account_updates["embeddingModel"] = embedding_model
+        account_updates["embeddingApiKeyEnv"] = embedding_key_env
+        if embedding_base:
+            account_updates["embeddingBaseUrl"] = embedding_base
+        key_val = _prompt(f"{embedding_key_env}（输入不回显）",
+                          env.get(embedding_key_env, ""), secret=True)
+        if key_val:
+            env_updates[embedding_key_env] = key_val
+        judge_key = _prompt(f"{JUDGE_API_KEY_KEY}（心流判定模型密钥，输入不回显）",
+                            env.get(JUDGE_API_KEY_KEY, ""), secret=True)
+        if judge_key:
+            env_updates[JUDGE_API_KEY_KEY] = judge_key
+        judge_base = _prompt(f"{JUDGE_BASE_URL_KEY}（留空 = 默认端点）",
+                             env.get(JUDGE_BASE_URL_KEY, ""))
+        if judge_base:
+            env_updates[JUDGE_BASE_URL_KEY] = judge_base
+    account_updates["heartflow"] = _merge_section(account.get("heartflow"), hf_updates)
+    env_updates[HEARTFLOW_ENABLED_KEY] = "1" if hf_on else "0"
+
+    # ------------------------------------------------------------ OSS
+    oss_on = _ask_yes("启用 OSS/S3 媒体转存（可选，默认关闭）", False)
+    env_updates[OSS_ENABLED_KEY] = "1" if oss_on else "0"
+    if oss_on:
+        ak = _prompt(f"{OSS_ACCESS_KEY_ID_KEY}（输入不回显）",
+                     env.get(OSS_ACCESS_KEY_ID_KEY, ""), secret=True)
+        sk = _prompt(f"{OSS_ACCESS_KEY_SECRET_KEY}（输入不回显）",
+                     env.get(OSS_ACCESS_KEY_SECRET_KEY, ""), secret=True)
+        bucket = _prompt(f"{OSS_BUCKET_KEY}", env.get(OSS_BUCKET_KEY, ""))
+        endpoint = _prompt(f"{OSS_ENDPOINT_KEY}（留空 = 默认 endpoint）",
+                           env.get(OSS_ENDPOINT_KEY, ""))
+        if ak:
+            env_updates[OSS_ACCESS_KEY_ID_KEY] = ak
+        if sk:
+            env_updates[OSS_ACCESS_KEY_SECRET_KEY] = sk
+        if bucket:
+            env_updates[OSS_BUCKET_KEY] = bucket
+        if endpoint:
+            env_updates[OSS_ENDPOINT_KEY] = endpoint
+        if not (ak and sk and bucket):
+            print("⚠️ OSS 凭据不完整：媒体消息将不带公网 URL（不影响收发）。")
+
+    # ------------------------------------------------------------ 其他能力
+    mcp_on = _ask_yes("启用 MCP 只读查询工具（可选，默认关闭）",
+                      account.get("mcpEnabled") is True)
+    if mcp_on or "mcpEnabled" not in account:
+        account_updates["mcpEnabled"] = mcp_on
+    print("ℹ️ 其余能力（情感/黑化(黑话)/风格学习/语音/主动关心/合并发送）默认关闭；"
+          "需要时在账号 JSON 对应段写 \"enabled\": true。")
+
     print("\n即将写入：")
     print(f"  {home / '.env'}（0600）")
     print(f"  {_account_path(home=home)}（0600）")
-    for key in (API_BASE_KEY, WS_URL_KEY, AUTHCODE_KEY, TOKEN_KEY_KEY):
+    for key in (API_BASE_KEY, WS_URL_KEY, AUTHCODE_KEY, TOKEN_KEY_KEY, DB_BACKEND_KEY,
+                ALLOW_ALL_USERS_KEY, HEARTFLOW_ENABLED_KEY, OSS_ENABLED_KEY):
         if key in env_updates:
             shown = "***" if key in (AUTHCODE_KEY, TOKEN_KEY_KEY) else env_updates[key]
             print(f"  {key}={shown}")
+    print(f"  私聊={dm_policy} 群聊={group_policy}")
     if not force and not _ask_yes("确认写入", True):
         raise SystemExit("已取消")
     return env_updates, account_updates
@@ -616,17 +909,37 @@ def _collect_non_interactive(env: dict[str, str], account: dict, home: Path) -> 
     if agent == "main":
         raise SystemExit("agent 不能是 main（多账号会串号）")
 
+    dm_policy = str(env.get(DM_POLICY_KEY) or _dm_default(account)).strip().lower()
+    if dm_policy not in DM_POLICIES:
+        raise SystemExit(f"{DM_POLICY_KEY} 必须是 {'/'.join(DM_POLICIES)} 之一")
+    group_policy = str(env.get(GROUP_POLICY_KEY) or _group_default(account)).strip().lower()
+    if group_policy not in GROUP_POLICIES:
+        raise SystemExit(f"{GROUP_POLICY_KEY} 必须是 {'/'.join(GROUP_POLICIES)} 之一")
+
+    allow_from = (_split_csv(env[DM_ALLOW_FROM_KEY]) if DM_ALLOW_FROM_KEY in env
+                  else _account_list(account, "allowFrom"))
+    blacklist_users = (_split_csv(env[DM_BLACKLIST_KEY]) if DM_BLACKLIST_KEY in env
+                       else _account_list(account, "blacklistUsers"))
+    group_allow = (_split_csv(env[GROUP_ALLOW_FROM_KEY]) if GROUP_ALLOW_FROM_KEY in env
+                   else _account_list(account, "groupAllowFrom"))
+    blacklist_groups = (_split_csv(env[GROUP_BLACKLIST_KEY]) if GROUP_BLACKLIST_KEY in env
+                        else _account_list(account, "blacklistGroups"))
+    if dm_policy != "allowlist":
+        allow_from = []
+    if group_policy != "allowlist":
+        group_allow = []
+
     env_updates = {
         API_BASE_KEY: api_base,
         AUTHCODE_KEY: authcode,
         TOKEN_KEY_KEY: token_key,
         WS_URL_KEY: ws_url,
         AGENT_KEY: agent,
+        ALLOW_ALL_USERS_KEY: (
+            "1" if (_permissive(dm_policy) or _permissive(group_policy)) else "0"),
+        ALLOWED_USERS_KEY: ",".join(allow_from) if dm_policy == "allowlist" else "",
     }
-    for key in (WEBHOOK_PUBLIC_URL_KEY, ALLOWED_USERS_KEY, HOME_CHANNEL_KEY):
-        if env.get(key):
-            env_updates[key] = env[key]
-    for key in (DB_HOST_KEY, DB_PORT_KEY, DB_USER_KEY, DB_NAME_KEY, DB_PASSWORD_KEY):
+    for key in (WEBHOOK_PUBLIC_URL_KEY, HOME_CHANNEL_KEY):
         if env.get(key):
             env_updates[key] = env[key]
 
@@ -637,13 +950,78 @@ def _collect_non_interactive(env: dict[str, str], account: dict, home: Path) -> 
         "tokenKeyEnv": TOKEN_KEY_KEY,
         "apiBaseUrl": api_base,
         "wsUrl": ws_url,
+        "dmPolicy": dm_policy,
+        "allowFrom": allow_from,
+        "blacklistUsers": blacklist_users,
+        "groupPolicy": group_policy,
+        "groupAllowFrom": group_allow,
+        "blacklistGroups": blacklist_groups,
     }
     if env.get(WEBHOOK_PUBLIC_URL_KEY):
         account_updates["webhookPublicUrl"] = env[WEBHOOK_PUBLIC_URL_KEY]
-    if env.get(ALLOWED_USERS_KEY):
-        account_updates["allowFrom"] = [
-            x.strip() for x in env[ALLOWED_USERS_KEY].split(",") if x.strip()
-        ]
+
+    # ------------------------------------------------------------ 数据库
+    backend = str(env.get(DB_BACKEND_KEY) or "").strip().lower()
+    if backend not in ("sqlite", "mysql"):
+        backend = "mysql" if env.get(DB_HOST_KEY) else "sqlite"
+    env_updates[DB_BACKEND_KEY] = backend
+    if backend == "sqlite":
+        if env.get(SQLITE_PATH_KEY):
+            env_updates[SQLITE_PATH_KEY] = env[SQLITE_PATH_KEY]
+    else:
+        for key in (DB_HOST_KEY, DB_PORT_KEY, DB_USER_KEY, DB_NAME_KEY, DB_PASSWORD_KEY):
+            if env.get(key):
+                env_updates[key] = env[key]
+
+    # ------------------------------------------------------------ 心流
+    hf = _heartflow(account)
+    hf_on = (_env_truthy(env[HEARTFLOW_ENABLED_KEY]) if HEARTFLOW_ENABLED_KEY in env
+             else hf.get("enabled") is True)
+    hf_updates: dict = {"enabled": hf_on}
+    if hf_on:
+        hf_model = env.get(HEARTFLOW_MODEL_KEY) or str(hf.get("model") or "")
+        if not hf_model:
+            raise SystemExit(f"心流已启用但缺少模型：设置 {HEARTFLOW_MODEL_KEY}")
+        hf_updates["model"] = hf_model
+        profile_cfg = hf.get("profile")
+        profile_on = (_env_truthy(env[HEARTFLOW_PROFILE_ENABLED_KEY])
+                      if HEARTFLOW_PROFILE_ENABLED_KEY in env
+                      else (profile_cfg.get("enabled", True) is not False
+                            if isinstance(profile_cfg, dict) else True))
+        hf_updates["profile"] = _merge_section(profile_cfg, {"enabled": profile_on})
+
+        if env.get(EMBEDDING_MODEL_KEY):
+            account_updates["embeddingModel"] = env[EMBEDDING_MODEL_KEY]
+        if env.get(EMBEDDING_BASE_URL_KEY):
+            account_updates["embeddingBaseUrl"] = env[EMBEDDING_BASE_URL_KEY]
+        embedding_key_env = (env.get(EMBEDDING_API_KEY_ENV_KEY)
+                             or str(account.get("embeddingApiKeyEnv") or "")).strip()
+        if embedding_key_env:
+            account_updates["embeddingApiKeyEnv"] = embedding_key_env
+            key_val = _env_value(env, embedding_key_env)
+            if key_val:
+                env_updates[embedding_key_env] = key_val
+        for key in (JUDGE_API_KEY_KEY, JUDGE_BASE_URL_KEY):
+            if env.get(key):
+                env_updates[key] = env[key]
+    account_updates["heartflow"] = _merge_section(account.get("heartflow"), hf_updates)
+    env_updates[HEARTFLOW_ENABLED_KEY] = "1" if hf_on else "0"
+
+    # ------------------------------------------------------------ OSS
+    oss_on = _env_truthy(env.get(OSS_ENABLED_KEY, ""))
+    env_updates[OSS_ENABLED_KEY] = "1" if oss_on else "0"
+    if oss_on:
+        for key in (OSS_ACCESS_KEY_ID_KEY, OSS_ACCESS_KEY_SECRET_KEY, OSS_BUCKET_KEY,
+                    OSS_ENDPOINT_KEY, OSS_CREDENTIALS_PATH_KEY):
+            if env.get(key):
+                env_updates[key] = env[key]
+
+    # ------------------------------------------------------------ 其他能力
+    mcp_on = (_env_truthy(env[MCP_ENABLED_KEY]) if MCP_ENABLED_KEY in env
+              else account.get("mcpEnabled") is True)
+    if mcp_on or "mcpEnabled" not in account:
+        account_updates["mcpEnabled"] = mcp_on
+
     return env_updates, account_updates
 
 

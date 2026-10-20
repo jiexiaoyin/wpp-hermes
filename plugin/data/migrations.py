@@ -57,6 +57,11 @@ class SchemaError(RuntimeError):
     """``schema.sql`` 本身有问题（读不到 / 切不出语句 / 表数对不上）。"""
 
 
+def _dialect(conn) -> str:
+    """连接方言；测试桩没有 ``dialect`` ⇒ 按 MySQL 处理（旧行为）。"""
+    return str(getattr(conn, "dialect", "mysql") or "mysql")
+
+
 # --------------------------------------------------------------------------- 切分
 
 
@@ -318,6 +323,25 @@ def schema_checksum(sql_text: str) -> str:
 
 
 def _ensure_migration_table(conn) -> None:
+    if _dialect(conn) == "sqlite":
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {MIGRATION_TABLE} ("
+            "version INTEGER NOT NULL PRIMARY KEY,"
+            "name TEXT NOT NULL DEFAULT '',"
+            "checksum TEXT NULL,"
+            "note TEXT NULL,"
+            "applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        have = _existing_columns(conn, MIGRATION_TABLE)
+        for col, ddl in (
+            ("name", "ADD COLUMN name TEXT NOT NULL DEFAULT ''"),
+            ("checksum", "ADD COLUMN checksum TEXT NULL"),
+            ("note", "ADD COLUMN note TEXT NULL"),
+        ):
+            if col not in have:
+                conn.execute(f"ALTER TABLE {MIGRATION_TABLE} {ddl}")
+        return
+
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {MIGRATION_TABLE} (
@@ -358,6 +382,9 @@ def _existing_column_specs(conn, table: str) -> dict[str, dict]:
 
 
 def _existing_columns(conn, table: str) -> set[str]:
+    if _dialect(conn) == "sqlite":
+        rows = conn.query(f"PRAGMA table_info({table})")
+        return {str(r["name"]) for r in rows if r.get("name")}
     rows = conn.query(
         "SELECT COLUMN_NAME AS c FROM information_schema.COLUMNS "
         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
@@ -367,6 +394,16 @@ def _existing_columns(conn, table: str) -> set[str]:
 
 
 def _existing_indexes(conn, table: str) -> dict[str, str]:
+    if _dialect(conn) == "sqlite":
+        out: dict[str, list[str]] = {}
+        for idx in conn.query(f"PRAGMA index_list({table})"):
+            name = str(idx.get("name") or "")
+            if not name:
+                continue
+            cols = [str(r.get("name") or "")
+                    for r in conn.query(f"PRAGMA index_info({name})")]
+            out[name] = [c for c in cols if c]
+        return {k: ",".join(v) for k, v in out.items()}
     rows = conn.query(
         "SELECT INDEX_NAME AS n, COLUMN_NAME AS c, SEQ_IN_INDEX AS s "
         "FROM information_schema.STATISTICS "
@@ -587,7 +624,12 @@ def _apply_schema_sql(conn, sql_text: str | None = None) -> list[str]:
     if not text.strip():
         raise SchemaError(f"schema.sql 是空的: {SCHEMA_FILE}")
 
-    statements = split_statements(text)
+    if _dialect(conn) == "sqlite":
+        from .sqlite_dialect import schema_to_sqlite
+
+        statements = schema_to_sqlite(text)
+    else:
+        statements = split_statements(text)
     if not statements:
         raise SchemaError(
             f"schema.sql 非空却切出 0 条语句 —— 切分器或注释剥除坏了: {SCHEMA_FILE}"
@@ -610,6 +652,10 @@ def _apply_schema_sql(conn, sql_text: str | None = None) -> list[str]:
 
 
 def _existing_tables(conn) -> set[str]:
+    if _dialect(conn) == "sqlite":
+        rows = conn.query(
+            "SELECT name AS t FROM sqlite_master WHERE type = 'table'")
+        return {r["t"] for r in rows}
     rows = conn.query(
         "SELECT TABLE_NAME AS t FROM information_schema.TABLES "
         "WHERE TABLE_SCHEMA = DATABASE()"
@@ -628,6 +674,9 @@ def ensure_schema_complete(conn, sql_text: str | None = None) -> dict[str, list[
     live_tables = _existing_tables(conn)
     added_cols: list[str] = []
     added_idx: list[str] = []
+    is_sqlite = _dialect(conn) == "sqlite"
+    if is_sqlite:
+        from .sqlite_dialect import convert_schema_fragment
 
     for name, spec in specs.items():
         if name not in live_tables:
@@ -636,15 +685,33 @@ def ensure_schema_complete(conn, sql_text: str | None = None) -> dict[str, list[
         for col, defn in spec.columns:
             if col in have_cols:
                 continue
-            conn.execute(f"ALTER TABLE {name} ADD COLUMN {defn}")
+            ddl = convert_schema_fragment(defn) if is_sqlite else defn
+            conn.execute(f"ALTER TABLE {name} ADD COLUMN {ddl}")
             added_cols.append(f"{name}.{col}")
             logger.info("[WPP] schema 补齐列: %s.%s", name, col)
 
         have_idx = _existing_indexes(conn, name)
         for idx_name, defn in spec.indexes:
-            if idx_name in have_idx:
+            # SQLite 索引名全库唯一 ⇒ 物理名带表前缀（与 schema_to_sqlite 同口径）。
+            physical = f"{name}__{idx_name}" if is_sqlite else idx_name
+            if physical in have_idx:
                 continue
-            conn.execute(f"ALTER TABLE {name} ADD {defn}")
+            if is_sqlite:
+                # spec 里的 defn 形如 ``INDEX idx (a, b)``；SQLite 没有
+                # ``ALTER TABLE ADD INDEX``，必须独立 ``CREATE INDEX``。
+                m = re.match(
+                    r"(UNIQUE\s+)?(?:KEY|INDEX)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(([^)]*)\)",
+                    defn, re.IGNORECASE)
+                if not m:
+                    logger.warning("[WPP] 无法转换的索引定义，跳过: %s.%s %r",
+                                   name, idx_name, defn)
+                    continue
+                uniq = "UNIQUE " if m.group(1) else ""
+                cols = re.sub(r"\s+", "", m.group(2))
+                conn.execute(
+                    f"CREATE {uniq}INDEX IF NOT EXISTS {physical} ON {name} ({cols})")
+            else:
+                conn.execute(f"ALTER TABLE {name} ADD {defn}")
             added_idx.append(f"{name}.{idx_name}")
             logger.info("[WPP] schema 补齐索引: %s.%s", name, idx_name)
 
@@ -800,6 +867,10 @@ def _check_drift_loudly(conn, text: str) -> list[str]:
     体检失败不阻断启动（表都在、只是没法判断漂移），但绝不能"假装没漂移"：
     失败会变成 ``drifted`` 里的一条 ``"体检失败: ..."``，于是状态页与日志都会红。
     """
+    if _dialect(conn) == "sqlite":
+        # SQLite 没有 information_schema；建表/补列/补索引已在上面按 schema.sql
+        # 逐项完成。这里不另写一套 PRAGMA 漂移比对 —— 少一套口径就是少一处分叉。
+        return []
     try:
         drifted = check_schema_drift(conn, text)
     except Exception as exc:  # noqa: BLE001 —— 见 docstring

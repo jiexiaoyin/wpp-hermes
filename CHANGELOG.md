@@ -10,8 +10,20 @@
 
 面向公开分享的版本。
 
+- **默认策略重排（2026-10-20）**：
+  - 数据库默认 **SQLite**（`<插件目录>/wpp.sqlite3`），MySQL/MariaDB 改为可选；
+    `schema.sql` 仍是唯一 DDL 真源，SQLite 侧运行时做确定性方言翻译。
+    旧 MySQL 部署升级必须补 `WECHATPRO_DB_BACKEND=mysql`。
+  - 私聊 / 群聊默认 **全部放行**；新增 `dmPolicy: blacklist`、`pairing`，
+    群策略新增 `blacklist`。公众号、微信团队、微信支付等服务号在任何模式下都不回复。
+  - OSS 媒体转存默认关闭，必须显式 `WECHATPRO_OSS_ENABLED=1`（不再“有凭据就开”）。
+  - 心流默认关闭；启用时向导引导配置判定模型与向量模型。画像子能力默认开启，
+    可单独关闭。
+  - MCP、好感度、黑化(黑话)、风格、语音、主动关心等其他能力默认关闭。
 - **新增交互式配置向导** `plugin/setup_wizard.py`：预检、逐项询问、写 `.env` 与账号
   JSON（0600、先备份、不回显密钥），并调用 `hermes plugins enable/doctor`。
+- **`/pair` 兑换接通**：`dmPolicy=pairing` 下用户可私聊 `/pair <code>` 自助加入；
+  已配对名单持久化在 `<插件目录>/pairing/<account>.paired.json`（0600）。
 - **新增 `wpp_setup` 工具**：Hermes 里直接查询配置状态、获取分步引导，不在聊天中
   收集凭据。
 - **安装体验**：`plugin.yaml` 补 `WECHATPRO_API_BASE` 必填项，敏感项标 `secret: true`；

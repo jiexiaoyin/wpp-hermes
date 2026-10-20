@@ -50,6 +50,13 @@ log = logging.getLogger(__name__)
 #: 文件传输助手的会话标识（vendor 用这个字面量当 wxid）。
 FILEHELPER = "filehelper"
 
+#: 微信官方/系统服务号（小写）。「放行模式」明确不处理这类消息：
+#: 公众号（``gh_`` 前缀）、微信团队、微信支付等。它们不是群友，也不该触发 AI。
+SERVICE_WXIDS = frozenset({
+    "weixin", "weixin_team", "wechat", "wechatteam",
+    "wxpay", "tenpay", "wechatpay", "weixinpay",
+})
+
 
 # ---------------------------------------------------------- reason 的三分类
 
@@ -75,15 +82,18 @@ HEARTFLOW_REASONS = frozenset({
 DENY_REASONS = frozenset({
     "red_packet",             # ① 红包/转账（09-27 事故：必须最先）
     "revoke",                 # ② 撤回
-    "official_account",       # ③ 公众号
+    "official_account",       # ③ 公众号（``gh_``）
+    "service_account",        # ③ 微信团队/微信支付等系统号
     "self",                   # ⑤ 自己发的（防 vendor 回推自问自答）
     "group_blacklist",        # ⑥ 群黑名单
     "group_disabled",         # ⑥ 群策略 disabled
     "group_closed",           # ⑥ 群策略 closed
     "group_policy_unknown",   # ⑥ 拼错/未知取值（fail-closed，不能当 open）
     "group_not_allowlisted",  # ⑥ 空名单也算（fail-closed）
+    "dm_blacklisted",         # ⑫ 私聊黑名单
     "dm_not_allowlisted",     # ⑫ 私聊白名单外
-    "dm_fail_closed",         # ⑫ 空白名单（fail-closed）
+    "dm_not_paired",          # ⑫ 配对模式下未配对
+    "dm_fail_closed",         # ⑫ 旧口径的空白名单（保留 reason 兼容）
 })
 
 #: 全部已知 reason（校验用：``should_process`` 能返回的必须都在里面）。
@@ -175,9 +185,12 @@ def should_process(msg: WppMessage, cfg: dict) -> tuple[bool, str]:
     except (TypeError, ValueError):
         pass
 
-    # ③ 公众号
-    if msg.from_wxid.startswith("gh_"):
+    # ③ 公众号 / 微信系统号（「放行模式」也不放行这类消息）
+    sender = (msg.from_wxid or "").lower()
+    if sender.startswith("gh_"):
         return False, "official_account"
+    if sender in SERVICE_WXIDS:
+        return False, "service_account"
 
     # ④ filehelper（**必须在 self 之前** —— 见模块 docstring）
     if is_filehelper_session(msg):
@@ -207,7 +220,8 @@ def _decide_group(msg: WppMessage, cfg: dict, content: str,
     # 未知取值 **fail-closed**：拼错（"Disabled"/"disable"/"Allowlist"）时不能落进
     # 后面的 @/心流路由，否则"我想把这个群静音"反而变成照常回复。
     # ``accounts.py`` 已在解析时小写归一；这里再兜一层，覆盖直接构造 cfg 的调用方。
-    if policy not in ("open", "disabled", "closed", "allowlist"):
+    # ``blacklist`` = 放行其余群，只拒 ``blacklistGroups``（上面已判）。
+    if policy not in ("open", "disabled", "closed", "allowlist", "blacklist"):
         return False, "group_policy_unknown"
     if policy == "disabled":
         return False, "group_disabled"
@@ -285,13 +299,51 @@ def _is_solitaire(msg: WppMessage) -> bool:
 
 
 def _decide_dm(msg: WppMessage, cfg: dict) -> tuple[bool, str]:
-    if cfg.get("allowAllUsers") is True:
+    """私聊准入（2026-10-20 起**默认全放行**）。
+
+    模式（账号 ``dmPolicy``）：
+
+    * ``open``（默认）—— 全部放行；
+    * ``allowlist`` —— 只放行 ``allowFrom``（空名单 = 拒所有，fail-closed）；
+    * ``blacklist`` —— 放行除 ``blacklistUsers`` 外的所有私聊；
+    * ``pairing`` —— 只放行已兑换配对码的用户（``pairedUsers``）。
+
+    兼容旧配置：没有 ``dmPolicy`` 时，``allowAllUsers=true`` 仍全放行；
+    ``allowFrom`` 非空仍按白名单；两者都没有 ⇒ **全放行**（旧版这里是 fail-closed，
+    2026-10-20 老板明确要求改成默认放行）。``blacklistUsers`` 在任何模式下都先拒。
+    """
+    sender = msg.from_wxid or ""
+    if sender in (cfg.get("blacklistUsers") or []):
+        return False, "dm_blacklisted"
+
+    policy = str(cfg.get("dmPolicy") or "").strip().lower()
+    allow_all = cfg.get("allowAllUsers") is True
+
+    if policy == "pairing":
+        return ((True, "dm") if sender in (cfg.get("pairedUsers") or [])
+                else (False, "dm_not_paired"))
+    if policy == "blacklist":
+        return True, "dm"
+    if policy in ("open",):
+        return True, "dm"
+    if policy == "allowlist":
+        allow_from = cfg.get("allowFrom") or []
+        if allow_all:
+            return True, "dm"
+        return ((True, "dm") if sender in allow_from
+                else (False, "dm_not_allowlisted"))
+    if policy:
+        # 拼错的模式不能静默当成 open —— 与群策略同一个 fail-closed 口径。
+        return False, "dm_fail_closed"
+
+    # 旧口径兼容（未显式配置 dmPolicy）
+    if allow_all:
         return True, "dm"
     allow_from = cfg.get("allowFrom") or []
     if allow_from:
-        return (True, "dm") if msg.from_wxid in allow_from else (False, "dm_not_allowlisted")
-    # 空白名单 = fail-closed（默认拒绝所有 DM，防 P0 联系人 fan-out 重演）
-    return False, "dm_fail_closed"
+        return (True, "dm") if sender in allow_from else (False, "dm_not_allowlisted")
+    # ★ 默认全放行（2026-10-20）
+    return True, "dm"
 
 
 # ------------------------------------------------------- 可选的路由（默认关）

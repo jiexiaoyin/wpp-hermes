@@ -28,9 +28,11 @@ Hermes 网关在插件**之上**还有一道用户授权
 
 **1. 网关只认 ``allowlist``，``open`` 一律回到 default-deny。**
 这是 SECURITY.md §2.6 的反 fail-open 设计（"open 默认转发每一条"是网络暴露面）。
-所以插件侧配 ``groupPolicy: open`` / ``allowAllUsers: true`` 的操作者，
-**还必须**显式 ``WECHATPRO_ALLOW_ALL_USERS=1``。
-本模块**不**把 ``open`` 谎报成 ``allowlist`` 去绕开那道闸 —— 那是把安全边界偷偷拆掉。
+所以插件侧配 ``groupPolicy: open`` / ``dmPolicy: open|blacklist|pairing``
+（或旧口径 ``allowAllUsers: true`` / 未配置任何名单）的操作者，**还必须**显式
+``WECHATPRO_ALLOW_ALL_USERS=1``（向导在非 allowlist 模式会写入）。
+本模块**不**把 ``open`` 谎报成 ``allowlist`` 去绕开那道闸 —— 那是把安全边界偷偷拆掉；
+非 allowlist 模式的真实过滤由插件自己的闸门（``inbound/triggers.py``）逐条完成。
 
 **2. 只上报「已连接」的账号。**
 适配器的 ``self._accounts`` 含**未连接**的账号（例如被红线 2 拒掉的生产形状
@@ -113,22 +115,29 @@ def group_policy(accounts: Iterable[Any]) -> str:
 
 
 def _one_dm_policy(acct: Any) -> str:
-    """单账号的私聊策略。
+    """单账号的私聊策略。必须与 ``inbound/triggers.py::_decide_dm`` **逐条对齐**：
 
-    插件侧**没有** ``dmPolicy`` 字段 —— 私聊语义写在
-    ``inbound/triggers.py::_decide_dm`` 里，这里必须与它**逐条对齐**：
-
-    * ``allowAllUsers is True`` ⇒ ``open``（注意是 ``is True``，字符串 ``"true"`` 不算 —— 原实现如此）
-    * 否则 ``allowFrom`` 非空 ⇒ ``allowlist``
-    * 否则 ⇒ ``disabled``（原实现的 fail-closed 兜底）
+    * ``dmPolicy: allowlist`` ⇒ ``allowlist``（网关逐个问 :func:`is_dm_allowed`）
+    * ``dmPolicy: open / blacklist / pairing`` ⇒ ``open``
+      （真实过滤在插件闸门；``open`` 需要 ``WECHATPRO_ALLOW_ALL_USERS=1`` 才过网关）
+    * ``dmPolicy`` 是未知值 ⇒ ``disabled``（与 triggers 的 fail-closed 同口径）
+    * 旧口径（未配 ``dmPolicy``）：``allowAllUsers is True`` ⇒ ``open``；
+      ``allowFrom`` 非空 ⇒ ``allowlist``；否则 ⇒ ``open``（2026-10-20 起默认放行）
     """
+    policy = str(getattr(acct, "dm_policy", "") or "").strip().lower()
+    if policy == ALLOWLIST:
+        # 判据必须与 :func:`is_dm_allowed` **同一套**（都过 trim、都丢空项）：
+        # 否则 ``allowFrom: ["  "]`` 会报成 ``allowlist``，网关挨个问下去全是 False ——
+        # 结果一样，但报出去的话是假的（"有白名单"其实一个都没有）。
+        return ALLOWLIST if allowed_dm_senders((acct,)) else DISABLED
+    if policy in ("open", "blacklist", "pairing"):
+        return OPEN
+    if policy:
+        return DISABLED
     raw = getattr(acct, "raw", None)
     if isinstance(raw, Mapping) and raw.get("allowAllUsers") is True:
         return OPEN
-    # 判据必须与 :func:`is_dm_allowed` **同一套**（都过 trim、都丢空项）：
-    # 否则 ``allowFrom: ["  "]`` 会报成 ``allowlist``，网关挨个问下去全是 False ——
-    # 结果一样，但报出去的话是假的（"有白名单"其实一个都没有）。
-    return ALLOWLIST if allowed_dm_senders((acct,)) else DISABLED
+    return ALLOWLIST if allowed_dm_senders((acct,)) else OPEN
 
 
 def dm_policy(accounts: Iterable[Any]) -> str:

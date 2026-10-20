@@ -351,7 +351,11 @@ optional_env:
     description: "Comma-separated DM wxids allowed to talk to the bot"
     prompt: "Allowed users (comma-separated)"
   - name: WECHATPRO_ALLOW_ALL_USERS
-    description: "Set 1 to allow all DM users (not recommended)"
+    description: >
+      Set 1 when dmPolicy/groupPolicy is open, blacklist or pairing — the Hermes
+      gateway otherwise default-denies those modes before the plugin sees the
+      message. Real filtering still happens per account inside the plugin.
+      The setup wizard writes this automatically.
   - name: WECHATPRO_HOME_CHANNEL
     description: "Default chat ID for cron / notification delivery (format accountId:peerId)"
     prompt: "Home channel ID"
@@ -361,21 +365,56 @@ optional_env:
       ⚠️ No default is applied — must be set explicitly. A wrong value here
       silently points the vendor's inbound traffic at another host.
     prompt: "Webhook public URL"
+  - name: WECHATPRO_DB_BACKEND
+    description: >
+      Database backend: sqlite (default) or mysql. Unknown values fail loudly —
+      no silent fallback. Existing MariaDB deployments must set mysql explicitly
+      when upgrading, otherwise they start on an empty SQLite file.
+  - name: WECHATPRO_SQLITE_PATH
+    description: >
+      SQLite file path (default: <plugin dir>/wpp.sqlite3). Ignored when
+      WECHATPRO_DB_BACKEND=mysql.
   - name: WECHATPRO_DB_HOST
-    description: "MariaDB host (must be localhost/127.0.0.1 for this plugin)"
+    description: "MySQL/MariaDB host — only used with WECHATPRO_DB_BACKEND=mysql; must be localhost/127.0.0.1 unless WECHATPRO_DB_ALLOW_REMOTE=1"
   - name: WECHATPRO_DB_PORT
-    description: "MariaDB port (default 3306)"
+    description: "MySQL/MariaDB port (default 3306)"
   - name: WECHATPRO_DB_USER
-    description: "MariaDB user"
+    description: "MySQL/MariaDB user"
   - name: WECHATPRO_DB_NAME
-    description: "MariaDB database name"
+    description: "MySQL/MariaDB database name"
   - name: WECHATPRO_DB_PASSWORD
-    description: "MariaDB password"
+    description: "MySQL/MariaDB password"
     secret: true
+  - name: WECHATPRO_OSS_ENABLED
+    description: >
+      Set 1 to enable OSS media re-upload (public URLs in media messages).
+      Default 0: credentials alone are not enough. Requires OSS_ACCESS_KEY_ID,
+      OSS_ACCESS_KEY_SECRET and OSS_BUCKET, plus the ossutil binary.
+  - name: OSS_ACCESS_KEY_ID
+    description: "OSS access key ID (only read when WECHATPRO_OSS_ENABLED=1)"
+  - name: OSS_ACCESS_KEY_SECRET
+    description: "OSS access key secret (only read when WECHATPRO_OSS_ENABLED=1)"
+    secret: true
+  - name: OSS_BUCKET
+    description: "OSS bucket name"
+  - name: OSS_ENDPOINT
+    description: "OSS endpoint (implementation default when empty)"
+  - name: OSS_CREDENTIALS_PATH
+    description: >
+      Optional OSS credentials JSON path (legacy fallback). Prefer the OSS_*
+      environment variables above.
   - name: WECHATPRO_LLM_API_KEY
     description: "LLM API key for heartflow / affection / jargon"
     prompt: "LLM API key"
     secret: true
+  - name: JUDGE_API_KEY
+    description: >
+      LLM key used by heartflow's judge model and embedding calls when the
+      account does not name another env via embeddingApiKeyEnv
+      (MINIMAX_API_KEY is accepted as a fallback).
+    secret: true
+  - name: JUDGE_BASE_URL
+    description: "Optional base URL for the judge model (implementation default when empty)"
   - name: WECHATPRO_STT_API_KEY
     description: >
       SiliconFlow STT key for voice transcription (fallback). Only used when the

@@ -19,7 +19,9 @@
   "autoSetWebhook": true,
   "setWebhookRetries": 3,
 
+  "dmPolicy": "allowlist",
   "allowFrom": ["wxid_owner"],
+  "blacklistUsers": [],
   "groupPolicy": "disabled",
   "groupAllowFrom": [],
   "adminUsers": ["wxid_owner"],

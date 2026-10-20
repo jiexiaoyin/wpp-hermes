@@ -105,11 +105,10 @@ def test_defaults_are_the_documented_ones(_isolated_accounts_dir, monkeypatch):
     assert acct.set_webhook_retries == 3
     assert acct.allow_from == () and acct.group_allow_from == ()
     # 特色功能默认**关**（不在默认路径上替用户做决定）。
-    # ⚠️ mcp_enabled 是唯一例外：TS ``mcpEnabledForCurrentAccount`` 是 ``!== false``
-    #    （缺省开），2026-10-18 接上 vendor MCP 后按 TS 对齐。
+    # 2026-10-20：MCP 也是显式开启（``mcpEnabled: true`` 才放行）。
     assert (acct.llm_intent_enabled, acct.mcp_enabled, acct.group_context_enabled,
             acct.dm_pairing_enabled, acct.friend_circle_publish_enabled) == \
-        (False, True, False, False, False)
+        (False, False, False, False, False)
     assert acct.heartflow == {} and acct.jargon == {}
 
 

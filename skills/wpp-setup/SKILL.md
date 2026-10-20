@@ -21,7 +21,7 @@ authcode / tokenKey**。
 
 - 首次安装或升级 `wechatpadpro-platform` 插件。
 - 插件已安装但平台不在线、账号未连接、收不到消息。
-- 需要确认 API base、authcode、tokenKey、webhook、白名单是否配置齐全。
+- 需要确认 API base、authcode、tokenKey、webhook、准入策略是否配置齐全。
 - 用户询问配置文件写到哪里、如何换 profile、如何卸载或回滚。
 
 不适用：修改插件代码、厂商侧封号申诉、与 Hermes 无关的微信客户端问题。
@@ -51,7 +51,7 @@ authcode / tokenKey**。
    ```
 
 4. 向导完成后重跑 `wpp_setup(action="check")`，确认 `ready=true`。
-5. 重启 gateway，让用户用白名单微信发一条测试消息。
+5. 重启 gateway，让用户给机器人发一条测试消息（默认私聊/群聊全部放行）。
 
 ## Quick Reference
 
@@ -102,7 +102,10 @@ python3 <plugin_dir>/setup_wizard.py --home <home>
 向导会：
 
 - 询问 API base、authcode、tokenKey（密钥输入不回显）；
-- 可选配置 WebSocket、webhook、私聊白名单、MariaDB；
+- 选择私聊与群聊准入模式：`open`（默认）/ `allowlist` / `blacklist` / `pairing`；
+- 数据库默认 SQLite（零配置），需要时再选 MariaDB/MySQL 并填连接信息；
+- 可选启用心流（引导配置判定模型、向量模型）与 OSS 媒体转存（默认关闭）；
+- 其他能力（好感度 / 黑化(黑话) / 风格 / 语音 / 主动关心 / MCP）默认关闭；
 - 写入 `<home>/.env` 和账号 JSON（0600，先备份，不落明文密钥）；
 - 尝试 `hermes plugins enable` 并运行 `doctor`。
 
@@ -134,7 +137,9 @@ journalctl --user -u hermes-gateway -n 80 --no-pager # user service
 - **multiplex gateway 的 `HERMES_HOME` 是宿主 home**，不是 profile；以
   `wpp_setup` 返回的 `home`/`profile` 为准。
 - **同一 authcode 只能一个客户端使用**；被另一个客户端占用会把生产踢下线。
-- **群聊没反应**先查 `groupPolicy` / `allowlist`，不要直接改代码。
+- **群聊没反应**先查 `groupPolicy` / `blacklistGroups` / `WECHATPRO_ALLOW_ALL_USERS`，
+  不要直接改代码：`open` / `blacklist` / `pairing` 依赖网关的
+  `WECHATPRO_ALLOW_ALL_USERS=1`（向导会自动写）。
 - **向导失败不要重试写生产库**；没有终端时用 `--non-interactive`，不要伪造 TTY。
 - **升级不会覆盖账号**：`install.sh` / `sync.sh` 都排除 `accounts/`。
 
@@ -144,4 +149,4 @@ journalctl --user -u hermes-gateway -n 80 --no-pager # user service
 2. `account_file_exists=true`，路径等于 `accounts_dir/default.json`。
 3. `hermes plugins doctor <plugin_dir>` 显示注册数与 `plugin.yaml` 一致。
 4. 日志出现 `wechatpadpro connected (profile: <name>)`。
-5. 用户用白名单微信发一条私聊，能得到回复（或按预期触发心流）。
+5. 用户发一条私聊或群消息，能得到回复（或按预期触发心流）。

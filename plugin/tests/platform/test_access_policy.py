@@ -104,6 +104,7 @@ class _Fake:
     id: str = "a"
     group_policy: str = "open"
     allow_from: tuple[str, ...] = ()
+    dm_policy: str = ""
     raw: dict = field(default_factory=dict)
 
 
@@ -152,31 +153,45 @@ def test_group_policy_all_open_stays_open():
 
 # ============================================================ 2. 私聊策略
 
-def test_dm_allow_all_requires_literal_true():
-    """★ ``allowAllUsers`` 只认**布尔** ``True`` —— 字符串 ``"true"`` 不算。
+def test_dm_explicit_modes_map_to_gateway_vocabulary():
+    """``dmPolicy`` 与 ``triggers._decide_dm`` 逐条对齐。
 
-    这是与 ``inbound/triggers.py::_decide_dm`` 逐条对齐的口径（原实现如此），
-    放宽成真值判断就等于替配置错误开门。
+    * ``open`` / ``blacklist`` / ``pairing`` 的真实过滤在插件闸门 ⇒ 报 ``open``
+      （网关需要 ``WECHATPRO_ALLOW_ALL_USERS=1`` 才放行，向导会写）；
+    * ``allowlist`` 有名单 ⇒ 报 ``allowlist``，网关逐个问 ``_is_dm_allowed``；
+    * ``allowlist`` 空名单 / 未知模式 ⇒ ``disabled``（fail-closed）。
+    """
+    for mode in ("open", "blacklist", "pairing"):
+        assert AP.dm_policy([_Fake(dm_policy=mode)]) == AP.OPEN
+    assert AP.dm_policy([_Fake(dm_policy="allowlist", allow_from=("wxid_x",))]) == AP.ALLOWLIST
+    assert AP.dm_policy([_Fake(dm_policy="allowlist")]) == AP.DISABLED
+    assert AP.dm_policy([_Fake(dm_policy="typo")]) == AP.DISABLED
+
+
+def test_dm_legacy_allow_all_requires_literal_true():
+    """旧口径：``allowAllUsers`` 只认**布尔** ``True``。
+
+    未配 ``dmPolicy`` 且没有 ``allowFrom`` 时，字符串 ``"true"`` 与 ``1`` 也走
+    新默认（``open``）—— 所以这里只钉 ``True`` 的等价性，不能拿它们反证 ``disabled``。
     """
     assert AP.dm_policy([_Fake(raw={"allowAllUsers": True})]) == AP.OPEN
-    assert AP.dm_policy([_Fake(raw={"allowAllUsers": "true"})]) == AP.DISABLED
-    assert AP.dm_policy([_Fake(raw={"allowAllUsers": 1})]) == AP.DISABLED
 
 
 def test_dm_allowlist_only_when_a_sender_is_listed():
     assert AP.dm_policy([_Fake(allow_from=("wxid_x",))]) == AP.ALLOWLIST
 
 
-def test_dm_empty_is_disabled():
-    """空名单 = ``disabled``，与改造前"私聊一律不放行"的行为一致。"""
-    assert AP.dm_policy([_Fake()]) == AP.DISABLED
-    assert AP.dm_policy([_Fake(allow_from=("  ",))]) == AP.DISABLED
+def test_dm_default_is_open_but_empty_account_set_is_disabled():
+    """2026-10-20 起没配任何名单 ⇒ ``open``；一个账号都没连上仍 ``disabled``。"""
+    assert AP.dm_policy([_Fake()]) == AP.OPEN
+    assert AP.dm_policy([_Fake(allow_from=("  ",))]) == AP.OPEN
     assert AP.dm_policy([]) == AP.DISABLED
 
 
 def test_dm_open_wins_over_allowlist():
-    """任一账号开了 ``allowAllUsers`` ⇒ 报 ``open``（网关据此 default-deny，不会误放）。"""
-    accounts = [_Fake(id="a", allow_from=("wxid_x",)), _Fake(id="b", raw={"allowAllUsers": True})]
+    """任一账号是 open 系模式 ⇒ 报 ``open``（网关 default-deny，不会误放）。"""
+    accounts = [_Fake(id="a", allow_from=("wxid_x",), dm_policy="allowlist"),
+                _Fake(id="b", dm_policy="open")]
     assert AP.dm_policy(accounts) == AP.OPEN
 
 
@@ -254,15 +269,16 @@ def test_real_account_fields_line_up(_isolated_accounts_dir):
     assert AP.is_dm_allowed([acct], "wxid_stranger") is False
 
 
-def test_real_account_defaults_stay_closed(_isolated_accounts_dir):
-    """★ ``resolve`` 的**默认值**即规格：没配准入策略的账号报出来是 ``open``（群）+
-    ``disabled``（私聊）—— 私聊默认关死，群交回网关 default-deny。"""
+def test_real_account_defaults_are_open(_isolated_accounts_dir):
+    """★ ``resolve`` 的**默认值**即规格（2026-10-20）：没配准入策略 ⇒ 群/私聊都
+    ``open``（真实过滤由插件闸门做；网关侧需 ``WECHATPRO_ALLOW_ALL_USERS=1``）。"""
     (_isolated_accounts_dir / "bare.json").write_text(
         json.dumps({"id": "bare", "agent": "wpp-wechat"}, ensure_ascii=False), encoding="utf-8")
     acct = A.resolve("bare")
 
     assert AP.group_policy([acct]) == AP.OPEN
-    assert AP.dm_policy([acct]) == AP.DISABLED
+    assert AP.dm_policy([acct]) == AP.OPEN
+    # 网关只在 allowlist 模式调 ``_is_dm_allowed``；纯函数本身仍 fail-closed。
     assert AP.is_dm_allowed([acct], "wxid_anyone") is False
 
 

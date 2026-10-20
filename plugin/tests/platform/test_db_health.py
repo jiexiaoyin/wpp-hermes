@@ -113,6 +113,7 @@ def test_unavailable_db_sets_the_gauge_to_zero_and_says_so(monkeypatch):
 def test_unavailable_db_log_names_which_database(monkeypatch):
     """日志要能回答"连的是哪个库"，否则排查第一步就得再问一次。"""
     log = _Log()
+    monkeypatch.setenv("WECHATPRO_DB_BACKEND", "mysql")
     monkeypatch.setenv("WECHATPRO_DB_NAME", "wechatpro_test")
     monkeypatch.setattr(db, "is_available", lambda: False)
     run_migrations(log)

@@ -1,6 +1,6 @@
 ---
 name: wpp-history
-description: "WPP 入站消息历史查询。wechatpadpro 插件把所有消息（文本/图片/语音/视频/文件/引用/事件）持久化到 MySQL wechatpro 库 wpp_messages 表，本技能封装常见查询 SQL 与典型场景。用于「查某人发过的图」、「统计某个群今天的活跃度」、「找一段聊天记录」。⚠️ 仅有插件记录的消息，更早数据不可查。v1.3.x 从 gewe-history 适配 (wpp_messages 表结构, msg_type 用数字)。"
+description: "WPP 入站消息历史查询。wechatpadpro 插件把所有消息（文本/图片/语音/视频/文件/引用/事件）持久化到 wpp_messages 表（默认 SQLite，可选 MySQL），本技能封装常见查询 SQL 与典型场景。用于「查某人发过的图」、「统计某个群今天的活跃度」、「找一段聊天记录」。⚠️ 仅有插件记录的消息，更早数据不可查。v1.3.x 从 gewe-history 适配 (wpp_messages 表结构, msg_type 用数字)。"
 ---
 
 # wpp-history — WPP 消息历史查询
@@ -16,7 +16,9 @@ description: "WPP 入站消息历史查询。wechatpadpro 插件把所有消息�
 > **Note**: 微信消息历史查询 — main (查任意会话) + wpp-wechat (微信主通道)
 
 
-> 个人微信**没有云端历史拉取 API**。wechatpadpro 插件把消息存到 MySQL `wechatpro.wpp_messages` 表，本技能是这套数据的查询封装。
+> 个人微信**没有云端历史拉取 API**。wechatpadpro 插件把消息存到 `wpp_messages` 表
+> （默认 SQLite `<plugin_dir>/wpp.sqlite3`；`WECHATPRO_DB_BACKEND=mysql` 时是
+> MySQL `wechatpro.wpp_messages`），本技能是这套数据的查询封装。
 > 查微信消息前先确认 peer_id（对方 wxid 或群 `xxx@chatroom`），再来这里查。
 
 ## 数据表结构（wpp_messages）
@@ -292,11 +294,41 @@ LIMIT 50 OFFSET 100   -- 第 3 页
 
 ### DB 连接
 
+先确认后端（未设置时是 SQLite）：
+
 ```bash
-# 数据库连接参数来自 WECHATPRO_DB_HOST / _PORT / _USER / _NAME / _PASSWORD
+echo "${WECHATPRO_DB_BACKEND:-sqlite}"   # sqlite | mysql
+```
+
+SQLite：
+
+```bash
+sqlite3 "${WECHATPRO_SQLITE_PATH:-<plugin_dir>/wpp.sqlite3}" "SELECT ...;"
+# 或只读模式，避免和网关抢写锁
+sqlite3 -readonly "${WECHATPRO_SQLITE_PATH:-<plugin_dir>/wpp.sqlite3}" "SELECT ...;"
+```
+
+MySQL：
+
+```bash
+# 连接参数来自 WECHATPRO_DB_HOST / _PORT / _USER / _NAME / _PASSWORD
 mysql -h "${WECHATPRO_DB_HOST:-127.0.0.1}" -u "${WECHATPRO_DB_USER:-wechatpro}" \
   -p"$WECHATPRO_DB_PASSWORD" "${WECHATPRO_DB_NAME:-wechatpro}" -e "SELECT ..."
 ```
+
+### SQLite 方言差异
+
+上面模板里的 MySQL 函数在 SQLite 下要替换：
+
+| MySQL | SQLite |
+|---|---|
+| `CURDATE()` | `date('now','localtime')` |
+| `NOW() - INTERVAL 7 DAY` | `datetime('now','localtime','-7 days')` |
+| `FROM_UNIXTIME(create_time)` | `datetime(create_time,'unixepoch','localtime')` |
+| `JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.a[0].b'))` | `json_extract(raw_payload, '$.a[0].b')` |
+
+`ts >= CURDATE()` 改成 `date(ts) = date('now','localtime')`。其余 WHERE / GROUP BY /
+`LIKE` 写法两边通用。
 
 ## 与 gewe-history 的差异（适配说明）
 

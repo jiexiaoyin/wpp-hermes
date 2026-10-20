@@ -12,6 +12,11 @@ __pycache__/
 *.orig
 *.rej
 
+# 默认 SQLite 数据库（可能含聊天记录，禁止提交）
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
 # ⚠️ 凭证：账号文件含 authcode，**禁止提交**
 #    只放行 *.example.json（schema 范例，里面必须是占位值）
 plugin/accounts/*.json

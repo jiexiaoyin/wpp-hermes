@@ -1,17 +1,27 @@
-"""MariaDB 连接 + 事务 + 调用计数（自管，Hermes 无 DB 抽象）。
+"""数据库连接 + 事务 + 调用计数（自管，Hermes 无 DB 抽象）。
+
+## 两种后端（2026-10-20）
+
+* **SQLite（默认）** —— 开箱即用，文件默认 ``plugin/data/wpp.sqlite3``，
+  可用 ``WECHATPRO_SQLITE_PATH`` 指定。适合单机、小规模、想零运维的用户。
+* **MySQL/MariaDB（可选）** —— ``WECHATPRO_DB_BACKEND=mysql`` 后启用。
+  适合多进程/多机共享历史、或已经有一体化数据库的用户。
+
+SQLite 的类型/函数差异由 :mod:`data.sqlite_dialect` 在连接层翻译，
+``schema.sql`` 仍是唯一 DDL 真源（不维护第二份 schema）。
 
 ## 为什么自管
 
 Hermes 没有通用 DB/ORM 抽象；``ctx.state`` 只有 **10 MiB** 配额
 （``~/.hermes/plugin-data/<ns>/state.json``）⇒ **心流状态绝不能放那儿**。
-所以走 pymysql 直连 MariaDB（计划 §6）。
 
 ## 三条设计约束
 
-1. **pymysql 延迟导入到 ``_connect()`` 里** —— ``plugin_validate`` 会在隔离子进程
+1. **驱动延迟导入到 ``_connect()`` 里** —— ``plugin_validate`` 会在隔离子进程
    里跑 ``register()``，那时既没装 pymysql 也不该连库（计划 §4）。
-2. **host 白名单** —— 默认只允许 ``127.0.0.1``/``localhost``/``::1``（R3：防连上
-   ``.182`` 的生产库）。要连远程必须显式 ``WECHATPRO_DB_ALLOW_REMOTE=1``。
+2. **host 白名单** —— MySQL 后端默认只允许 ``127.0.0.1``/``localhost``/``::1``
+   （R3：防连上生产测试机之外的库）。要连远程必须显式
+   ``WECHATPRO_DB_ALLOW_REMOTE=1``。
 3. **``db_call_count()`` 计数器** —— V7「心流热路径零 DB IO」的验收仪器。
    ``_get_conn()`` 是**所有** DB 访问的必经之地，计数放这里才拦得住。
 
@@ -24,10 +34,12 @@ WS 收 / webhook 收 / 300s sweep 可能跑在**不同线程**，而 pymysql 连
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -39,6 +51,16 @@ _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 3306
 _DEFAULT_USER = "wechatpro"
 _DEFAULT_NAME = "wechatpro"
+
+#: 默认后端。2026-10-20 老板要求：**默认 SQLite**，MySQL/MariaDB 是可选配置。
+#: 生产库环境通过 ``WECHATPRO_DB_BACKEND=mysql`` 显式保留（部署前必须设置，
+#: 否则升级后会落到一个全新的空 SQLite 库 —— 收发正常，但历史/心流台账看不到）。
+_DEFAULT_BACKEND = "sqlite"
+_BACKENDS = frozenset({"sqlite", "mysql"})
+
+#: 默认 SQLite 文件：插件目录下的 ``data/wpp.sqlite3``（与 ``schema.sql`` 同目录）。
+#: 可用 ``WECHATPRO_SQLITE_PATH`` 覆盖（建议放进持久卷/备份目录）。
+_SQLITE_FILENAME = "wpp.sqlite3"
 
 _local = threading.local()
 
@@ -84,6 +106,36 @@ class DbConfigError(DbError):
 # --- 配置 ------------------------------------------------------------------
 
 
+def backend() -> str:
+    """当前后端：``sqlite``（默认）或 ``mysql``。
+
+    兼容写法：``mariadb`` → ``mysql``，``sqlite3`` → ``sqlite``。
+    未知值直接抛 ``DbConfigError`` —— 拼错时静默回落默认值会让运维以为
+    "还在用 MySQL"，实际历史已经写进另一个库。
+    """
+    from ..core.env_compat import gate_env
+
+    raw = str(gate_env("WECHATPRO_DB_BACKEND", _DEFAULT_BACKEND) or "").strip().lower()
+    alias = {"mariadb": "mysql", "sqlite3": "sqlite"}
+    raw = alias.get(raw, raw)
+    if raw not in _BACKENDS:
+        raise DbConfigError(
+            f"WECHATPRO_DB_BACKEND={raw!r} 不认识（可选：sqlite / mysql）")
+    return raw
+
+
+def sqlite_path() -> Path:
+    """SQLite 文件路径；``:memory:`` 原样返回（测试用）。"""
+    from ..core.env_compat import gate_env
+
+    raw = str(gate_env("WECHATPRO_SQLITE_PATH", "") or "").strip()
+    if raw == ":memory:":
+        return Path(":memory:")
+    if raw:
+        return Path(os.path.expanduser(raw))
+    return Path(__file__).resolve().parent / _SQLITE_FILENAME
+
+
 def config() -> dict[str, Any]:
     """从 env 读连接参数。每次现读（便于测试用 monkeypatch 改 env）。
 
@@ -92,6 +144,14 @@ def config() -> dict[str, Any]:
     """
     from ..core.env_compat import gate_env, secret_env
 
+    kind = backend()
+    if kind == "sqlite":
+        return {
+            "backend": "sqlite",
+            "path": str(sqlite_path()),
+            "connect_timeout": int(gate_env("WECHATPRO_DB_CONNECT_TIMEOUT", "5")),
+        }
+
     host = gate_env("WECHATPRO_DB_HOST", _DEFAULT_HOST)
     port_raw = gate_env("WECHATPRO_DB_PORT", str(_DEFAULT_PORT))
     try:
@@ -99,6 +159,7 @@ def config() -> dict[str, Any]:
     except ValueError as exc:
         raise DbConfigError(f"WECHATPRO_DB_PORT 不是整数: {port_raw!r}") from exc
     return {
+        "backend": "mysql",
         "host": host,
         "port": port,
         "user": secret_env("WECHATPRO_DB_USER", _DEFAULT_USER),
@@ -112,8 +173,10 @@ def config() -> dict[str, Any]:
 
 
 def assert_host_allowed(cfg: Mapping[str, Any] | None = None) -> None:
-    """R3：拒连非本地 host，除非显式豁免。"""
+    """R3：拒连非本地 host，除非显式豁免。SQLite 后端不适用。"""
     c = dict(cfg or config())
+    if c.get("backend") == "sqlite":
+        return
     host = str(c.get("host", ""))
     if host in _ALLOWED_HOSTS:
         return
@@ -131,6 +194,8 @@ def assert_host_allowed(cfg: Mapping[str, Any] | None = None) -> None:
 def describe() -> str:
     """一行连接描述（**不含密码**），供日志/错误信息用。"""
     c = config()
+    if c.get("backend") == "sqlite":
+        return f"sqlite:{c['path']}"
     return f"{c['user']}@{c['host']}:{c['port']}/{c['database']}"
 
 
@@ -145,6 +210,9 @@ class Connection:
     """
 
     __slots__ = ("_conn",)
+
+    #: 迁移/体检用它选方言分支（``mysql`` / ``sqlite``）。
+    dialect = "mysql"
 
     def __init__(self, raw) -> None:
         self._conn = raw
@@ -280,8 +348,147 @@ class Connection:
         return bool(getattr(self._conn, "open", False))
 
 
-def _connect() -> Connection:
+class SqliteConnection:
+    """SQLite 连接的薄包装，接口与 :class:`Connection` 保持一致。
+
+    SQL 在 ``_run`` 里经过 :func:`data.sqlite_dialect.translate_sql` —— 上层
+    repo 仍然写 MySQL 方言（``%s`` / ``ON DUPLICATE KEY``），不感知后端。
+    """
+
+    dialect = "sqlite"
+
+    __slots__ = ("_conn", "path")
+
+    def __init__(self, path: str) -> None:
+        import sqlite3  # 标准库；延迟导入只是与 pymysql 的写法保持一致
+
+        if path != ":memory:":
+            Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        try:
+            raw = sqlite3.connect(path, timeout=5.0)
+        except sqlite3.Error as exc:
+            raise DbUnavailable(f"打开 SQLite 失败 {path}: {exc}") from exc
+        raw.row_factory = sqlite3.Row
+        if path != ":memory:":
+            # WAL：WS 收信线程 / sweep 线程并发写时不至于互相 ``database is locked``。
+            raw.execute("PRAGMA journal_mode=WAL")
+        raw.execute("PRAGMA busy_timeout=5000")
+        self._conn = raw
+        self.path = path
+
+    @staticmethod
+    def _translated(sql: str) -> str:
+        from .sqlite_dialect import translate_sql
+
+        return translate_sql(sql)
+
+    @staticmethod
+    def _run(cur, sql: str, params) -> None:
+        sql = SqliteConnection._translated(sql)
+        if params:
+            cur.execute(sql, params)
+        else:
+            cur.execute(sql)
+
+    def query(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> list[dict]:
+        cur = self._conn.cursor()
+        try:
+            self._run(cur, sql, params)
+            return [dict(r) for r in cur.fetchall()]
+        finally:
+            cur.close()
+            if getattr(_local, "depth", 0) == 0:
+                self._conn.commit()
+
+    def query_one(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> dict | None:
+        rows = self.query(sql, params)
+        return rows[0] if rows else None
+
+    def query_value(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = (), default=None):
+        row = self.query_one(sql, params)
+        if not row:
+            return default
+        return next(iter(row.values()), default)
+
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> int:
+        cur = self._conn.cursor()
+        try:
+            self._run(cur, sql, params)
+            affected = cur.rowcount
+        finally:
+            cur.close()
+        if getattr(_local, "depth", 0) == 0:
+            self._conn.commit()
+        return affected
+
+    def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> int:
+        cur = self._conn.cursor()
+        try:
+            cur.executemany(self._translated(sql), list(seq))
+            affected = cur.rowcount
+        finally:
+            cur.close()
+        if getattr(_local, "depth", 0) == 0:
+            self._conn.commit()
+        return affected
+
+    def insert_id(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> int:
+        cur = self._conn.cursor()
+        try:
+            self._run(cur, sql, params)
+            rid = cur.lastrowid
+        finally:
+            cur.close()
+        if getattr(_local, "depth", 0) == 0:
+            self._conn.commit()
+        return int(rid or 0)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    @contextmanager
+    def transaction(self):
+        """显式事务；语义与 MySQL 版相同（可重入，最外层提交）。"""
+        depth = getattr(_local, "depth", 0)
+        _local.depth = depth + 1
+        try:
+            yield self
+            if _local.depth == 1:
+                self.commit()
+        except Exception:
+            if _local.depth == 1:
+                self.rollback()
+            raise
+        finally:
+            _local.depth = depth
+
+    def ping(self, reconnect: bool = True) -> None:
+        try:
+            self._conn.execute("SELECT 1").fetchone()
+        except Exception:
+            if not reconnect:
+                raise
+            # 连接已被关闭/损坏：由 :func:`get_conn` 丢弃后重连。
+            raise
+
+    def close(self) -> None:
+        try:
+            self._conn.close()
+        except Exception:  # noqa: S110, BLE001 —— 关闭失败不该炸调用方
+            pass
+
+    @property
+    def open(self) -> bool:
+        return self._conn is not None
+
+
+def _connect() -> Connection | SqliteConnection:
     cfg = config()
+    if cfg.get("backend") == "sqlite":
+        return SqliteConnection(str(cfg["path"]))
     assert_host_allowed(cfg)                   # 红线先查，避免白连一次
     try:
         import pymysql  # 延迟导入（见模块 docstring 约束 1）

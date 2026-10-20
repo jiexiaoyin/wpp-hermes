@@ -8,18 +8,17 @@
 **仍然落在 ``plugin/pairing/``** —— 部署机上的既有配对码文件原地继续有效，
 不需要迁移。要换位置请设 ``WPP_PAIRING_DIR``。
 
-## ⚠️ 现状：只有「生成 / 查看」是活的，``/pair`` 兑换是死码
+## 现状（2026-10-20）：``/pair`` 兑换已接通
 
-旧树的 ``plugin/adapter.py`` **从未引用过** ``redeem_pairing_code`` ——
-整条兑换链路（``extract_pair_code`` → ``redeem_pairing_code``）在真实运行路径上
-不可达。所以 ``redeem_pairing_code`` 的注释「实际加入白名单由 commands 处理」
-是一句**从未兑现的承诺**：它校验完码就返回，谁也没被写进白名单。
+旧树里 ``redeem_pairing_code`` 从未被运行路径引用，是一段死码。现在
+``adapter._maybe_pair`` 在私聊里接住 ``/pair <code>``：
 
-本树**保留这组函数**（配对码文件格式是对外契约，删了会让已发的码失效），
-但**没有**把 ``/pair`` 焊进 adapter 的 filehelper 钩子 —— 见
-``platform/adapter.py:_maybe_command`` 的说明。真要做「自助加白名单」，
-必须先想清楚**改的是哪个账号的哪份白名单**（覆盖是内存态、重连即回退到
-``accounts/*.json``，用它加白名单等于假的"永久加入"）。那是独立议题，不在本次搬迁范围。
+1. 校验配对码（1 小时有效，按账号隔离）；
+2. 校验通过 → :func:`add_paired` 写入 ``<plugin>/pairing/<account>.paired.json``；
+3. ``dmPolicy=pairing`` 的准入只放行这份名单里的 wxid。
+
+名单**不写回** ``accounts/*.json``（运行期改账号文件会触发 fs.watch 重载），
+所以它是插件目录下的持久文件，重启后仍在。删除该文件即可清空配对。
 """
 from __future__ import annotations
 
@@ -53,12 +52,17 @@ def normalize_pair_code(code: str) -> str:
     return str(code or "").strip().upper()
 
 
+def is_pair_command(content: str) -> bool:
+    """是否 ``/pair`` 命令（精确匹配命令词，别把 ``/pairs`` 也吃进来）。"""
+    parts = str(content or "").strip().split()
+    return bool(parts) and parts[0].lower() == "/pair"
+
+
 def extract_pair_code(content: str) -> str | None:
     """从 /pair <code> 提取配对码。"""
-    c = str(content or "").strip()
-    if not c.startswith("/pair"):
+    if not is_pair_command(content):
         return None
-    parts = c.split()
+    parts = str(content or "").strip().split()
     if len(parts) >= 2:
         return normalize_pair_code(parts[1])
     return None
@@ -91,11 +95,62 @@ def read_pairing_code(account_id: str) -> dict | None:
 
 
 def redeem_pairing_code(account_id: str, code: str) -> tuple[bool, str]:
-    """兑换配对码：**只校验，不落任何白名单**（见模块 docstring 的说明）。"""
+    """校验配对码；**不改任何名单**。
+
+    兑换后的落盘由调用方完成（``adapter._maybe_pair`` → :func:`add_paired`）——
+    这里不接收 wxid，避免"校验"与"写入"混在一个函数里。
+    """
     entry = read_pairing_code(account_id)
     if not entry:
         return False, "当前无有效配对码，请联系管理员生成"
     if normalize_pair_code(entry["code"]) != normalize_pair_code(code):
         return False, "配对码错误"
-    # 配对码正确 → 提示成功（实际加入白名单由 commands 处理，需知道 wxid）
     return True, "配对码有效"
+
+
+# ---------------------------------------------------------------- 已配对名单
+#
+# ``dmPolicy=pairing`` 的准入名单。单独一个 JSON（不是 accounts/*.json）：
+# 运行期改账号文件会触发 fs.watch 重载，配对是高频动作，不该抖整个账号。
+# 文件形如 ``{"users": ["wxid_..."]}``，权限 0600。
+
+def get_paired_path(account_id: str) -> Path:
+    return PAIRING_DIR / f"{account_id}.paired.json"
+
+
+def load_paired(account_id: str) -> list[str]:
+    """已配对 wxid 列表（文件不存在/坏 JSON ⇒ 空列表，不抛）。"""
+    try:
+        raw = json.loads(get_paired_path(account_id).read_text("utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+    users = raw.get("users") if isinstance(raw, dict) else raw
+    if not isinstance(users, list):
+        return []
+    return [str(u) for u in users if isinstance(u, str) and u.strip()]
+
+
+def add_paired(account_id: str, wxid: str) -> bool:
+    """把 wxid 写进已配对名单（幂等）。返回是否新增。"""
+    wxid = str(wxid or "").strip()
+    if not wxid:
+        return False
+    users = load_paired(account_id)
+    if wxid in users:
+        return False
+    users.append(wxid)
+    PAIRING_DIR.mkdir(parents=True, exist_ok=True)
+    path = get_paired_path(account_id)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"users": users}, ensure_ascii=False, indent=1), "utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
+    tmp.replace(path)
+    log.info("[WPP] 配对成功: account=%s wxid=%s", account_id, wxid)
+    return True
+
+
+def is_paired(account_id: str, wxid: str) -> bool:
+    return str(wxid or "") in load_paired(account_id)

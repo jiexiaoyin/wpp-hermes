@@ -246,12 +246,14 @@ def test_non_local_db_host_is_a_red_line(monkeypatch):
 
 
 def test_bad_port_is_a_config_error_not_a_crash(monkeypatch):
+    monkeypatch.setenv("WECHATPRO_DB_BACKEND", "mysql")
     monkeypatch.setenv("WECHATPRO_DB_PORT", "3306abc")
     with pytest.raises(db.DbConfigError, match="不是整数"):
         db.config()
 
 
 def test_describe_never_leaks_the_password(monkeypatch):
+    monkeypatch.setenv("WECHATPRO_DB_BACKEND", "mysql")
     monkeypatch.setenv("WECHATPRO_DB_PASSWORD", "hunter2-should-not-appear")
     monkeypatch.setenv("WECHATPRO_DB_NAME", "wechatpro_test")
     line = db.describe()

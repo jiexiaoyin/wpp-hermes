@@ -11,8 +11,8 @@ vendor 容器内端口，宿主机上不存在）。py2 早先的 6 个工具直
 2. vendor 不可用（Hermes 不在厂商同机 / 未开 MCP）⇒ 6 个查询工具**回退**到本地
    缓存表，行为与旧实现一致；``wpp_mcp_account_status`` 没有本地等价物，直接报
    「vendor MCP 不可用」；
-3. 全部 7 个工具按账号 ``mcpEnabled`` 门控（TS 语义：只有显式 ``false`` 才关；
-   缺省视为开启）。读不到账号配置时 **fail-closed**。
+3. 全部 7 个工具按账号 ``mcpEnabled`` 门控（2026-10-20 起默认关闭：**只有显式
+   ``true`` 才开**；缺省或 ``false`` 都拒绝）。读不到账号配置时 **fail-closed**。
 
 ## 导入约定（硬性）
 
@@ -39,13 +39,17 @@ _VENDOR_TIMEOUT_S = 8.0
 
 
 def _gate(adapter, account_id: str, tool_name: str) -> str:
-    """返回拒绝话术；空串 = 放行（TS ``mcpEnabled !== false`` 同款）。"""
+    """返回拒绝话术；空串 = 放行。
+
+    2026-10-20 起 MCP 是**显式开启**的可选能力：只有账号写
+    ``"mcpEnabled": true`` 才放行（旧语义是 ``!== false``，缺省即开）。
+    """
     acct_cfg = policy.raw_account_cfg(adapter, account_id)
     if acct_cfg is None:
         return (f"MCP 未启用 (账号 {account_id} 配置读不出来), "
                 f"无法调用 {tool_name}")
-    if acct_cfg.get("mcpEnabled") is False:
-        return (f"MCP 未启用 (账号 {account_id} mcpEnabled=false), "
+    if acct_cfg.get("mcpEnabled") is not True:
+        return (f"MCP 未启用 (账号 {account_id} 未显式设置 mcpEnabled=true), "
                 f"无法调用 {tool_name}")
     return ""
 

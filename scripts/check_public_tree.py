@@ -67,6 +67,9 @@ def scan(files: list[Path]) -> list[str]:
             continue
         for lineno, line in _iter_lines(path):
             for label, pattern in PATTERNS:
+                # .gitignore 里出现内部文档名是「忽略规则」，不是泄漏。
+                if path.name == ".gitignore" and label == "内部运维文档":
+                    continue
                 if pattern.search(line):
                     hits.append(f"{path}:{lineno}: [{label}] {line.strip()[:200]}")
     return hits
