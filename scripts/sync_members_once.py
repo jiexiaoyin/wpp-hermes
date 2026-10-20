@@ -9,8 +9,8 @@
 
 用法（生产，网关同款运行时 + profile 环境变量）::
 
-    set -a; . /root/.hermes/profiles/wpp-wechat/.env; set +a
-    PYTHONPATH=/root/.hermes/plugins \\
+    set -a; . "$HOME/.hermes/profiles/<profile>/.env"; set +a
+    PYTHONPATH="$HOME/.hermes/plugins" \\
       "$(readlink -f /proc/$(systemctl show -p MainPID --value hermes-gateway.service)/exe)" \\
       tools/sync_members_once.py [account_id]
 

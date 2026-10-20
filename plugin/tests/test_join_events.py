@@ -55,9 +55,9 @@ def test_join_works_when_msg_type_is_unexpected():
 
 
 def test_join_keeps_chatroom_id():
-    ev = join_events.parse(_Msg('"李四"加入了群聊', chatroom_id="21354014635@chatroom"))
+    ev = join_events.parse(_Msg('"李四"加入了群聊', chatroom_id="10000000001@chatroom"))
     assert ev is not None
-    assert ev.chatroom_id == "21354014635@chatroom"
+    assert ev.chatroom_id == "10000000001@chatroom"
 
 
 # ---------------------------------------------------------------- 退群
