@@ -42,7 +42,7 @@ async def test_join_event_syncs_only_that_group():
     adapter = _adapter_with_client(client)
 
     with patch("plugin.inbound.name_sync.sync_members",
-               AsyncMock(return_value=3)) as m:
+               AsyncMock(return_value={"written": 3, "added": [], "removed": []})) as m:
         await adapter._maybe_member_event(
             _ACCT, _msg('"张三"邀请"李四"加入了群聊'))
 
@@ -55,7 +55,7 @@ async def test_leave_event_syncs_only_that_group():
     adapter = _adapter_with_client(client)
 
     with patch("plugin.inbound.name_sync.sync_members",
-               AsyncMock(return_value=0)) as m:
+               AsyncMock(return_value={"written": 0, "added": [], "removed": []})) as m:
         await adapter._maybe_member_event(_ACCT, _msg("李四退出了群聊"))
 
     m.assert_awaited_once_with(client, "default", ["1@chatroom"])
@@ -68,7 +68,7 @@ async def test_self_join_syncs_all_groups():
     adapter = _adapter_with_client(client)
 
     with patch("plugin.inbound.name_sync.sync_members",
-               AsyncMock(return_value=40)) as m:
+               AsyncMock(return_value={"written": 40, "added": [], "removed": []})) as m:
         await adapter._maybe_member_event(
             _ACCT, _msg("[群聊邀请] 周州 邀请你加入群聊「某群」",
                         msg_type="group_invite"))
@@ -82,7 +82,7 @@ async def test_ordinary_message_does_not_sync():
     adapter = _adapter_with_client(client)
 
     with patch("plugin.inbound.name_sync.sync_members",
-               AsyncMock(return_value=0)) as m:
+               AsyncMock(return_value={"written": 0, "added": [], "removed": []})) as m:
         await adapter._maybe_member_event(
             _ACCT, _msg("办理业务：福袋", msg_type="1"))
 
@@ -107,7 +107,7 @@ async def test_members_changed_syncs_that_group():
     adapter = _adapter_with_client(client)
 
     with patch("plugin.inbound.name_sync.sync_members",
-               AsyncMock(return_value=4)) as m:
+               AsyncMock(return_value={"written": 4, "added": [], "removed": []})) as m:
         await adapter._maybe_member_event(
             _ACCT, _msg("收到一条微信系统通知", msg_type="10000"))
 
@@ -122,7 +122,7 @@ async def test_members_changed_is_throttled_per_group():
     msg = _msg("收到一条微信系统通知", msg_type="10000")
 
     with patch("plugin.inbound.name_sync.sync_members",
-               AsyncMock(return_value=4)) as m:
+               AsyncMock(return_value={"written": 4, "added": [], "removed": []})) as m:
         await adapter._maybe_member_event(_ACCT, msg)
         await adapter._maybe_member_event(_ACCT, msg)
 
@@ -136,7 +136,7 @@ async def test_throttle_is_per_group_not_global():
     adapter = _adapter_with_client(client)
 
     with patch("plugin.inbound.name_sync.sync_members",
-               AsyncMock(return_value=4)) as m:
+               AsyncMock(return_value={"written": 4, "added": [], "removed": []})) as m:
         await adapter._maybe_member_event(
             _ACCT, _msg("收到一条微信系统通知", chatroom_id="1@chatroom"))
         await adapter._maybe_member_event(
@@ -152,7 +152,7 @@ async def test_missing_client_is_skipped():
     adapter._member_event_at = {}
 
     with patch("plugin.inbound.name_sync.sync_members",
-               AsyncMock(return_value=0)) as m:
+               AsyncMock(return_value={"written": 0, "added": [], "removed": []})) as m:
         await adapter._maybe_member_event(_ACCT, _msg('"李四"加入了群聊'))
 
     m.assert_not_awaited()

@@ -606,6 +606,40 @@ def list_chatroom_members(
     )
 
 
+def prune_chatroom_members(
+    account_id: str, chatroom_id: str, keep_wxids,
+    conn: db.Connection | None = None,
+) -> list[tuple[str, str]]:
+    """删掉不在 ``keep_wxids`` 里的成员，返回被删的 ``[(wxid, 昵称)]``。
+
+    带昵称是因为调用方要写日志说清楚"谁被移出了" —— 只给 wxid 等于没说。
+
+    **只在拉到的名单非空时调用**：厂商返回空列表是"拉取失败"，不是"群解散了"，
+    照删会把整群成员抹掉。这个守卫写在调用方（``inbound.name_sync``），
+    本函数只负责执行 —— 传空 ``keep_wxids`` 直接返回空列表，不做任何删除。
+    """
+    keep = [str(w) for w in keep_wxids if w]
+    if not keep:
+        return []
+    c = conn or db.get_conn()
+    placeholders = ",".join(["%s"] * len(keep))
+    params = (account_id, chatroom_id, *keep)
+    stale = c.query(
+        f"SELECT wxid, nickname FROM wpp_chatroom_members "
+        f"WHERE account_id = %s AND chatroom_id = %s AND wxid NOT IN ({placeholders})",
+        params,
+    )
+    removed = [(str(r["wxid"]), str(r.get("nickname") or ""))
+               for r in stale if r.get("wxid")]
+    if removed:
+        c.execute(
+            f"DELETE FROM wpp_chatroom_members "
+            f"WHERE account_id = %s AND chatroom_id = %s AND wxid NOT IN ({placeholders})",
+            params,
+        )
+    return removed
+
+
 # --------------------------------------------------------------------------- 黑话
 
 

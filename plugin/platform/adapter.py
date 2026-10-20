@@ -121,6 +121,13 @@ log = logging.getLogger(__name__)
 #: ``msgType=10000``（进群 + 改群名各一条），不节流会把同一份名单拉两遍。
 _MEMBER_EVENT_THROTTLE_SEC = 30.0
 
+
+def _fmt_members(items) -> str:
+    """``[(wxid, 昵称)]`` → ``接居堂(wxid_x)、周州(wxid_y)``；空则 ``无``。"""
+    if not items:
+        return "无"
+    return "、".join(f"{nick or '?'}({wxid})" for wxid, nick in items)
+
 #: 平台名 —— 必须与目录名 / ``config.yaml plugins.enabled`` 的键 / toolset 名**三者一致**
 PLATFORM_NAME = "wechatpadpro"
 
@@ -1097,10 +1104,10 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             self._member_event_at[ev.chatroom_id] = now
 
         try:
-            written = await name_sync.sync_members(client, acct.id, targets)
-            log.info("[WPP:%s] 成员变动 %s（群 %s，%s）⇒ 刷新 %d 条昵称",
-                     acct.id, ev.kind, ev.chatroom_id or "全部",
-                     ev.member_name or "?", written)
+            res = await name_sync.sync_members(client, acct.id, targets)
+            log.info("[WPP:%s] 成员变动 %s（群 %s）⇒ 写入 %d 条｜新增 %s｜移出 %s",
+                     acct.id, ev.kind, ev.chatroom_id or "全部", res["written"],
+                     _fmt_members(res["added"]), _fmt_members(res["removed"]))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 —— 昵称刷新失败不影响收发

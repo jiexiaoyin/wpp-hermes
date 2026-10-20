@@ -84,9 +84,24 @@ async def sync_once(client, account_id: str) -> int:
 
 
 def apply_member_rows(account_id: str, chatroom_id: str,
-                      members: list[tuple[str, str]]) -> int:
-    """把 ``(wxid, 群昵称)`` 写进 ``wpp_chatroom_members``（阻塞 DB ⇒ 调用方 to_thread）。"""
+                      members: list[tuple[str, str]]) -> dict:
+    """写成员昵称并清理已离群的人（阻塞 DB ⇒ 调用方 to_thread）。
+
+    返回 ``{"written": n, "added": [...], "removed": [...]}``。
+
+    **为什么要 diff**：2026-10-20 16:40 实测「4 人 → 4 人」但那是一次一进一出
+    （接居堂进、小小小阿笑出）。只报「刷新 N 条」等于什么都没说，必须报出
+    具体是谁进来、谁出去。
+
+    **清理守卫**：``members`` 为空时**不删任何人** —— 厂商返回空列表是拉取失败，
+    不是群解散。
+    """
     from ..data import repo_messages
+
+    incoming = {str(wxid) for wxid, _ in members if wxid}
+    known = {str(r.get("wxid") or "") for r in
+             repo_messages.list_chatroom_members(account_id, chatroom_id)}
+    added = [(wxid, nick) for wxid, nick in members if wxid not in known]
 
     written = 0
     for wxid, nick in members:
@@ -97,15 +112,27 @@ def apply_member_rows(account_id: str, chatroom_id: str,
         except Exception as exc:  # noqa: BLE001 —— 单个成员失败不拖累整批
             log.debug("[WPP:%s] 成员昵称入库失败 %s/%s: %s",
                       account_id, chatroom_id, wxid, exc)
-    return written
+
+    removed: list[str] = []
+    if incoming:
+        try:
+            removed = repo_messages.prune_chatroom_members(
+                account_id, chatroom_id, incoming)
+        except Exception as exc:  # noqa: BLE001 —— 清理失败不影响昵称已写入
+            log.debug("[WPP:%s] 离群成员清理失败 %s: %s", account_id, chatroom_id, exc)
+
+    return {"written": written, "added": added, "removed": removed}
 
 
 async def sync_members(client, account_id: str,
-                       chatroom_ids: list[str] | None = None) -> int:
-    """拉群成员昵称并 upsert 进 ``wpp_chatroom_members``。返回写入行数。
+                       chatroom_ids: list[str] | None = None) -> dict:
+    """拉群成员昵称并同步本地表。返回 ``{"written", "added", "removed", "groups"}``。
 
     ``chatroom_ids`` 给了就只拉这几个群（**进群事件 / 新人加入时用**）；
     不给则拉全部群（首次补历史数据 / 机器人被拉进群时用）。
+
+    ``added`` / ``removed`` 是**具体 wxid 列表** —— 人数不变也可能一进一出，
+    只报条数等于没说（2026-10-20 16:40 实测）。
 
     单群失败只记 debug，不影响其它群：一个群拉不到，不该让整轮昵称刷新归零。
     """
@@ -120,7 +147,7 @@ async def sync_members(client, account_id: str,
             str(r.get("id") or r.get("chatroom_id") or "").strip()
             for r in _group_rows(payload)
         ]
-    written = 0
+    total = {"written": 0, "added": [], "removed": [], "groups": 0}
     for chatroom_id in chatroom_ids:
         if not chatroom_id.endswith("@chatroom"):
             continue
@@ -132,19 +159,24 @@ async def sync_members(client, account_id: str,
                 raise RuntimeError(f"Code={dcode}")
             members = employee_sync.parse_members(detail)
             if members:
-                written += await asyncio.to_thread(
+                res = await asyncio.to_thread(
                     apply_member_rows, account_id, chatroom_id, members)
+                total["written"] += res["written"]
+                total["added"].extend(res["added"])
+                total["removed"].extend(res["removed"])
+                total["groups"] += 1
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 —— 单群失败不拖累整轮
             log.debug("[WPP:%s] 群成员同步失败 %s: %s", account_id, chatroom_id, exc)
-    if written:
+    if total["written"]:
         # 昵称刚刷新，让候选名字立刻生效（否则 5 分钟 TTL 内仍显示旧值）。
         from . import session_title
         session_title.clear_name_cache()
-        log.info("[WPP:%s] 群成员昵称同步完成：%d 条（%d 个群）",
-                 account_id, written, len(chatroom_ids))
-    return written
+        log.info("[WPP:%s] 群成员昵称同步完成：写入 %d 条（%d 个群，新增 %d / 移出 %d）",
+                 account_id, total["written"], total["groups"],
+                 len(total["added"]), len(total["removed"]))
+    return total
 
 
 async def sync_forever(client, account_id: str,

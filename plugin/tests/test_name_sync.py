@@ -196,14 +196,34 @@ def test_apply_member_rows_writes_each_member():
             raise RuntimeError("db down")
         return 1
 
-    with patch.object(repo_messages, "upsert_chatroom_member", _upsert):
-        written = name_sync.apply_member_rows(
+    with patch.object(repo_messages, "upsert_chatroom_member", _upsert), \
+            patch.object(repo_messages, "list_chatroom_members", return_value=[]), \
+            patch.object(repo_messages, "prune_chatroom_members", return_value=[]):
+        res = name_sync.apply_member_rows(
             "default", "1@chatroom",
             [("wxid_a", "张三"), ("wxid_bad", "坏"), ("wxid_b", "李四")])
 
-    assert written == 2, "失败那条跳过，其余照写"
+    assert res["written"] == 2, "失败那条跳过，其余照写"
     assert ("default", "1@chatroom", "wxid_a", "张三") in calls
     assert ("default", "1@chatroom", "wxid_b", "李四") in calls
+    assert {w for w, _ in res["added"]} == {"wxid_a", "wxid_b", "wxid_bad"}, \
+        "本地表是空的 ⇒ 三个都算新增（written 才是写入成功的计数）"
+
+
+def test_apply_member_rows_reports_added_and_removed():
+    """**核心**：人数不变也要能说出"谁进谁出"（2026-10-20 16:40 实测一进一出）。"""
+    from plugin.data import repo_messages
+
+    with patch.object(repo_messages, "upsert_chatroom_member", return_value=1), \
+            patch.object(repo_messages, "list_chatroom_members",
+                         return_value=[{"wxid": "wxid_old"}, {"wxid": "wxid_keep"}]), \
+            patch.object(repo_messages, "prune_chatroom_members",
+                         return_value=[("wxid_old", "旧成员")]):
+        res = name_sync.apply_member_rows(
+            "default", "1@chatroom", [("wxid_keep", "留"), ("wxid_new", "新来的")])
+
+    assert res["added"] == [("wxid_new", "新来的")]
+    assert res["removed"] == [("wxid_old", "旧成员")]
 
 
 @pytest.mark.asyncio
@@ -219,11 +239,13 @@ async def test_sync_members_upserts_every_group():
             {"UserName": "wxid_x", "NickName": "甲"}]}}}
 
     client.call = _call
-    with patch("plugin.inbound.name_sync.apply_member_rows", return_value=1) as m:
+    with patch("plugin.inbound.name_sync.apply_member_rows",
+                  return_value={"written": 1, "added": [], "removed": []}) as m:
         with patch("plugin.inbound.session_title.clear_name_cache") as clr:
-            written = await name_sync.sync_members(client, "default")
+            res = await name_sync.sync_members(client, "default")
 
-    assert written == 2, "两个群各写一条"
+    assert res["written"] == 2, "两个群各写一条"
+    assert res["groups"] == 2
     assert [c.args[1] for c in m.call_args_list] == ["1@chatroom", "2@chatroom"]
     clr.assert_called_once(), "刷新后必须清名字缓存"
 
@@ -243,11 +265,12 @@ async def test_sync_members_skips_a_failing_group():
             {"UserName": "wxid_y", "NickName": "乙"}]}}}
 
     client.call = _call
-    with patch("plugin.inbound.name_sync.apply_member_rows", return_value=1) as m:
+    with patch("plugin.inbound.name_sync.apply_member_rows",
+                  return_value={"written": 1, "added": [], "removed": []}) as m:
         with patch("plugin.inbound.session_title.clear_name_cache"):
-            written = await name_sync.sync_members(client, "default")
+            res = await name_sync.sync_members(client, "default")
 
-    assert written == 1
+    assert res["written"] == 1
     assert m.call_args.args[1] == "2@chatroom"
 
 

@@ -44,11 +44,16 @@ async def main(account_id: str = "default") -> int:
         send_allowlist=(),          # 只读脚本：物理上发不出消息
     )
     try:
-        written = await name_sync.sync_members(client, acct.id)
+        res = await name_sync.sync_members(client, acct.id)
     finally:
         await client.close()
 
-    print(f"[OK] {account_id}: 写入/更新 {written} 条群成员昵称")
+    print(f"[OK] {account_id}: 写入 {res['written']} 条"
+          f"（新增 {len(res['added'])} / 移出 {len(res['removed'])}）")
+    for wxid, nick in res["added"]:
+        print(f"  + {nick or '?':20s} {wxid}")
+    for wxid, nick in res["removed"]:
+        print(f"  - {nick or '?':20s} {wxid}")
     return 0
 
 
