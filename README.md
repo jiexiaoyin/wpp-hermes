@@ -158,10 +158,11 @@ journalctl --user -u hermes-gateway -n 80
 |---|---|---|
 | 基本收发、媒体 | 无（仅 vendor 凭据） | — |
 | 历史检索 / 心流台账 / 审计 / 黑话与风格持久化 | SQLite（默认，零配置）或 MySQL/MariaDB（可选） | 两种后端功能等价；SQLite 无需安装数据库服务；数据库不可用时降级，不影响收发 |
-| 群聊心流 / 好感度 / 黑话 / 风格 | 显式开启 + LLM key | 对应模块不启用 |
+| 群聊心流 / 好感度 / 黑话 / 风格（仅群聊） | 显式开启 + LLM key | 对应模块不启用 |
+| 主动关心（仅私聊） | `proactive.enabled=true` + `allowFrom` 白名单 | 不主动发消息 |
 | OSS 媒体公网 URL | `WECHATPRO_OSS_ENABLED=1` + 凭据 + ossutil | 消息不带 URL，照常收发 |
-| 语音转文字 | silk 解码器 + STT key | 第一条语音打一次 WARNING |
-| 出站语音 | silk 编码器 | 降级为文件发送 |
+| 语音转文字（私聊/群聊） | silk 解码器 + STT key | 第一条语音打一次 WARNING |
+| 出站语音（私聊/群聊） | silk 编码器 | 降级为文件发送 |
 | 视频缩略图 | ffmpeg | 缩略图留空，视频照发 |
 
 ---
