@@ -41,6 +41,9 @@
 - **文档修正**：明确 SQLite 是完整后端（历史检索/心流台账/审计等无需 MariaDB）；
   LLM key 统一说明为 `JUDGE_API_KEY`，移除未被代码读取的 `WECHATPRO_LLM_API_KEY`。
 - 新增 `scripts/check_public_tree.py`，CI 同时跑 lint、测试与敏感信息扫描。
+- **静默段拆分（2026-10-20 生产修复）**：画像建议超过 6h 的静默段（如 `23–07`）
+  拆成 ≤6h 的连续段后生效，不再整段丢弃；全天合计仍 ≤8h，超过 8h 的仍整段丢弃。
+  手动配置的 `quietHours` 不受影响。
 
 ---
 

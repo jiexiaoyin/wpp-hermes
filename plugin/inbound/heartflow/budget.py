@@ -51,7 +51,9 @@ HF_BUDGET_DEFAULTS: dict[str, Any] = {
     "quietHours": [],
 }
 
-#: 静默段硬上限：单段 ≤ 6 小时，全天合计 ≤ 8 小时（防一次幻觉把群整天静音）
+#: 静默段硬上限：单段 ≤ 6 小时，全天合计 ≤ 8 小时（防一次幻觉把群整天静音）。
+#: 画像建议超过 6h 的段会按 6h **切成多段**（如 23–07 → 23–05 + 05–07），总时长不变；
+#: 超过全天 8h 上限的建议仍**整段丢弃**。账号配置里的静默段不切不裁（那是人工配置）。
 HF_QUIET_MAX_RANGE_H = 6
 HF_QUIET_MAX_TOTAL_H = 8
 
@@ -168,22 +170,47 @@ def hf_quiet_range_hours(rng: Sequence[int]) -> int:
     return e - s if e > s else 24 - s + e
 
 
+def split_hf_quiet_range(rng: Sequence[int],
+                         max_h: int = HF_QUIET_MAX_RANGE_H) -> list[list[int]]:
+    """把一段静默切成若干 ≤ ``max_h`` 小时的**连续**段。
+
+    只在 :func:`merge_hf_quiet_hours` 里用于**画像建议**（账号配置不切）。
+    跨零点照常返回跨零点段，例如 ``[23, 7]`` → ``[[23, 5], [5, 7]]``。
+    """
+    hours = hf_quiet_range_hours(rng)
+    cur = int(rng[0]) % 24
+    out: list[list[int]] = []
+    while hours > 0:
+        chunk = min(max_h, hours)
+        nxt = (cur + chunk) % 24
+        out.append([cur, nxt])
+        cur = nxt
+        hours -= chunk
+    return out
+
+
 def merge_hf_quiet_hours(base: Sequence[Sequence[int]],
                          extra: Sequence[Sequence[int]]) -> list[list[int]]:
-    """合并静默段（配置 ∪ 画像建议），逐段过硬上限；超限的**整段丢弃**。
+    """合并静默段（配置 ∪ 画像建议），逐段过硬上限。
 
-    合计超上限时按**短段优先**保留（长的先丢 —— 一段 6h 静音比三段 2h 更危险）。
-    超限是**丢弃不是截断**：半段静默的语义说不清楚。
+    画像建议里 **6h < 时长 ≤ 8h** 的段按 6h 切成连续多段（23–07 → 23–05 + 05–07），
+    不再整段丢弃；超过全天 8h 上限的建议仍**整段丢弃**。账号配置（``base``）原样保留。
+
+    合计超上限时按**短段优先**保留（长的先丢 —— 一段 6h 静音比三段 2h 更危险）；
+    超限仍按**整条建议**丢弃，不做半条截断：半段静默的语义说不清楚。
     """
     out: list[list[int]] = [list(r) for r in base]
     total = sum(hf_quiet_range_hours(r) for r in out)
-    candidates = [list(r) for r in extra if hf_quiet_range_hours(r) <= HF_QUIET_MAX_RANGE_H]
+    candidates = [list(r) for r in extra]
     candidates.sort(key=hf_quiet_range_hours)          # 稳定排序（与 JS sort 一致）
     for r in candidates:
         h = hf_quiet_range_hours(r)
-        if h <= 0 or total + h > HF_QUIET_MAX_TOTAL_H:
+        if h <= 0 or h > HF_QUIET_MAX_TOTAL_H:
             continue
-        out.append(r)
+        if total + h > HF_QUIET_MAX_TOTAL_H:
+            continue
+        chunks = split_hf_quiet_range(r) if h > HF_QUIET_MAX_RANGE_H else [r]
+        out.extend(chunks)
         total += h
         if len(out) >= 6:
             break

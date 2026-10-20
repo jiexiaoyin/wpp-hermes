@@ -148,6 +148,37 @@ def test_quiet_hours_wire_into_check():
     assert B.check_budget(st, cfg, at(12)) == (True, None), "白天放行（此状态下无其它闸命中）"
 
 
+def test_merge_quiet_hours_splits_profile_range_over_6h():
+    """★ 画像建议 23–07（8h）不再被整段丢弃，切成 ≤6h 的连续段。"""
+    merged = B.merge_hf_quiet_hours([], [[23, 7]])
+    assert merged == [[23, 5], [5, 7]], "23–07 拆成 6h + 2h，覆盖不变"
+    assert sum(B.hf_quiet_range_hours(r) for r in merged) == 8
+    for h in (23, 0, 1, 4, 5, 6):
+        assert B.is_hf_quiet_hour(h, merged) is True, f"{h} 点应在静默段"
+    assert B.is_hf_quiet_hour(7, merged) is False, "终点不含"
+
+
+def test_merge_quiet_hours_splits_23_to_6_and_0_to_8():
+    assert B.merge_hf_quiet_hours([], [[23, 6]]) == [[23, 5], [5, 6]], "7h → 6h + 1h"
+    assert B.merge_hf_quiet_hours([], [[0, 8]]) == [[0, 6], [6, 8]], "8h → 6h + 2h"
+    assert B.merge_hf_quiet_hours([], [[1, 5]]) == [[1, 5]], "≤6h 的短段保持原样"
+
+
+def test_merge_quiet_hours_still_drops_over_8h():
+    """安全阀不变：超过全天 8h 的建议整段丢弃，不做无上限拆分。"""
+    assert B.merge_hf_quiet_hours([], [[22, 7]]) == [], "跨零点 9h"
+    assert B.merge_hf_quiet_hours([], [[0, 23]]) == [], "23h"
+
+
+def test_merge_quiet_hours_keeps_base_and_respects_total_cap():
+    """账号配置是人工配置：原样保留、不切；画像建议合计超 8h 时整条不落。"""
+    assert B.merge_hf_quiet_hours([[23, 7]], []) == [[23, 7]], "账号的 8h 段不切"
+    assert B.merge_hf_quiet_hours([[1, 2]], [[23, 7]]) == [[1, 2]], \
+        "1h + 8h = 9h，整条画像建议丢弃（不做半条）"
+    assert B.merge_hf_quiet_hours([[1, 2]], [[23, 6]]) == [[1, 2], [23, 5], [5, 6]], \
+        "1h + 7h = 8h，恰好落满"
+
+
 # ===== 4. 五条闸 + 边界 =====
 
 

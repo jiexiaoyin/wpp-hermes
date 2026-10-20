@@ -969,6 +969,22 @@ def test_effective_budget_quiet_hours_come_from_the_profile_cache():
         "开了开关，缓存里的静默段必须并进生效预算"
 
 
+def test_effective_budget_splits_long_profile_quiet_hours():
+    """★ 画像给 23–07（8h）时，生效预算应拆成 ≤6h 的段，而不是整段丢弃。
+
+    真实画像常见 23–07 / 23–06；旧的「单段 >6h 整段丢弃」让这些建议全部落空。
+    """
+    rows = [{"group_id": "g-split@chatroom", "generated_at": NOW_SEC,
+             "profile_json": json.dumps({"summary": "夜间订单群",
+                                         "quietHours": [[23, 7]]})}]
+    assert P.load_hf_profiles_into_cache("acc-split", rows, 400) == 1
+    cfg = cfg_on(budget={"enabled": True, "minGapSec": 180, "maxPerHour": 8,
+                         "maxPerDay": 60}, profile={"applyQuietHours": True})
+    eff = HF.resolve_hf_effective_budget("acc-split", "g-split@chatroom", cfg, NOW_SEC)
+    assert [tuple(x) for x in eff.quiet_hours] == [(23, 5), (5, 7)], \
+        "23–07 必须拆成 23–05 + 05–07，且总时长仍是 8h"
+
+
 def test_effective_budget_shares_the_outer_ring(monkeypatch):
     """占比外环（observe）也走同一条合成路径。"""
     from plugin.inbound.heartflow import observe as O
