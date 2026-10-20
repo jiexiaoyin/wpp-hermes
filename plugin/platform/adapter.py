@@ -1058,6 +1058,26 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             except Exception as exc:  # noqa: BLE001
                 log.warning("[WPP:%s] 群名同步启动失败（不影响收发）: %s", acct.id, exc)
 
+    @staticmethod
+    def _group_display_name(account_id: str, chatroom_id: str) -> str:
+        """群名（``wpp_chatrooms`` 同步来的）。查不到返回空 —— 模板会写「本群」。"""
+        try:
+            from ..inbound import session_title
+            return session_title.chat_display_name(account_id, "group", chatroom_id) or ""
+        except Exception as exc:  # noqa: BLE001 —— 名字只是装饰
+            log.debug("[WPP:%s] 群名解析失败 %s: %s", account_id, chatroom_id, exc)
+            return ""
+
+    @staticmethod
+    def _group_profile_text(account_id: str, chatroom_id: str) -> str:
+        """心流群画像（近 14 天文本由 LLM 归纳）。没有画像返回空 ⇒ 不润色。"""
+        try:
+            from ..inbound.heartflow import profile as hf_profile
+            return hf_profile.get_hf_profile_prompt_text(account_id, chatroom_id) or ""
+        except Exception as exc:  # noqa: BLE001 —— 画像缺失不该挡住欢迎语
+            log.debug("[WPP:%s] 群画像读取失败 %s: %s", account_id, chatroom_id, exc)
+            return ""
+
     async def _send_join_welcome(self, acct, chatroom_id: str,
                                  text: str, ats: list[str]) -> None:
         """发一条进群欢迎语（可 @ 新人）。
@@ -1142,11 +1162,20 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             # added 里混着各群的新人，没法归属到某一个群。
             if targets is not None:
                 cfg = join_welcome.resolve_cfg(getattr(acct, "join_welcome", None))
+                group_name = self._group_display_name(acct.id, ev.chatroom_id)
                 welcome = join_welcome.build(
                     cfg, ev.chatroom_id, res["added"],
-                    hour=time.localtime().tm_hour)
+                    hour=time.localtime().tm_hour, group_name=group_name)
                 if welcome:
                     text, ats = welcome
+                    if cfg.get("llmPolish"):
+                        # 画像查库是同步的 —— 别在事件循环里直接读。
+                        profile_text = await asyncio.to_thread(
+                            self._group_profile_text, acct.id, ev.chatroom_id)
+                        text = await join_welcome.polish(
+                            text, profile_text=profile_text,
+                            group_name=group_name,
+                            model=str((getattr(acct, "heartflow", None) or {}).get("model") or ""))
                     await self._send_join_welcome(acct, ev.chatroom_id, text, ats)
         except asyncio.CancelledError:
             raise

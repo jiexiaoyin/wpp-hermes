@@ -143,3 +143,73 @@ def test_build_respects_mode():
     """模式不放行的群，即使有真实新人也不发。"""
     cfg = _cfg(mode="allowlist", groups=[_GROUP_A])
     assert jw.build(cfg, _GROUP_B, [("wxid_1", "甲")], hour=10) is None
+
+
+# ---------------------------------------------------------------- {group}
+
+def test_render_substitutes_group_name():
+    assert jw.render("欢迎 @{name} 加入{group}！", ["甲"], "移动业务对接群") == \
+        "欢迎 @甲 加入移动业务对接群！"
+
+
+def test_render_group_falls_back_when_missing():
+    """群名查不到时写「本群」，别渲染成「加入！」。"""
+    assert jw.render("欢迎 {name} 加入{group}！", ["甲"], "") == "欢迎 甲 加入本群！"
+
+
+def test_build_passes_group_name_through():
+    cfg = _cfg(mode="all", template="欢迎 @{name} 加入{group}！")
+    text, _ = jw.build(cfg, _GROUP_A, [("wxid_1", "甲")], hour=10,
+                       group_name="测试群")
+    assert text == "欢迎 @甲 加入测试群！"
+
+
+# ---------------------------------------------------------------- LLM 润色
+
+@pytest.mark.asyncio
+async def test_polish_returns_base_without_profile():
+    """没有群画像就别硬编 —— 原样返回模板文案。"""
+    assert await jw.polish("基线", profile_text="", group_name="g",
+                           model="m") == "基线"
+
+
+@pytest.mark.asyncio
+async def test_polish_returns_base_without_model():
+    assert await jw.polish("基线", profile_text="画像", group_name="g",
+                           model="") == "基线"
+
+
+@pytest.mark.asyncio
+async def test_polish_returns_base_on_llm_error():
+    """LLM 抖动不能导致欢迎语消失。"""
+    from unittest.mock import AsyncMock, patch
+    with patch("plugin.llm.judge.call_judge", AsyncMock(side_effect=RuntimeError("down"))):
+        assert await jw.polish("基线", profile_text="画像", group_name="g",
+                               model="m") == "基线"
+
+
+@pytest.mark.asyncio
+async def test_polish_uses_llm_text():
+    from unittest.mock import AsyncMock, patch
+    with patch("plugin.llm.judge.call_judge",
+               AsyncMock(return_value="欢迎 @甲 加入群！咱们主打晒单冲量，多分享～")):
+        out = await jw.polish("基线", profile_text="画像", group_name="g", model="m")
+    assert "晒单" in out
+
+
+@pytest.mark.asyncio
+async def test_polish_rejects_text_without_mention():
+    """模型跑题（没 @ 任何人）⇒ 退回基线，别在群里说怪话。"""
+    from unittest.mock import AsyncMock, patch
+    with patch("plugin.llm.judge.call_judge", AsyncMock(return_value="随便一句话")):
+        assert await jw.polish("基线", profile_text="画像", group_name="g",
+                               model="m") == "基线"
+
+
+@pytest.mark.asyncio
+async def test_polish_strips_quotes():
+    from unittest.mock import AsyncMock, patch
+    with patch("plugin.llm.judge.call_judge",
+               AsyncMock(return_value='"欢迎 @甲 加入群！"')):
+        assert await jw.polish("基线", profile_text="画像", group_name="g",
+                               model="m") == "欢迎 @甲 加入群！"
