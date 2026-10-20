@@ -37,8 +37,9 @@
       }
     } catch (_e) { /* not JSON */ }
     if (status === "404") {
-      return "接口 404：user 插件后端只在 default/root 配置下挂载。" +
-        "请把 dashboard 的 profile 切回 default（控制台不能从 wpp-wechat 次级 profile 使用）。";
+      return "接口 404：当前 profile 未启用 wechatpadpro-console。" +
+        "请把它加入该 profile 的 plugins.enabled（root profile 见 $HERMES_HOME/config.yaml，" +
+        "次级 profile 见 $HERMES_HOME/profiles/<name>/config.yaml）后重启 hermes-dashboard。";
     }
     return (status ? "[" + status + "] " : "") + (detail || raw);
   }

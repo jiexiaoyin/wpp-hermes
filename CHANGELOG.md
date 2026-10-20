@@ -12,8 +12,10 @@ Web 控制台（不修改 Hermes 本体代码）。
 
 - **Dashboard 页签**：`/wpp-console`，由 Hermes 官方插件机制加载
   （`dashboard/manifest.json` + `dashboard/plugin_api.py` + 纯 IIFE 前端）。
-  只在 **root/launch profile** 启用 `wechatpadpro-console`；次级 profile 的 user
-  插件后端由 Hermes 拒绝挂载（API 404），页签会明确提示切回 default。
+  每个要显示页签的 profile 需在 `plugins.enabled` 里启用 `wechatpadpro-console`；
+  次级 profile（如 `wpp-wechat`）的插件后端由 Hermes 转发到该 profile 自己的
+  plugin host 运行（PLG-3），未启用的 profile 返回 404。状态快照在此场景下回退到
+  launch home 读取。
 - **账号状态**：网关每 5 秒写一份运行时快照
   （`$HERMES_HOME/plugin-data/wechatpadpro/console-status.json`，0600），包含真实
   WS 连接、客户端就绪、最近热加载结果；控制台按 15s/60s 区分 live/delayed/stale，

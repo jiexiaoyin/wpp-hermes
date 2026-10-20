@@ -173,9 +173,29 @@ def _version() -> str:
         return ""
 
 
-def _status_path() -> Path:
+def _status_candidates() -> list[Path]:
+    """快照候选路径，按优先级排列。
+
+    次级 profile 的插件后端跑在该 profile 的 plugin host 里，``HERMES_HOME`` 指向
+    ``profiles/<name>``；而网关进程的 ``HERMES_HOME`` 是 launch home，快照写在
+    ``<launch>/plugin-data/...``。所以先看当前 home，再回退到 launch home / ``~/.hermes``。
+    """
     home = Path(os.environ.get("HERMES_HOME") or "~/.hermes").expanduser()
-    return home / "plugin-data" / "wechatpadpro" / "console-status.json"
+    homes = [home]
+    if home.parent.name == "profiles":
+        homes.append(home.parent.parent)
+    default = Path("~/.hermes").expanduser()
+    if default not in homes:
+        homes.append(default)
+    return [h / "plugin-data" / "wechatpadpro" / "console-status.json" for h in homes]
+
+
+def _status_path() -> Path:
+    candidates = _status_candidates()
+    for path in candidates:
+        if path.is_file():
+            return path
+    return candidates[0]
 
 
 def _read_status() -> dict[str, Any] | None:

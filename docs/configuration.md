@@ -327,16 +327,28 @@ hermes-gw-restart
 ```
 
 访问 dashboard 的「微信助手控制台」页签。账号绑定在哪个 profile 不影响控制台——
-它直接读写 `accounts/*.json` 与插件数据库。
+它直接读写 `accounts/*.json` 与插件数据库；在线状态快照优先读 profile home，缺失时
+回退到 launch home（网关进程始终写 launch home）。
 
 > 页签路径刻意用 `/wpp-console`，不要改成 `/wechatpadpro`：本插件自己的 webhook
 > 反代规则通常占用 `/wechatpadpro/` 前缀（vendor 回调），dashboard 又会把页签路径
 > 重定向成带尾斜杠的形式，两者相撞时页面会被转发到 webhook 端口并显示
 > `{"error":"unknown path"}`。
 
-⚠️ **不要**把 `wechatpadpro-console` 加到 `profiles/wpp-wechat/config.yaml`：
-Hermes 的次级 profile 只允许运行该 profile 自己的 bundled 插件后端，user 插件 API
-会一律 404（页签出现但接口不可用）。控制台必须从 launch/root profile 使用。
+### 在次级 profile（如 `wpp-wechat`）使用
+
+把 `wechatpadpro-console` 也加入该 profile 的 `plugins.enabled`：
+
+```yaml
+# $HERMES_HOME/profiles/wpp-wechat/config.yaml
+plugins:
+  enabled:
+    - wechatpadpro-console
+```
+
+Hermes 会把该 profile 的 `/api/plugins/wechatpadpro-console/*` 请求转发到**该
+profile 自己的 plugin host** 进程运行（PLG-3，与 launch profile 的 router 隔离），
+页签与接口都需要这一条 enabled；没有启用的 profile 会得到 404。
 
 ### 能做什么
 
