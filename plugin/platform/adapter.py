@@ -1189,7 +1189,9 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
                 group_name = self._group_display_name(acct.id, ev.chatroom_id)
                 welcome = join_welcome.build(
                     cfg, ev.chatroom_id, res["added"],
-                    hour=time.localtime().tm_hour, group_name=group_name)
+                    hour=time.localtime().tm_hour, group_name=group_name,
+                    total=int(res.get("size") or 0),
+                    first_sync=bool(res.get("first_sync")))
                 if welcome:
                     text, ats = welcome
                     if cfg.get("llmPolish"):

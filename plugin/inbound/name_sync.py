@@ -121,7 +121,8 @@ def apply_member_rows(account_id: str, chatroom_id: str,
         except Exception as exc:  # noqa: BLE001 —— 清理失败不影响昵称已写入
             log.debug("[WPP:%s] 离群成员清理失败 %s: %s", account_id, chatroom_id, exc)
 
-    return {"written": written, "added": added, "removed": removed}
+    return {"written": written, "added": added, "removed": removed,
+            "total": len(members), "first_sync": not known}
 
 
 async def sync_members(client, account_id: str,
@@ -147,7 +148,8 @@ async def sync_members(client, account_id: str,
             str(r.get("id") or r.get("chatroom_id") or "").strip()
             for r in _group_rows(payload)
         ]
-    total = {"written": 0, "added": [], "removed": [], "groups": 0}
+    total = {"written": 0, "added": [], "removed": [], "groups": 0,
+             "size": 0, "first_sync": False}
     for chatroom_id in chatroom_ids:
         if not chatroom_id.endswith("@chatroom"):
             continue
@@ -165,6 +167,9 @@ async def sync_members(client, account_id: str,
                 total["added"].extend(res["added"])
                 total["removed"].extend(res["removed"])
                 total["groups"] += 1
+                #: 该群当前人数（多群时取最大 —— 只用于"变化幅度"判据，不必求和）
+                total["size"] = max(total["size"], res.get("total") or 0)
+                total["first_sync"] = total["first_sync"] or bool(res.get("first_sync"))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 —— 单群失败不拖累整轮

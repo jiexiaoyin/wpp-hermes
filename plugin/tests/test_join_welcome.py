@@ -81,19 +81,40 @@ def test_all_ignores_groups():
 
 # ---------------------------------------------------------------- 防刷屏
 
-def test_max_batch_blocks_baseline_rebuild():
-    """一次 diff 出 4 个"新人"（默认上限 3）⇒ 当作基线重建，不发。"""
-    cfg = _cfg(mode="all")
-    added = [("wxid_1", "甲"), ("wxid_2", "乙"),
-             ("wxid_3", "丙"), ("wxid_4", "丁")]
-    assert jw.build(cfg, _GROUP_A, added, hour=10) is None
+def test_real_bulk_join_is_welcomed():
+    """**老板 2026-10-20 指出**：一次拉 5 人（群 48 人）是正常操作，必须发。
 
-
-def test_max_batch_allows_a_real_newcomer():
+    旧实现拿 ``maxBatch=3`` 当"超过就不发"的闸，把真实的批量进群误杀成基线重建。
+    """
     cfg = _cfg(mode="all")
-    out = jw.build(cfg, _GROUP_A, [("wxid_1", "甲")], hour=10)
+    added = [(f"wxid_{i}", f"人{i}") for i in range(5)]
+    out = jw.build(cfg, _GROUP_A, added, hour=10, total=48)
     assert out is not None
-    assert "甲" in out[0]
+    assert "人0" in out[0] and "人4" in out[0]
+
+
+def test_rebaseline_by_ratio_is_blocked():
+    """幅度才判据：一次变了群内一半以上 ⇒ 基线重建，不发。"""
+    cfg = _cfg(mode="all")
+    added = [(f"wxid_{i}", f"人{i}") for i in range(30)]
+    assert jw.build(cfg, _GROUP_A, added, hour=10, total=48) is None
+
+
+def test_first_sync_is_never_welcomed():
+    """本地表原本为空 ⇒ diff 出来的"新增"其实是整群，一律不发。"""
+    cfg = _cfg(mode="all")
+    out = jw.build(cfg, _GROUP_A, [("wxid_1", "甲")], hour=10,
+                   total=48, first_sync=True)
+    assert out is None
+
+
+def test_mention_is_capped_but_all_names_kept():
+    """@ 只覆盖前 N 个，名字全写 —— 不冷落人，也不把全群炸一遍。"""
+    cfg = _cfg(mode="all", maxBatch=2)
+    added = [(f"wxid_{i}", f"人{i}") for i in range(4)]
+    text, ats = jw.build(cfg, _GROUP_A, added, hour=10, total=48)
+    assert len(ats) == 2
+    assert "人3" in text, "没被 @ 的人名字也要在文案里"
 
 
 def test_empty_added_never_sends():

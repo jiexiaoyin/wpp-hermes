@@ -58,8 +58,15 @@ MODES = (MODE_ALLOWLIST, MODE_BLOCKLIST, MODE_ALL)
 
 DEFAULT_TEMPLATE = "欢迎 @{name} 加入{group}！"
 
-#: 一次最多欢迎几个人。超过就判定为"基线重建"而非真实进群 —— 见模块 docstring。
-DEFAULT_MAX_BATCH = 3
+#: ``maxBatch`` 现在的语义是**一条消息最多 @ 几个人**（不是"超过就不发"）。
+#: 为什么改：真实场景一次拉 4-5 人进群很常见，用数量当"基线重建"判据会误杀。
+#: 超过这个数仍然欢迎，只是不逐个 @（20 个人被 @ = 全群炸 20 条通知）。
+DEFAULT_MAX_BATCH = 10
+
+#: 基线重建判据：**变化幅度**而不是绝对数量。
+#: ``added > max(_REBASELINE_ABS, total * 0.5)`` ⇒ 多半是首次同步/清表/迁移。
+_REBASELINE_ABS = 10
+_REBASELINE_MIN_SIZE = 10
 
 _NAME_RE = re.compile(r"\{name\}")
 _GROUP_RE = re.compile(r"\{group\}")
@@ -155,11 +162,18 @@ def render(template: str, names: Iterable[str], group_name: str = "") -> str:
 def build(
     cfg: Mapping[str, Any], chatroom_id: str,
     added: Iterable[tuple[str, str]], *, hour: int,
-    group_name: str = "",
+    group_name: str = "", total: int = 0, first_sync: bool = False,
 ) -> tuple[str, list[str]] | None:
     """算出要发的内容与 @ 列表；不该发 ⇒ ``None``。
 
     ``added`` 来自 ``name_sync.sync_members`` 的 diff（``[(wxid, 昵称)]``）。
+
+    **防刷屏靠"幅度"不靠"数量"**（老板 2026-10-20 指出原设计会误杀真实批量进群）：
+
+    * ``first_sync`` —— 本地表原本为空（首次同步/清表），一律不发；
+    * ``added > max(_REBASELINE_ABS, total * 0.5)`` —— 一次变了一半以上，判基线重建。
+
+    一次进 4-5 人（群 48 人）完全正常，照发；``maxBatch`` 只限制**@ 几个人**。
     """
     added = list(added or ())
     if not added:
@@ -168,12 +182,19 @@ def build(
         return None
     if is_quiet_hour(cfg, hour):
         return None
-    if len(added) > int(cfg.get("maxBatch") or DEFAULT_MAX_BATCH):
-        # 一次冒出太多新人 ⇒ 多半是首次同步 / 清表后的基线重建，不是真进群。
+    if first_sync:
+        # 表原本是空的 ⇒ 这次 diff 出来的"新增"是**整群**，不是新人。
         return None
+    if total >= _REBASELINE_MIN_SIZE and len(added) > max(_REBASELINE_ABS, total * 0.5):
+        return None
+
     names = [nick or wxid for wxid, nick in added]
     text = render(str(cfg.get("template") or DEFAULT_TEMPLATE), names, group_name)
-    ats = [wxid for wxid, _ in added if wxid] if cfg.get("mention", True) else []
+    cap = max(1, int(cfg.get("maxBatch") or DEFAULT_MAX_BATCH))
+    if cfg.get("mention", True):
+        ats = [wxid for wxid, _ in added[:cap] if wxid]
+    else:
+        ats = []
     return text, ats
 
 
