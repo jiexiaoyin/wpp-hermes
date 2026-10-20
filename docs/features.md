@@ -587,6 +587,8 @@ SELECT ts, direction, peer_id, msg_type, LEFT(content, 80)
 
 ## 8. 建议的开启顺序
 
+### 8.1 群聊场景
+
 1. **先跑通基本收发**：只配 vendor 地址与凭据，保持所有增强能力关闭。
 2. **开历史检索**：默认 SQLite 即可；确认 `wpp_history_search` 能查到消息。
 3. **按需开心流**：先只开 `heartflow.enabled` + 模型，保持默认预算，观察一周台账。
@@ -596,6 +598,47 @@ SELECT ts, direction, peer_id, msg_type, LEFT(content, 80)
 5. **黑话、好感度、意图识别**属于锦上添花，按群的实际需求逐个开，每次只改一项，
    便于判断效果。
 6. **语音**先确认厂商是否自带转写；没有时再配解码器和 STT key。
+
+### 8.2 私聊场景（1 对 1）
+
+私聊里真正生效的增强能力不多，按收益排序：
+
+| 优先级 | 能力 / 配置 | 建议 | 说明 |
+|---|---|---|---|
+| 1 | 历史检索 | 保持默认 SQLite | 查旧消息、给模型补上下文都依赖它 |
+| 2 | 入站语音转写 | 配 silk 解码器 + STT key | 私聊语音比例高；不配时模型只看到 `[语音]` |
+| 3 | `debounceMerge` | `{"enabled": true, "maxChars": 2000}` | 对方连发多条短句时合并成一段，避免逐条独立触发 |
+| 4 | 主动关心 | `proactive.allowFrom` 只放熟人 / 客户 | 唯一专为私聊设计的能力；默认 20 小时未回、每天 1 条、23–8 静默 |
+| 5 | TTS / AI 语音 | 需要时再开，`autoVoice` 保持 `0` | 私聊没有群情绪记录，固定按 `calm`；建议按需调用 `wpp_send_ai_voice`，不要自动补语音 |
+| 6 | `spectre.quoteHint` | 长对话可开 | 提示模型可以引用回复，默认关闭 |
+
+```json
+{
+  "debounceMerge": {"enabled": true, "maxChars": 2000},
+  "proactive": {
+    "enabled": true,
+    "allowFrom": ["wxid_friend"],
+    "maxPerDay": 1,
+    "minIdleHours": 20
+  },
+  "tts": {"enabled": true, "autoVoice": 0, "whitelistUsers": ["wxid_friend"]},
+  "spectre": {"quoteHint": true}
+}
+```
+
+注意事项：
+
+- **心流、群画像、好感度、黑话、风格、意图识别只处理群消息**。在私聊里即使打开
+  也不会有任何效果，不要为了私聊去开。
+- **主动关心**的 `allowFrom` 为空 = 永不发送（fail-closed）；它需要可用的判定模型
+  （与心流共用 `JUDGE_API_KEY`）。
+- **`wpp_send_voice`**（发送已有音频）不受 `tts.enabled` 影响；
+  **`wpp_send_ai_voice`**（现场合成）必须先设 `tts.enabled=true`。
+- **`autoVoice` 在私聊会先发文字、再补一条语音**，一般不建议；确需使用时用
+  `whitelistUsers` 限制范围。
+- **OSS 不是私聊的必需项**：不开 OSS 时媒体仍会作为本地附件交给 Hermes；
+  只有需要公网直链时才启用。
+- **MCP** 只在你要用 MCP 客户端时打开，与私聊/群聊无关。
 
 ---
 
