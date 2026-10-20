@@ -37,6 +37,7 @@ sync.sh
 # 内部运维材料（本机保留，不进入公开树）
 tools/
 docs/internal/
+DEVELOPMENT_RULES.md
 
 # 技能工坊暂存区（临时产物）
 skills-workshop-staging/
