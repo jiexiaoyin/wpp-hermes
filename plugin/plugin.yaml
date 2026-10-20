@@ -1,7 +1,7 @@
 name: wechatpadpro-platform
 label: WeChatPadPro (Personal WeChat)
 kind: platform
-version: 2.0.3
+version: 2.1.0
 author: knowhub-ops
 
 manifest_version: 2          # v2 解析路径（未知字段 warning 而非静默丢弃）
@@ -24,29 +24,10 @@ provides_hooks:
 #    里的 toolset），属语义用错 —— 触发 plugin_validate 的
 #    「REAL − DECLARED 非空 ⇒ 失败」+「DECLARED − REAL 非空 ⇒ WARN」。
 #
-#    本字段由 tools/gen_provides_tools.py 从**实际注册**生成，禁止手写
-#    （deploy.sh 会重新生成并 diff，不为空即中止）。
-#
-#    2026-10-01 实测：生成器 262 条 == `hermes plugins doctor` 的
-#    「registrations: 262 tool(s)」逐条一致（wecom 7 + phoneerp 4 + wpp 251）。
-#    2026-10-02：`tools/policy.py` 撤注册 2 个危险工具（对齐 TS 裁决）+ 补注册 1 个
-#    setProxy ⇒ **261**（wpp 251 → 250）。
-#    2026-10-18：补齐 TS 工具面缺口 33 个 ⇒ **294**（wpp 283 + wecom 7 + phoneerp 4）。
-#    本字段已按新注册面重生成。
-#    ⚠️ 生成本地是用探针的 gateway 空壳驱动的（注册面不依赖 Hermes 内部），
-#    deploy.sh 会在 .183 的**真运行时**再生成一次并 diff —— 不一致即中止。
+#    本字段必须与**实际注册**逐名一致；改注册面后要同步更新。
+#    CI / 本地可用注册探针核对：declared == actual，多一个或少一个都会被发现。
+#    Hermes `hermes plugins validate` 的判据：实注册多 ⇒ FAIL，少 ⇒ WARN。
 provides_tools:
-  - phoneerp_imei
-  - phoneerp_location
-  - phoneerp_natural
-  - phoneerp_query
-  - wecom_all_customers
-  - wecom_corp_tags
-  - wecom_customer_detail
-  - wecom_daily_report
-  - wecom_daily_user_changes
-  - wecom_list_customers
-  - wecom_weekly_behavior
   - wpp_accounts_context
   - wpp_customized_auth_batch
   - wpp_fav_del
@@ -239,6 +220,7 @@ provides_tools:
   - wpp_send_text
   - wpp_send_video
   - wpp_send_voice
+  - wpp_setup
   - wpp_share_video_msg
   - wpp_start_auto_sync
   - wpp_sync_message
@@ -339,61 +321,61 @@ provides_tools:
   - wpp_xw_suggestions
   - wpp_xw_switch_room
 description: >
-  WeChat Pad protocol gateway adapter for Hermes Agent (vendor wx.juhe.chat).
-  Registers the ``wechatpadpro`` platform; relays WeChat chats between
-  vendors (GetQR login, /ws/sync push, /Msg/SendTxt send) and the Hermes agent.
-  v2.0.0: full Python rewrite — heartflow 9-module port (aligned to TS v1.16.2:
-  image-caption pass + silence-exempt threshold learning),
+  WeChat Pad protocol gateway adapter for Hermes Agent.
+  Registers the ``wechatpadpro`` platform; relays WeChat chats between a
+  WeChatPadPro-compatible service (GetQR login, /ws/sync push, /Msg/SendTxt send)
+  and the Hermes agent.
+  v2.0.0: full Python rewrite — heartflow 9-module port,
   single registration entry, migration-based data layer.
 
 requires_env:
+  - name: WECHATPRO_API_BASE
+    description: "WeChatPadPro 服务地址（如 https://your-vendor.example）"
+    prompt: "WeChatPadPro API base"
   - name: WECHATPRO_AUTHCODE
     description: "vendor authcode (device login token) for default account"
     prompt: "WeChatPadPro authcode"
-    password: true
+    secret: true
   - name: WECHATPRO_TOKEN_KEY
     description: "vendor client tokenKey"
     prompt: "WeChatPadPro tokenKey"
-    password: true
+    secret: true
 
 optional_env:
+  - name: WECHATPRO_WS_URL
+    description: >
+      WebSocket 地址；留空时按 API base 推导
+      （https://host → wss://host/ws/sync）。
+    prompt: "WeChatPadPro WebSocket URL"
   - name: WECHATPRO_ALLOWED_USERS
     description: "Comma-separated DM wxids allowed to talk to the bot"
     prompt: "Allowed users (comma-separated)"
-    password: false
   - name: WECHATPRO_ALLOW_ALL_USERS
     description: "Set 1 to allow all DM users (not recommended)"
-    password: false
   - name: WECHATPRO_HOME_CHANNEL
     description: "Default chat ID for cron / notification delivery (format accountId:peerId)"
     prompt: "Home channel ID"
-    password: false
   - name: WECHATPRO_WEBHOOK_PUBLIC_URL
     description: >
       Public base URL for the vendor to POST inbound webhooks.
       ⚠️ No default is applied — must be set explicitly. A wrong value here
       silently points the vendor's inbound traffic at another host.
     prompt: "Webhook public URL"
-    password: false
   - name: WECHATPRO_DB_HOST
     description: "MariaDB host (must be localhost/127.0.0.1 for this plugin)"
-    password: false
   - name: WECHATPRO_DB_PORT
     description: "MariaDB port (default 3306)"
-    password: false
   - name: WECHATPRO_DB_USER
     description: "MariaDB user"
-    password: false
   - name: WECHATPRO_DB_NAME
     description: "MariaDB database name"
-    password: false
   - name: WECHATPRO_DB_PASSWORD
     description: "MariaDB password"
-    password: true
+    secret: true
   - name: WECHATPRO_LLM_API_KEY
     description: "LLM API key for heartflow / affection / jargon"
     prompt: "LLM API key"
-    password: true
+    secret: true
   - name: WECHATPRO_STT_API_KEY
     description: >
       SiliconFlow STT key for voice transcription (fallback). Only used when the
@@ -401,17 +383,16 @@ optional_env:
       WPP_SILK_DECODER_PATH in docs). Missing key or decoder degrades loudly once
       (one WARNING), never silently; also accepted: SILICONFLOW_API_KEY.
     prompt: "STT API key"
-    password: true
+    secret: true
   - name: WECHATPRO_ACCOUNTS_JSON
     description: >
       Optional: inline account table as JSON, avoiding on-disk credentials.
       Shape: {"<account_id>": {"authcode": "...", "tokenKey": "..."}}
-    password: true
+    secret: true
 
 # 声明性 —— Hermes **从不自动安装**（plugins_manifest.py:150-155）。
-# 部署脚本必须往 Hermes 的隔离解释器里装：
-#   $P = /root/.hermes/tools/python-*-linux-x64/bin/python3
-#   $P -m pip install -r <(printf '%s\n' "${DEPS[@]}")
+# 安装脚本需要往 Hermes 的隔离解释器里装：
+#   <hermes-python> -m pip install -r <(printf '%s\n' "${DEPS[@]}")
 #
 # ⚠️ doctor 强制要求**上下界都给**（只写下界会报
 #    "entry 'pymysql' has no upper bound"）。上界取下一个大版本。
@@ -421,8 +402,7 @@ python_dependencies:
   #    aiohttp + websockets 由 `platform/adapter.py:check_wechatpadpro_requirements`
   #    主动探 —— 声明的与探的**必须同源**，否则 check_fn 返 False 而 install_hint
   #    不提真因。
-  # 2026-10-01 在 .183 环境 venv 实测版本：aiohttp 3.14.3 / websockets 15.0.1 /
-  #    pymysql 1.2.3 —— 上下界按实测取，不逼降级。
+  # 实测版本：aiohttp 3.14.x / websockets 15.x / pymysql 1.2.x —— 上下界按实测取。
   - "aiohttp>=3.9,<4"
   - "websockets>=12,<16"
   - "pymysql>=1.1,<2"
@@ -432,8 +412,6 @@ pip_dependencies:
   - "pymysql>=1.1,<2"
 
 external_dependencies:
-  - name: node
-    hint: "wecom 工具需要 node + wecom-cli.js；缺失时对应工具降级为占位并告警"
   - name: ffmpeg
     hint: >
       两处**可选但影响体验**：① 出站视频抽首帧做缩略图（vendor /Msg/SendVideo
@@ -441,16 +419,15 @@ external_dependencies:
       缺失时视频照发（缩略图留空）、语音降级为**文件**发送。
   - name: silk-encoder
     hint: >
-      出站语音 SILK 编码器（WPP_SILK_ENCODER_PATH，默认 /root/silk_decoder/silk/encoder）。
+      出站语音 SILK 编码器（WPP_SILK_ENCODER_PATH，默认 ~/silk_decoder/silk/encoder）。
       **缺失时出站语音一律降级为文件** —— 厂商 /Msg/SendVoice 只收 SILK，非 SILK 会被
-      静默拒收且回一个文案误导的 Code=-2。.183 当前即为此状态（无 encoder 也无 ffmpeg）。
+      静默拒收且回一个文案误导的 Code=-2。
   - name: silk-decoder
     hint: >
-      入站语音 SILK 解码器（WPP_SILK_DECODER_PATH，默认 /root/silk_decoder/silk/decoder）
+      入站语音 SILK 解码器（WPP_SILK_DECODER_PATH，默认 ~/silk_decoder/silk/decoder）
       —— 只在**厂商没给转写**时用得上：解出 PCM → 套 WAV 头 → 送 SiliconFlow 转文字。
       缺失（或 WECHATPRO_STT_API_KEY 未配）时**只降级一次 WARNING**，之后 DEBUG；
       绝不静默 —— 语音转不出字而没人知道，是这条链上最容易踩的坑。
-      .183 当前即为此状态（无 decoder 也无 key）：正文只留 ``[语音] <url>``。
 
 # 本插件不需要任何 capability 授予：
 # - 平台注册本身不走能力门（register_platform 无 capability 检查）

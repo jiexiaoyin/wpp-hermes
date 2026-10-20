@@ -1,6 +1,6 @@
 """WPP 缺失 skill direct tool 补全: wpp-history + wpp-identity。
 
-老板拍板 (2026-08-31): 所有 openclaw 迁移 skill 必须注册成 hermes direct tool,
+项目约定 (2026-08-31): 所有 openclaw 迁移 skill 必须注册成 hermes direct tool,
 model 直接调, 禁止走 terminal 跑 CLI / SQL。
 
 wpp-history  → wpp_history_search: 查微信消息历史 (wpp_messages 表)
@@ -23,36 +23,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import subprocess
 
 from .toolout import dump_capped, dump_error
 
 log = logging.getLogger(__name__)
-
-_PHONEERP_LOOKUP = "/root/.hermes/skills/phoneerp/scripts/lookup_employee.js"
-
-
-def _phoneerp_record(args: list[str]) -> dict | None:
-    """跑 phoneerp 查询脚本并取出 ``match.record``。
-
-    ⚠️ **同步函数**：调用方必须用 ``asyncio.to_thread`` 包（子进程最长 10s）。
-    旧实现在 async handler 里直接 ``subprocess.run`` —— 一次查询就把整个事件循环
-    （WS 心跳、其它并发工具、定时器）卡住最多 10 秒。任何失败都返回 ``None``：
-    这一路只是"锦上添花"的信息源，不该让主查询失败。
-    """
-    try:
-        r = subprocess.run(
-            ["node", _PHONEERP_LOOKUP, *args, "--json"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if r.returncode != 0:
-            return None
-        data = json.loads(r.stdout)
-        m = data.get("match") if isinstance(data, dict) else None
-        return m.get("record") if isinstance(m, dict) else None
-    except Exception:
-        log.debug("[WPP] phoneerp 查询失败: %s", args, exc_info=True)
-        return None
 
 
 # ------------------------------------------------------------------ 历史消息
@@ -188,39 +162,30 @@ def register(ctx, adapter_getter) -> int:
         wxid: str = "",
         account_id: str = "default",
     ) -> str:
-        """匹配昵称↔wxid (多源: 通讯录表 / 群成员表 / phoneerp 员工表)。
+        """匹配昵称↔wxid (数据源: 本地通讯录表)。
 
         Args:
             name: 昵称 / 姓名 (可选, 和 wxid 至少给一个)
             wxid: wxid (可选)
             account_id: 账号 id (默认 ``default``；多账号部署时必须指定)
         Returns:
-            JSON: [{source, wxid, nickname, remark, title, store}, ...]
+            JSON: [{source, wxid, nickname, remark}, ...]
         """
         try:
             from ..data import repo_messages as _db
             results = []
             account_id = _acct_id(account_id)
             if name:
-                # 1) 本地通讯录表
                 contacts = await asyncio.to_thread(
                     _db.search_contacts, account_id, name, limit=10)
                 for c in contacts:
                     results.append({"source": "wpp_contacts", "wxid": c.get("wxid"), "nickname": c.get("nickname"), "remark": c.get("remark")})
-                # 2) phoneerp 员工表（子进程 → to_thread，别卡事件循环）
-                rec = await asyncio.to_thread(_phoneerp_record, ["--name", name])
-                if rec:
-                    results.append({"source": "phoneerp", "wxid": rec.get("wppId"), "nickname": rec.get("wechatNickName"), "name": rec.get("name"), "title": rec.get("title"), "store": rec.get("store")})
             if wxid:
-                # 通讯录 + 群成员
                 contacts = await asyncio.to_thread(
                     _db.search_contacts, account_id, wxid, limit=5)
                 for c in contacts:
                     if c.get("wxid") == wxid or wxid in (c.get("wxid") or ""):
                         results.append({"source": "wpp_contacts", "wxid": c.get("wxid"), "nickname": c.get("nickname"), "remark": c.get("remark")})
-                rec = await asyncio.to_thread(_phoneerp_record, ["--wppId", wxid])
-                if rec:
-                    results.append({"source": "phoneerp", "wxid": rec.get("wppId"), "nickname": rec.get("wechatNickName"), "name": rec.get("name"), "title": rec.get("title"), "store": rec.get("store")})
             return dump_capped({"ok": True, "matches": results})
         except Exception as e:  # noqa: BLE001
             log.warning("[WPP] wpp_identity_lookup 失败: %s", e)
@@ -229,10 +194,10 @@ def register(ctx, adapter_getter) -> int:
     ctx.register_tool(
         name="wpp_identity_lookup",
         toolset="wechatpadpro",
-        description="匹配微信昵称↔wxid (多源: 通讯录 / 群成员 / phoneerp 员工表)。调用: wpp_identity_lookup(name='张三') 或 wpp_identity_lookup(wxid='wxid_xxx')。用于识别 '这个wxid是谁' / '张三的wxid是什么'。",
+        description="匹配微信昵称↔wxid (本地通讯录)。调用: wpp_identity_lookup(name='张三') 或 wpp_identity_lookup(wxid='wxid_xxx')。用于识别 '这个wxid是谁' / '张三的wxid是什么'。",
         schema={
             "type": "object",
-            "description": "匹配微信昵称↔wxid (多源: 通讯录 / 群成员 / phoneerp 员工表)。调用: wpp_identity_lookup(name='张三') 或 wpp_identity_lookup(wxid='wxid_xxx')。用于识别 '这个wxid是谁' / '张三的wxid是什么'。",
+            "description": "匹配微信昵称↔wxid (本地通讯录)。调用: wpp_identity_lookup(name='张三') 或 wpp_identity_lookup(wxid='wxid_xxx')。用于识别 '这个wxid是谁' / '张三的wxid是什么'。",
             "properties": {
                 "name": {"type": "string", "description": "昵称 / 姓名 (和 wxid 至少给一个)"},
                 "wxid": {"type": "string", "description": "wxid (和 name 至少给一个)"},
@@ -244,7 +209,7 @@ def register(ctx, adapter_getter) -> int:
     )
     count += 1
 
-    # ========== 3. wpp_tools_list (2026-09-01 老板拍板 — 防 '找接口痛苦') ==========
+    # ========== 3. wpp_tools_list (2026-09-01 项目约定 — 防 '找接口痛苦') ==========
     async def tools_list(domain: str = "", keyword: str = "") -> str:
         """列出本插件注册的 wpp vendor 工具 / 按域过滤 / 关键词搜索（本地查定义表，不调 vendor）。
 

@@ -24,14 +24,11 @@
 
 from __future__ import annotations
 
-import functools
-import importlib.util
 import sys
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
+from . import _hermes_stub
 
 
 class _MISSING_TYPE:
@@ -41,14 +38,14 @@ class _MISSING_TYPE:
 _MISSING = _MISSING_TYPE()
 
 
-@functools.lru_cache(maxsize=1)
 def _probe():
-    """按路径加载 ``tools/probe_registration.py``（它不是包，不能 ``import``）。"""
-    path = ROOT / "tools" / "probe_registration.py"
-    spec = importlib.util.spec_from_file_location("_probe_registration", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """返回 Hermes 空壳模块。
+
+    历史上这里按路径加载 ``tools/probe_registration.py``（内部探针）。
+    公开仓库不包含 ``tools/``，空壳已迁到 ``plugin/tests/_hermes_stub.py``，
+    测试与内部探针共用同一份清单。
+    """
+    return _hermes_stub
 
 
 @pytest.fixture(autouse=True)

@@ -11,10 +11,12 @@
 
 ## 为什么每个子步骤独立 try/except
 
-历史事故（已在 .183 复现）：旧实现把全部工具注册包在**同一个** try 里，而
+历史事故（已在真机复现）：旧实现把全部工具注册包在**同一个** try 里，而
 ``from . import wecom_tools`` 会在**模块加载期**解析 ``wecom-cli.js`` 并抛
 ``FileNotFoundError`` ⇒ 被外层 except 吞成一行 WARNING ⇒ 其后的
-**wecom 7 + wpp_extras 3 = 10 个工具全部静默不注册**。
+**wpp_extras 3 个工具也一起静默不注册**。
+（wecom/phoneerp 的包装工具已按归属迁回各自的 skill，不再由本插件注册；
+F5 的教训仍然适用于 ``extras`` / ``setup_guide``。）
 
 ⇒ 现在每个子域各自 try/except：任何单点失败不得中断后续，且失败必须在日志里可见。
 """
@@ -28,15 +30,17 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-#: 「独有能力」模块（TS 侧没有、被降级成纯 skill 的那批）。
+#: 「独有能力」模块（WPP 自身提供、不属于 vendor 端点表的那批）。
 #: ⚠️ 名字是 ``plugin/toolkit/`` **包内**的模块名（见 :func:`_register_extra` 的导入前缀）。
-#: ⚠️ 这些模块历史上在**模块导入期**解析外部 CLI（``wecom-cli.js``），
-#: 加载期抛错会被外层 except 吞掉 ⇒ 整批工具消失（F5, 10 个工具）。所以
-#: import 必须发生在**调用期**且各自隔离。模块名 → 日志标签。
+#: ⚠️ 这些模块历史上在**模块导入期**解析外部 CLI，加载期抛错会被外层
+#: except 吞掉 ⇒ 整批工具消失（F5）。所以 import 必须发生在**调用期**
+#: 且各自隔离。模块名 → 日志标签。
+#:
+#: wecom_* / phoneerp_* 已迁回各自的 skill / 插件，不再在此注册 ——
+#: 它们与 WPP 平台无关，不应随本插件发布。
 _EXTRA_TOOL_MODULES: tuple[tuple[str, str], ...] = (
-    ("phoneerp", "phoneerp"),
-    ("wecom", "wecom"),
     ("extras", "wpp_extras"),
+    ("setup_guide", "wpp_setup"),
 )
 
 #: 手写域的工具**应有条数**。这些模块的注册函数不返回计数（有一部分是生成物，

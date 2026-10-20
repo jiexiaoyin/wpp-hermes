@@ -1,7 +1,7 @@
 """注册面回归 —— **注册数 == ``plugin.yaml provides_tools``**（计划第 7 步点名的那条）。
 
 ⚠️ 本文件**只管"注册得上/名字对"**。"注册上但调不动"是另一回事（那正是 2026-10-02
-在 ``.183`` 真机抓到的 P0）—— 调用契约回归在 ``test_hermes_tool_contract.py``。
+在 ``真机`` 真机抓到的 P0）—— 调用契约回归在 ``test_hermes_tool_contract.py``。
 两件事分开，是因为它们**互相不覆盖**：注册数、逐名对账、``doctor`` 在工具全不可调用时
 照样全绿。
 
@@ -13,8 +13,8 @@ Hermes ``plugin_validate`` 的判据是**逐名比对**：实注册比声明**�
 
     旧实现把全部工具注册包在同一个 try 里，而 ``import plugin.toolkit.wecom``
     会在**模块加载期**解析 ``wecom-cli.js`` 并抛 FileNotFoundError
-    ⇒ 被外层 except 吞成一行 WARNING ⇒ 其后的 **10 个工具（wecom 7 + extras 3）
-    全部静默不注册**，日志看着完全正常。
+    ⇒ 被外层 except 吞成一行 WARNING ⇒ 其后的工具全部静默不注册，
+    日志看着完全正常。（wecom/phoneerp 包装已迁出本插件，隔离要求不变。）
 
 ⇒ 本文件钉四件事：**总数**、**无重名**、**与声明逐名一致**、**单点失败不连坐**。
 
@@ -32,7 +32,7 @@ Hermes ``plugin_validate`` 的判据是**逐名比对**：实注册比声明**�
 ## 本机为什么要空壳
 
 ``plugin/platform/adapter.py`` 模块级 ``from gateway.config import Platform``
-（Hermes 独有）。真机验收在 ``.183`` 上另跑（V3/V6），本地这份的职责是
+（Hermes 独有）。真机验收在 ``真机`` 上另跑（V3/V6），本地这份的职责是
 **在改注册代码的当下就红**，而不是等发布。
 
 ⚠️ 空壳夹具（``stubbed`` / ``_probe``）**住在 ``conftest.py``** —— 它原来在本文件里，
@@ -53,7 +53,8 @@ from .conftest import _probe
 ROOT = Path(__file__).resolve().parents[2]
 
 #: 独有能力各域的工具数（F5 丢的就是这一批）。改数=改能力面，必须是有意的。
-EXTRA_COUNTS = {"wecom": 7, "phoneerp": 4, "extras": 3}
+#: wecom_* / phoneerp_* 已迁回各自 skill，不再计入本插件。
+EXTRA_COUNTS = {"extras": 3, "setup_guide": 1}
 
 
 def _register() -> tuple[list[str], list[str]]:
@@ -74,7 +75,7 @@ def test_the_platform_registers(stubbed):
 
 
 def test_the_tool_count_is_exactly_the_declared_one(stubbed):
-    """注册数 == 期望总数（261 = wpp 250 + wecom 7 + phoneerp 4）。"""
+    """注册数 == 期望总数（WPP vendor 端点 + extras + setup_guide）。"""
     names, _ = _register()
     assert len(set(names)) == stubbed.EXPECTED_TOTAL, \
         f"注册 {len(set(names))} 个 != 期望 {stubbed.EXPECTED_TOTAL}"
@@ -112,8 +113,7 @@ def test_registered_names_match_provides_tools_exactly(stubbed):
 def test_the_unique_capabilities_are_all_there(stubbed):
     """独有能力（TS 侧被降级成纯 skill 的那批）按域逐个计数。
 
-    总数对不代表这批对：它们**恰好是** F5 里被静默丢掉的那 14 个 ——
-    漏掉它们时总数只差 14，而"少"在 Hermes 侧只是 WARN。
+    总数对不代表这批对：漏掉它们时总数只差几个，而"少"在 Hermes 侧只是 WARN。
     """
     get_adapter = lambda account_id="default": None  # noqa: E731 — 注册期用不到
     for mod_name, expected in EXTRA_COUNTS.items():
@@ -127,34 +127,34 @@ def test_the_unique_capabilities_are_all_there(stubbed):
 # ==================================================== F5：单点失败不连坐
 
 def test_one_broken_extra_module_does_not_take_the_others_down(stubbed, monkeypatch, caplog):
-    """★ F5 的直接回归：毒掉 ``wecom``，其余独有能力**照常注册**且**日志可见**。
+    """★ F5 的直接回归：毒掉 ``setup_guide``，其余独有能力**照常注册**且**日志可见**。
 
     ``sys.modules["..."] = None`` 是让 import 抛 ImportError 的标准手法
     （比替换 ``importlib.import_module`` 干净：只动这一个模块，不碰全局函数）。
     """
     names_before, _ = _register()
-    assert "plugin.toolkit.wecom" in sys.modules, "前提：它平时是能导入的"
+    assert "plugin.toolkit.setup_guide" in sys.modules, "前提：它平时是能导入的"
 
     with monkeypatch.context() as m:
-        m.setitem(sys.modules, "plugin.toolkit.wecom", None)
+        m.setitem(sys.modules, "plugin.toolkit.setup_guide", None)
         with caplog.at_level(logging.WARNING):
             names_broken, platforms = _register()
 
-    # ① 失败必须**出声**（旧实现吞成一行 WARNING 还吞掉了后续 10 个工具；
+    # ① 失败必须**出声**（旧实现吞成一行 WARNING 还吞掉了后续工具；
     #    注意：_step 是 WARNING，不是 ERROR —— 所以这里按 WARNING 断言）
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("wecom" in w for w in warnings), \
-        f"wecom 注册失败必须留痕（否则表现成「工具莫名少了 7 个」）: {warnings}"
+    assert any("wpp_setup" in w or "setup_guide" in w for w in warnings), \
+        f"setup_guide 注册失败必须留痕（否则表现成「工具莫名少了 1 个」）: {warnings}"
     assert any("注册失败" in w for w in warnings)
 
     # ② 平台不受影响
     assert platforms == ["wechatpadpro"]
 
     # ③ 其余独有能力幸存（这就是 F5 修的那一条）
-    assert len(names_broken) == len(names_before) - EXTRA_COUNTS["wecom"], \
-        "只应少了 wecom 那 7 个 —— 多丢几个说明隔离失效（F5 复发）"
-    from plugin.toolkit import extras, phoneerp        # 能被 import 到即"注册过"
-    assert extras and phoneerp
+    assert len(names_broken) == len(names_before) - EXTRA_COUNTS["setup_guide"], \
+        "只应少了 wpp_setup 那 1 个 —— 多丢几个说明隔离失效（F5 复发）"
+    from plugin.toolkit import extras        # 能被 import 到即"注册过"
+    assert extras
 
     # ④ 恢复后一切照旧（失败不是永久状态）
     names_after, _ = _register()

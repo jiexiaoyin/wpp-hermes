@@ -6,6 +6,25 @@
 
 ---
 
+## v2.1.0 — 2026-10-20
+
+面向公开分享的版本。
+
+- **新增交互式配置向导** `plugin/setup_wizard.py`：预检、逐项询问、写 `.env` 与账号
+  JSON（0600、先备份、不回显密钥），并调用 `hermes plugins enable/doctor`。
+- **新增 `wpp_setup` 工具**：Hermes 里直接查询配置状态、获取分步引导，不在聊天中
+  收集凭据。
+- **安装体验**：`plugin.yaml` 补 `WECHATPRO_API_BASE` 必填项，敏感项标 `secret: true`；
+  新增 `scripts/install.sh` / `uninstall.sh` / `check.sh` 与公开文档。
+- **厂商地址不再有默认值**：未配置 `WECHATPRO_API_BASE` 时给出明确错误，而不是
+  回落到某个固定域名。
+- **测试与生产标识解耦**：生产 wxid / 凭据指纹改由
+  `WECHATPRO_PROTECTED_WXIDS` / `WECHATPRO_PROTECTED_FINGERPRINTS` 提供；
+  测试夹具与示例统一使用占位值。
+- **拆分职责**：`wecom_*` 与 `phoneerp_*` 工具移出本插件，分别回归
+  wecom-skill 与 phoneerp skill；本插件工具面只保留 `wpp_*`（292 个）。
+- 新增 `scripts/check_public_tree.py`，CI 同时跑 lint、测试与敏感信息扫描。
+
 ---
 
 ## v2.0.3 — 2026-10-19
@@ -117,7 +136,7 @@ Hermes Python 侧重写完成，接管生产（profile `wpp-wechat`，单账号 
 - `plugin.yaml` 补 `provides_hooks: [pre_llm_call]`，doctor 不再报「hook not listed」。
 - `wpp_messages.new_msg_id` 定义漂移修复：5264 行 NULL 回填为 `#<id>` 占位后改为
   `NOT NULL DEFAULT ''`（唯一键 `uk_account_msg` 恢复对 NULL 的去重能力）。
-- 旧树 `/root/dev/wpp-hermes` 归档到 `/root/dev/_archive/wpp-hermes-legacy-20261018`。
+- 旧树 `~/dev/wpp-hermes` 归档到 `~/dev/_archive/wpp-hermes-legacy-20261018`。
 - 新增 `tools/fix_new_msg_id_drift.py`（人肉执行）与 `tools/diag_new_msg_id_dups.py`（只读诊断）。
 - 群聊触发规则定稿：**被 @ 必回**（`group_mention` 直通 agent），**其余消息交心流 judge**
   （`heartflow_candidate`）。据此移除 `requireAtMention` 死键（账号模型/适配器/示例配置/

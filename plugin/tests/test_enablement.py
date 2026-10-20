@@ -2,7 +2,7 @@
 
 ## F1 是什么（本文件存在的唯一理由）
 
-历史故障（2026-10-01 在 172.20.109.183 实测）：插件加载成功、日志有
+历史故障（2026-10-01 在 真机 实测）：插件加载成功、日志有
 ``[WPP] 平台已注册``，但 ``gateway_state.platforms = {}``、
 ``No messaging platforms enabled.`` —— **平台永远不会被启动**，而工具全都
 注册好了、doctor 也全绿。看起来"什么都没坏"，实际整条入站链路是死的。
@@ -54,7 +54,8 @@ def _clean_env(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setenv("WECHATPRO_ACCOUNTS_DIR", str(d))
     for k in ("WECHATPRO_ACCOUNTS_JSON", "WECHATPRO_AUTHCODE",
-              "WECHATPRO_HOME_CHANNEL", "WECHATPRO_HOME_CHANNEL_NAME"):
+              "WECHATPRO_HOME_CHANNEL", "WECHATPRO_HOME_CHANNEL_NAME",
+              "WECHATPRO_AGENT", "HERMES_PROFILE", "HERMES_HOME"):
         monkeypatch.delenv(k, raising=False)
     yield d
 
@@ -101,7 +102,9 @@ def test_path_3_authcode_env(_clean_env, monkeypatch):
     assert seed and "default" in seed["accounts"], "③ 必须合成 default 账号，否则平台不启用"
     acct = seed["accounts"]["default"]
     assert acct["authcodeEnv"] == "WECHATPRO_AUTHCODE"
-    assert acct["agent"] == "wpp-wechat"
+    # 不再写死 wpp-wechat：按当前 HERMES_PROFILE / HERMES_HOME 推导，
+    # 默认 profile 的用户应绑到 default（见 platform/enablement.py）。
+    assert acct["agent"] == "default"
 
 
 def test_path_4_local_account_files_are_seen(_clean_env):

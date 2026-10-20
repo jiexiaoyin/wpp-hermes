@@ -11,8 +11,8 @@
 :mod:`.jargon_tool`           ``wpp_jargon_query``（**生成物**）
 :mod:`.vendor_defs`           厂商端点表：``tools_data.py`` 的 **112** 条（**生成物**）
 :mod:`.vendor_defs_extra`     厂商端点表：``tools_data_extra.py`` 的 **107** 条（**生成物**）
-:mod:`.phoneerp` / ``.wecom`` / ``.extras``
-                              独有能力（TS 侧没有、被降级成纯 skill 的那批）
+:mod:`.extras` / ``.setup_guide``
+                              WPP 自身独有能力（历史消息 / 身份 / 安装引导）
 ============================  ==========================================================
 
 **生成物**（带生成头，禁止手改；改蓝本后重跑生成器）::
@@ -24,9 +24,9 @@
 
 1. **不做包级 eager import。** 本 ``__init__`` 故意只有文档 —— 各子模块由
    ``toolkit/registration.py`` 在**调用期**按需导入，且每个子域独立 try/except。
-   历史事故：旧实现把 import 写在模块顶层，``wecom_tools`` 在**导入期**解析外部
-   CLI 抛 ``FileNotFoundError`` ⇒ 被外层 except 吞成一行 WARNING ⇒
-   **wecom 7 + wpp_extras 3 共 10 个工具全部静默消失**（见 ``toolkit/registration.py``）。
+   历史事故：旧实现把 import 写在模块顶层，某个子域在**导入期**解析外部 CLI 抛
+   ``FileNotFoundError`` ⇒ 被外层 except 吞成一行 WARNING ⇒ 其后的
+   **wpp_extras 3 个工具也一起静默消失**（见 ``toolkit/registration.py``）。
 2. **模块级导入只能是标准库。** ``plugin_validate`` 会把 ``register()`` 在**隔离
    probe 子进程**里整体跑一遍，那个解释器**没有 aiohttp / pymysql**。
    凡是需要它们的，一律在**函数体内**导入（``core/api_client.py`` 顶层有

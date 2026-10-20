@@ -2,7 +2,7 @@
 
 ## 它挡的事故形态：**静默丢失**（本仓最贵的一类）
 
-Hermes 0.21.5 实测（``.183``）::
+Hermes 0.21.5 实测（``真机``）::
 
     agent_plugins.py:224  _discover_skills(root) 扫 <plugin_root>/skills/<child>/SKILL.md
                          子目录**没有 SKILL.md** ⇒ 直接 continue，**连一行日志都没有**
@@ -30,7 +30,7 @@ Hermes 0.21.5 实测（``.183``）::
 
 与 ``test_registration`` 同理：``gateway.*`` 只在 Hermes 运行时里存在，这里用空壳顶上。
 真机验收（``hermes plugins doctor`` 的 skills 计数 / ``skill_view()`` 能否解析）在
-``.183`` 上另跑，本地这份的职责是**在改 SKILL.md 的当下就红**。
+``真机`` 上另跑，本地这份的职责是**在改 SKILL.md 的当下就红**。
 """
 
 from __future__ import annotations
@@ -53,14 +53,14 @@ ROOT = Path(__file__).resolve().parents[2]
 SKILLS_DIR = ROOT / "skills"
 
 #: 逐字抄自 Hermes 0.21.5 ``agent/skill_utils.py``。**改这里等于改判据**，
-#: 必须同时核对 ``.183`` 上的真身（两处不一致时以真身为准）。
+#: 必须同时核对 ``真机`` 上的真身（两处不一致时以真身为准）。
 SKILL_NAME_RE = re.compile(r"^(?!.*--)[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 DESC_MIN, DESC_MAX = 1, 1024
 COMPAT_MAX = 500
 
 #: 正文里用反引号引起来、且长得像"工具名"的记号。
-TOOL_TOKEN_RE = re.compile(r"`((?:wpp|phoneerp|wecom)_[a-z0-9_]+)`")
+TOOL_TOKEN_RE = re.compile(r"`(wpp_[a-z0-9_]+)`")
 
 #: 本插件应当落位的技能全集。**删掉一整个目录**同样要红 —— 那是静默能力丢失
 #: 最彻底的一种（连"技能在"这个事实都没了）。
@@ -70,6 +70,7 @@ EXPECTED_SKILLS = {
     "wpp-friendcircle-view",
     "wpp-history",
     "wpp-identity",
+    "wpp-setup",
 }
 
 

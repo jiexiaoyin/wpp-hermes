@@ -37,6 +37,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 from ..core import credentials
@@ -48,6 +50,33 @@ PLATFORM_NAME = "wechatpadpro"
 
 _AUTHCODE_ENV = "WECHATPRO_AUTHCODE"
 _HOME_ENV = "WECHATPRO_HOME_CHANNEL"
+
+
+def default_agent_name() -> str:
+    """推导合成账号默认绑定的 agent 名。
+
+    以前写死 ``wpp-wechat``：只配一条 ``WECHATPRO_AUTHCODE`` 的新用户如果装在
+    default profile，会被绑到一个不存在的 profile。这里按当前环境推导：
+
+    1. ``WECHATPRO_AGENT``（显式覆盖）
+    2. ``HERMES_PROFILE``（多 profile 进程）
+    3. ``HERMES_HOME`` 位于 ``profiles/<name>`` ⇒ ``<name>``
+    4. ``default``
+    """
+    from ..core.env_compat import gate_env
+
+    explicit = gate_env("WECHATPRO_AGENT").strip()
+    if explicit:
+        return explicit
+    profile = os.environ.get("HERMES_PROFILE", "").strip()
+    if profile:
+        return profile
+    home = os.environ.get("HERMES_HOME", "").strip()
+    if home:
+        p = Path(home).expanduser()
+        if p.parent.name == "profiles":
+            return p.name
+    return "default"
 
 
 def is_connected(config: Any) -> bool:
@@ -101,7 +130,7 @@ def env_enablement_fn() -> dict | None:
         if not authcode:
             return None
         accounts = {"default": {
-            "agent": gate_env("WECHATPRO_AGENT") or "wpp-wechat",
+            "agent": default_agent_name(),
             "authcodeEnv": _AUTHCODE_ENV,
             "enabled": True,
         }}
