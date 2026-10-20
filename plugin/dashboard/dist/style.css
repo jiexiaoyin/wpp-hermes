@@ -1,10 +1,37 @@
-/* 微信助手控制台 — all classes are wppc- prefixed (host injects this CSS globally). */
+/* 微信助手控制台 — all classes are wppc- prefixed (host injects this CSS globally).
+ *
+ * Colors come from the host dashboard theme so the page stays readable in every
+ * theme (including the light "Nous Blue"). Do NOT use --foreground: in the
+ * default palette it is deliberately fully transparent (alpha 0) and only
+ * serves as an overlay; body text is --midground. */
 
 .wppc-page {
+  /* Local aliases, resolved once per page and inherited by descendants. */
+  --wppc-text: var(--midground, var(--midground-base, #e6e6e6));
+  --wppc-text-muted: var(--color-muted-foreground, var(--midground-base, #9aa0a6));
+  --wppc-canvas: var(--background-base, #101010);
+  --wppc-card: var(--color-card, var(--color-popover, #181818));
+  --wppc-subtle: var(--color-muted, #1c1c1c);
+  --wppc-border: var(--color-border, #333);
+  --wppc-accent: var(--color-primary, var(--midground, #58a6ff));
+  --wppc-success: var(--color-success, #3fb950);
+  --wppc-warning: var(--color-warning, #d29922);
+  --wppc-danger: var(--color-destructive, #f85149);
+  --wppc-radius: var(--theme-radius, 0.5rem);
+  --wppc-font-mono: var(--theme-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+
   padding: 20px 24px 48px;
   max-width: 1200px;
-  color: var(--foreground, #e6e6e6);
+  color: var(--wppc-text);
   font-size: 14px;
+  line-height: var(--theme-line-height, 1.55);
+}
+
+.wppc-page button,
+.wppc-page input,
+.wppc-page select,
+.wppc-page textarea {
+  font-family: inherit;
 }
 
 .wppc-top {
@@ -25,8 +52,10 @@
   gap: 8px;
 }
 
-.wppc-version { font-size: 12px; opacity: 0.55; font-weight: 400; }
-.wppc-sub { margin-top: 4px; font-size: 12px; opacity: 0.65; }
+.wppc-version,
+.wppc-sub { color: var(--wppc-text-muted); font-weight: 400; }
+.wppc-version { font-size: 12px; }
+.wppc-sub { margin-top: 4px; font-size: 12px; }
 
 .wppc-top-right {
   display: flex;
@@ -39,23 +68,39 @@
 
 .wppc-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  background: #888; display: inline-block;
+  background: var(--wppc-text-muted);
+  display: inline-block;
 }
-.wppc-dot--ok { background: #3fb950; box-shadow: 0 0 6px #3fb95088; }
+.wppc-dot--ok {
+  background: var(--wppc-success);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--wppc-success) 55%, transparent);
+}
 
 .wppc-badge {
   display: inline-block;
   padding: 2px 9px;
   border-radius: 999px;
   font-size: 12px;
-  border: 1px solid #555;
-  background: #2a2a2a;
+  color: var(--wppc-text);
+  border: 1px solid var(--wppc-border);
+  background: var(--wppc-subtle);
   white-space: nowrap;
 }
-.wppc-badge--live { border-color: #2ea04366; background: #1b3a2366; color: #64d27a; }
-.wppc-badge--delayed { border-color: #d2992266; background: #3a2f1b66; color: #e3b341; }
-.wppc-badge--stale { border-color: #f8514966; background: #3a1b1b66; color: #ff7b72; }
-.wppc-badge--unknown { opacity: 0.7; }
+/* Status is conveyed by the tint + label; text inherits the theme foreground
+   so it stays readable on both the dark palettes and the light one. */
+.wppc-badge--live {
+  border-color: color-mix(in srgb, var(--wppc-success) 55%, transparent);
+  background: color-mix(in srgb, var(--wppc-success) 14%, transparent);
+}
+.wppc-badge--delayed {
+  border-color: color-mix(in srgb, var(--wppc-warning) 55%, transparent);
+  background: color-mix(in srgb, var(--wppc-warning) 14%, transparent);
+}
+.wppc-badge--stale {
+  border-color: color-mix(in srgb, var(--wppc-danger) 55%, transparent);
+  background: color-mix(in srgb, var(--wppc-danger) 14%, transparent);
+}
+.wppc-badge--unknown { color: var(--wppc-text-muted); }
 
 .wppc-stats {
   display: grid;
@@ -64,55 +109,72 @@
   margin: 14px 0;
 }
 .wppc-stat {
-  border: 1px solid #333;
-  border-radius: 8px;
+  border: 1px solid var(--wppc-border);
+  border-radius: var(--wppc-radius);
   padding: 10px 12px;
-  background: #1c1c1c;
+  background: var(--wppc-card);
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.wppc-stat b { font-size: 18px; font-weight: 600; }
-.wppc-stat span { font-size: 11px; opacity: 0.6; }
+.wppc-stat b { font-size: 18px; font-weight: 600; color: var(--wppc-text); }
+.wppc-stat span { font-size: 11px; color: var(--wppc-text-muted); }
 
 .wppc-notice, .wppc-error, .wppc-warn {
-  border-radius: 8px;
+  border-radius: var(--wppc-radius);
   padding: 10px 14px;
   margin: 10px 0;
   font-size: 13px;
   line-height: 1.5;
+  color: var(--wppc-text);
+  border: 1px solid var(--wppc-border);
+  background: var(--wppc-subtle);
 }
-.wppc-notice--ok { border: 1px solid #2ea04366; background: #1b3a2333; }
-.wppc-notice--error, .wppc-error { border: 1px solid #f8514966; background: #3a1b1b33; }
-.wppc-notice--wait { border: 1px solid #d2992266; background: #3a2f1b33; }
-.wppc-warn { border: 1px solid #d2992255; background: #3a2f1b22; }
+.wppc-notice--ok {
+  border-color: color-mix(in srgb, var(--wppc-success) 50%, transparent);
+  background: color-mix(in srgb, var(--wppc-success) 10%, transparent);
+}
+.wppc-notice--error, .wppc-error {
+  border-color: color-mix(in srgb, var(--wppc-danger) 55%, transparent);
+  background: color-mix(in srgb, var(--wppc-danger) 10%, transparent);
+}
+.wppc-notice--wait {
+  border-color: color-mix(in srgb, var(--wppc-warning) 50%, transparent);
+  background: color-mix(in srgb, var(--wppc-warning) 10%, transparent);
+}
+.wppc-warn {
+  border-color: color-mix(in srgb, var(--wppc-warning) 50%, transparent);
+  background: color-mix(in srgb, var(--wppc-warning) 8%, transparent);
+}
 .wppc-warn ul { margin: 6px 0 0 18px; padding: 0; }
 .wppc-warn li { margin: 2px 0; }
 
 .wppc-tabs {
   display: flex;
   gap: 4px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--wppc-border);
   margin: 18px 0 14px;
   flex-wrap: wrap;
 }
 .wppc-tab {
   border: none;
   background: transparent;
-  color: inherit;
+  color: var(--wppc-text-muted);
   padding: 8px 14px;
   cursor: pointer;
   font-size: 13px;
   border-bottom: 2px solid transparent;
-  opacity: 0.7;
 }
-.wppc-tab--active { border-bottom-color: #58a6ff; opacity: 1; }
-.wppc-tab:hover { opacity: 1; }
+.wppc-tab--active {
+  color: var(--wppc-text);
+  border-bottom-color: var(--wppc-accent);
+}
+.wppc-tab:hover { color: var(--wppc-text); }
 
 .wppc-card {
-  border: 1px solid #333;
-  border-radius: 10px;
-  background: #181818;
+  border: 1px solid var(--wppc-border);
+  border-radius: calc(var(--wppc-radius) + 2px);
+  background: var(--wppc-card);
   padding: 16px 18px;
 }
 .wppc-card-head {
@@ -123,7 +185,7 @@
   flex-wrap: wrap;
   margin-bottom: 12px;
 }
-.wppc-card-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.wppc-card-head h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--wppc-text); }
 
 .wppc-grid2 {
   display: grid;
@@ -132,53 +194,58 @@
 }
 
 .wppc-field { display: flex; flex-direction: column; gap: 5px; margin: 6px 0; }
-.wppc-label { font-size: 12px; opacity: 0.75; }
-.wppc-hint { font-size: 11px; opacity: 0.55; line-height: 1.45; }
+.wppc-label { font-size: 12px; color: var(--wppc-text); }
+.wppc-hint { font-size: 11px; color: var(--wppc-text-muted); line-height: 1.45; }
 
 .wppc-input {
-  background: #101010;
-  color: inherit;
-  border: 1px solid #3a3a3a;
-  border-radius: 6px;
+  background: var(--wppc-canvas);
+  color: var(--wppc-text);
+  border: 1px solid var(--wppc-border);
+  border-radius: calc(var(--wppc-radius) - 2px);
   padding: 7px 9px;
   font-size: 13px;
-  font-family: inherit;
   outline: none;
 }
-.wppc-input:focus { border-color: #58a6ff; }
-.wppc-textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.wppc-input::placeholder { color: var(--wppc-text-muted); }
+.wppc-input:focus {
+  border-color: var(--wppc-accent);
+  outline: 2px solid color-mix(in srgb, var(--wppc-accent) 35%, transparent);
+  outline-offset: 1px;
+}
+.wppc-textarea { resize: vertical; font-family: var(--wppc-font-mono); font-size: 12px; }
 .wppc-select { min-width: 120px; }
 
 .wppc-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 6px 0; }
-.wppc-check input { width: 15px; height: 15px; accent-color: #58a6ff; }
+.wppc-check input { width: 15px; height: 15px; accent-color: var(--wppc-accent); }
 
 .wppc-features { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 4px 16px; }
-.wppc-feature { border-bottom: 1px dashed #2a2a2a; padding: 4px 0; }
+.wppc-feature { border-bottom: 1px dashed var(--wppc-border); padding: 4px 0; }
 
 .wppc-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 
 .wppc-danger {
-  border: 1px solid #3a3a3a;
-  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--wppc-warning) 50%, transparent);
+  border-radius: var(--wppc-radius);
   padding: 8px 12px;
   font-size: 12px;
   line-height: 1.5;
   margin-bottom: 10px;
-  background: #141414;
+  background: color-mix(in srgb, var(--wppc-warning) 8%, transparent);
+  color: var(--wppc-text);
 }
 
-.wppc-empty { padding: 28px; text-align: center; opacity: 0.55; font-size: 13px; }
+.wppc-empty { padding: 28px; text-align: center; color: var(--wppc-text-muted); font-size: 13px; }
 
 .wppc-table-wrap { overflow-x: auto; }
-.wppc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.wppc-table { width: 100%; border-collapse: collapse; font-size: 12px; color: var(--wppc-text); }
 .wppc-table th, .wppc-table td {
   text-align: left;
   padding: 7px 9px;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid var(--wppc-border);
   white-space: nowrap;
   max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.wppc-table th { font-weight: 600; opacity: 0.7; }
-.wppc-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.wppc-table th { font-weight: 600; color: var(--wppc-text-muted); }
+.wppc-mono { font-family: var(--wppc-font-mono); font-size: 11px; }
