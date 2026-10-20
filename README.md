@@ -154,6 +154,41 @@ hermes plugins doctor "$HERMES_HOME/plugins/wechatpadpro-platform"
 
 ---
 
+## Web 控制台（可选）
+
+插件自带一个 Hermes dashboard 页签（`/wechatpadpro`），不修改 Hermes 本体代码：
+
+- **账号状态**：真实 WS 在线状态、客户端就绪、最近一次热加载结果与快照新鲜度
+  （`live` / `delayed` / `stale` / `unknown`）。
+- **准入策略**：私聊/群策略、白/黑名单、管理员、`employeeDenyList`，并提示
+  `allowAllUsers`、空白名单等配置陷阱。
+- **进群欢迎**：开关、模式、生效群、模板、LLM 润色、@ 新成员、静默时段、批量上限。
+- **能力开关**：心流 / 好感度 / 黑话 / 风格 / TTS / 主动发言 / 小微。
+- **群活跃**：群名、成员数（厂商/本地）、近 6h–7d 收发出入站、最后同步时间。
+- **热加载**：保存后网关约 **3 秒**内重载该账号，不需要重启 Hermes；
+  写入前自动备份、原子替换、文件保持 `0600`，凭据字段结构性不可写。
+
+启用方式（只需一次）：只把 `wechatpadpro-console` 加进 **root profile** 的
+`plugins.enabled`，然后重启 `hermes-dashboard` 与网关：
+
+```yaml
+# $HERMES_HOME/config.yaml
+plugins:
+  enabled:
+    - wechatpadpro-console
+```
+
+⚠️ 控制台后端只在 **launch/root profile** 的 dashboard 上挂载。Hermes 不允许次级
+profile（如 `wpp-wechat`）运行 user 插件后端，把控制台加进 `profiles/wpp-wechat/config.yaml`
+只会出现页签而 API 404。账号本身绑定在哪个 profile 不影响控制台管理——它直接读写
+`accounts/*.json` 与插件数据库。
+
+控制台**不调用厂商 API、不重连账号、不显示也不写凭据**；`enabled` 与端点变更仍需重启
+网关。数据库统计只读，配置缺失时页面降级为“数据库不可用”，策略与开关不受影响。
+详见 [docs/configuration.md](docs/configuration.md#7-web-控制台可选)。
+
+---
+
 ## 验证
 
 ```bash

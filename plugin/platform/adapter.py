@@ -59,9 +59,11 @@ runner 管「整个平台掉线」的重连（见 ①）；:mod:`platform.inboun
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 # ── Hermes 侧（插件只在 Hermes 进程内被 import，这些必然可用）
@@ -332,6 +334,12 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         self._employee_tasks: list[asyncio.Task] = []
         #: 全员群最近一次同步结果（给 ``/whitelist status`` 看）。
         self._employee_sync_state: dict[str, dict[str, Any]] = {}
+        #: Web 控制台：账号文件 mtime watcher + 运行时状态快照（跨进程，只读）。
+        self._console_tasks: list[asyncio.Task] = []
+        self._account_mtimes: dict[str, int] = {}
+        self._reload_state: dict[str, dict[str, Any]] = {}
+        self._ws_connected_once: set[str] = set()
+        self._console_started_at: int = 0
         #: 出站白名单在 connect 时定版，热刷新（``/user add`` / 全员群同步）要用它
         #: 回到同一个 profile，而不是重新猜 ambient scope。
         self._profile_home: str | None = None
@@ -698,6 +706,9 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
                        f"检查 accounts/*.json 的凭据、enabled，以及生产身份红线的豁免 env。")
                 log.error("[WPP] %s", msg)
                 self._set_fatal_error("no_connectable_account", msg, retryable=False)
+                # 让控制台能解释"为什么什么都是灰的"，而不是只显示快照缺失。
+                self._write_console_status(
+                    self._console_snapshot("no_connectable_accounts", connected=False))
                 return False
 
             # 凭据本身（**是明文 authcode，不是指纹**）—— 对齐 Hermes 的
@@ -757,6 +768,7 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
             self._start_employee_sync(connectable)
 
             self._mark_connected()
+            self._start_console_runtime()
             log.info("[WPP] 平台已连接：%d 个账号 %s（is_reconnect=%s）",
                      len(self._clients), sorted(self._clients), is_reconnect)
             return True
@@ -773,6 +785,10 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """停 WS / 兜底 / 聚合器 / webhook / sweep，关 client。**必须幂等**（runner 可能重入）。"""
+        # 控制台快照先落一份"已断开"：下面的任务在拆 WS/client 之前被取消，若等它们
+        # 收尾再写，最后一次快照会停在最后一份"在线"状态上（UI 谎报）。
+        self._write_console_status(
+            self._console_snapshot("disconnected", connected=False))
         # ⓪ W7-6 聚合器**先 flush**：此刻缓冲区里可能躺着刚到的消息（窗口 500ms，
         #    绝大多数停机都撞得上），而它们的派发要用 client / 管线 / 心流 —— 下面
         #    每一步都在拆这些东西。**顺序反了就是停机丢消息**，且现场只表现为
@@ -855,6 +871,14 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         self._clients.clear()
         self._pipelines.clear()
         self._debounce.clear()
+
+        # ⑥ 控制台运行期：WS/client 都拆完再停（否则最后一轮快照会在 mid-teardown 写）。
+        #    快照本身在方法开头已写过 disconnected，这里只收任务。
+        for task in self._console_tasks:
+            task.cancel()
+        if self._console_tasks:
+            await asyncio.gather(*self._console_tasks, return_exceptions=True)
+        self._console_tasks.clear()
 
         self._mark_disconnected()
         log.info("[WPP] 平台已断开")
@@ -1214,6 +1238,175 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
                 self._employee_tasks.append(task)
             except Exception as exc:  # noqa: BLE001
                 log.warning("[WPP:%s] 全员群同步启动失败（不影响收发）: %s", acct.id, exc)
+
+    # ================================================================ Web 控制台
+
+    #: 账号文件 mtime 轮询间隔 —— 老板选的"约 3 秒热加载"就是它。
+    CONSOLE_SCAN_INTERVAL_SEC = 3.0
+    #: 状态快照刷新间隔（无变更时）。dashboard 侧按 15s/60s 分 live/delayed/stale。
+    CONSOLE_SNAPSHOT_INTERVAL_SEC = 5.0
+
+    def _start_console_runtime(self) -> None:
+        """起控制台的网关侧运行期任务（mtime watcher + 状态快照）。
+
+        与 sweep / 群名同步不同，这里只有 **1** 个任务：它既看账号文件，也定时写快照。
+        幂等 —— runner 重连时 ``connect()`` 会再调一次，已有活任务就不重复起。
+        """
+        live = [t for t in self._console_tasks if not t.done()]
+        self._console_tasks = live
+        if live:
+            return
+        try:
+            if not self._console_started_at:
+                self._console_started_at = int(time.time())
+            # 首轮只记录 mtime、不重载：connect() 刚解析过这些账号，再 reload 是白跑。
+            self._account_mtimes.clear()
+            task = asyncio.create_task(self._console_loop(), name="wpp-console-runtime")
+            self._console_tasks.append(task)
+            log.info("[WPP] 控制台运行期已启动（账号文件热加载 %.0fs / 快照 %.0fs）",
+                     self.CONSOLE_SCAN_INTERVAL_SEC, self.CONSOLE_SNAPSHOT_INTERVAL_SEC)
+        except Exception as exc:  # noqa: BLE001 —— 控制台起不来不能影响收发
+            log.warning("[WPP] 控制台运行期启动失败（不影响收发）: %s", exc)
+
+    async def _console_loop(self) -> None:
+        """每 3s 看账号文件 mtime，变化就 ``clear_overrides`` + ``reload_account``。
+
+        为什么是 mtime 而不是命令/消息总线：dashboard 是**另一个进程**，改了文件只能
+        通过文件系统通知网关；3 秒轮询比 inotify 简单，且账号文件极少（个位数）。
+        除 ``CancelledError`` 外一律吞掉继续 —— 一次写盘失败不能永久杀死热加载。
+        """
+        last_snapshot = 0.0
+        while True:
+            try:
+                changed = self._console_scan_accounts()
+                now = time.time()
+                if changed or now - last_snapshot >= self.CONSOLE_SNAPSHOT_INTERVAL_SEC:
+                    self._write_console_status(
+                        self._console_snapshot("running", connected=True))
+                    last_snapshot = now
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 —— 下一轮继续
+                log.warning("[WPP] 控制台运行期 tick 失败（下一轮继续）: %s", exc)
+            await asyncio.sleep(self.CONSOLE_SCAN_INTERVAL_SEC)
+
+    def _console_scan_accounts(self) -> bool:
+        """扫描本实例服务的账号文件；有变化则热重载。返回**是否发生重载**。"""
+        from ..core import overrides
+
+        try:
+            base = accounts_mod.accounts_dir()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[WPP] 控制台读不到账号目录: %s", exc)
+            return False
+
+        changed = False
+        for aid in sorted(self._clients):
+            path = base / f"{aid}.json"
+            try:
+                mtime_ns = int(path.stat().st_mtime_ns)
+            except OSError:
+                # 账号文件被删/改名：不重载（内存里那份继续用），等运维处理。
+                continue
+            previous = self._account_mtimes.get(aid)
+            self._account_mtimes[aid] = mtime_ns
+            if previous is None or previous == mtime_ns:
+                continue
+
+            # 盘上的值优先：残留的内存覆盖会把它影子掉（见 core/overrides 模块注释）。
+            overrides.clear_overrides(aid)
+            ok = False
+            error: str | None = None
+            try:
+                ok = bool(self.reload_account(aid))
+            except Exception as exc:  # noqa: BLE001 —— 已落盘，失败只报
+                error = str(exc)
+            if not ok and error is None:
+                error = "配置解析失败（详见网关日志）"
+            self._reload_state[aid] = {
+                "at": int(time.time()), "ok": ok, "error": error,
+            }
+            changed = True
+            if ok:
+                log.info("[WPP:%s] 控制台写盘后热加载完成（mtime=%d）", aid, mtime_ns)
+            else:
+                log.warning("[WPP:%s] 控制台写盘后热加载失败（沿用内存里那份）: %s",
+                            aid, error)
+        return changed
+
+    def _console_snapshot(self, reason: str, connected: bool) -> dict[str, Any]:
+        """当前运行时状态快照（**不含凭据/策略值**）。"""
+        from ..core import console_admin
+
+        accounts: dict[str, dict[str, Any]] = {}
+        for aid in sorted(self._clients):
+            ws = self._ws.get(aid)
+            ws_connected = bool(getattr(ws, "connected", False)) and connected
+            if ws_connected:
+                self._ws_connected_once.add(aid)
+            state = self._reload_state.get(aid) or {}
+            accounts[aid] = {
+                "ws_connected": ws_connected,
+                "ws_connected_once": aid in self._ws_connected_once,
+                "client_ready": aid in self._clients,
+                "config_mtime_ns": self._account_mtimes.get(aid, 0),
+                "last_reload_at": int(state.get("at") or 0),
+                "last_reload_ok": state.get("ok"),
+                "last_reload_error": state.get("error"),
+            }
+        return console_admin.build_status_snapshot(
+            profile=self._console_profile_label(),
+            pid=os.getpid(),
+            started_at=self._console_started_at,
+            connected=connected,
+            reason=reason,
+            accounts=accounts,
+        )
+
+    def _console_profile_label(self) -> str:
+        """网关进程服务的 profile 名（仅用于展示，不参与任何判定）。"""
+        env = str(os.environ.get("HERMES_PROFILE") or "").strip()
+        if env:
+            return env
+        home = str(self._profile_home or "").strip()
+        if home:
+            parts = Path(home).parts
+            if "profiles" in parts:
+                idx = parts.index("profiles")
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+        return "default"
+
+    def _console_status_path(self) -> Path:
+        """快照路径：``$HERMES_HOME/plugin-data/wechatpadpro/console-status.json``。
+
+        ⚠️ 必须在**插件树外**：``sync.sh --delete`` 会清掉插件目录里多出来的文件，
+        快照放里面每次部署就没了；``plugin-data`` 是 Hermes 的持久数据区。
+        """
+        home = Path(os.environ.get("HERMES_HOME") or "~/.hermes").expanduser()
+        return home / "plugin-data" / "wechatpadpro" / "console-status.json"
+
+    def _write_console_status(self, payload: dict[str, Any]) -> None:
+        """原子写快照（0600）。**绝不抛**：写不了只影响 dashboard 显示，不能影响收发。"""
+        path = self._console_status_path()
+        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(path.parent, 0o700)
+            data = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+            os.chmod(path, 0o600)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            log.warning("[WPP] 控制台状态快照写入失败（不影响收发）: %s", exc)
 
     # ================================================================ 入站
 

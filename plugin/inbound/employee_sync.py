@@ -210,29 +210,45 @@ async def sync_once(
         return {"ok": False, "error": "; ".join(errors), "groups": groups,
                 "members": 0, "added": 0, "removed": 0, "changed": False}
 
-    current = [str(x) for x in (raw.get("allowFrom") or [])]
-    previous_auto = [str(x) for x in (raw.get("employeeAllowFrom") or [])]
-    new_allow, new_auto = plan_sync(current, previous_auto, found, deny)
-    changed = new_allow != current or new_auto != previous_auto
-    added = [x for x in new_allow if x not in current]
-    removed = [x for x in previous_auto if x not in new_allow]
+    # ⚠️ 读-规划-写必须在同一个跨进程锁里完成：拉成员是网络动作（可能几秒），
+    #    期间控制台可能刚改过 allowFrom；拿旧 raw 规划会把那次改动覆盖掉。
+    applied: dict[str, Any] = {
+        "changed": False, "added": [], "removed": [], "members": 0,
+    }
 
-    if changed:
-        account_store.write_account_keys(account_id, {
-            "allowFrom": new_allow,
-            "employeeAllowFrom": new_auto,
-        })
-        if adapter is not None:
-            try:
-                adapter.reload_account(account_id)
-            except Exception as exc:  # noqa: BLE001 —— 已落盘，失败只报
-                log.warning("[WPP:%s] 全员群同步后热重载失败（重启后生效）: %s",
-                            account_id, exc)
+    def _mutate(data: dict[str, Any]) -> dict[str, Any]:
+        current = [str(x) for x in (data.get("allowFrom") or [])]
+        previous_auto = [str(x) for x in (data.get("employeeAllowFrom") or [])]
+        new_allow, new_auto = plan_sync(current, previous_auto, found, deny)
+        applied.update(
+            changed=new_allow != current or new_auto != previous_auto,
+            added=[x for x in new_allow if x not in current],
+            removed=[x for x in previous_auto if x not in new_allow],
+            members=len(new_auto),
+        )
+        data["allowFrom"] = new_allow
+        data["employeeAllowFrom"] = new_auto
+        return data
+
+    _data, _mtime = account_store.update_account(
+        account_id, _mutate,
+        changed_keys={"allowFrom", "employeeAllowFrom"},
+        skip_if_unchanged=True)
+    changed = bool(applied["changed"])
+    added = list(applied["added"])
+    removed = list(applied["removed"])
+    if changed and adapter is not None:
+        try:
+            adapter.reload_account(account_id)
+        except Exception as exc:  # noqa: BLE001 —— 已落盘，失败只报
+            log.warning("[WPP:%s] 全员群同步后热重载失败（重启后生效）: %s",
+                        account_id, exc)
     # 无变化也留一行：否则「任务到底跑没跑」只能靠猜（启动日志里看不出来）。
     log.info("[WPP:%s] 全员群同步：成员 %d 人，新增 %d，移除 %d%s",
-             account_id, len(new_auto), len(added), len(removed),
+             account_id, int(applied["members"]), len(added), len(removed),
              "" if changed else "（无变化）")
-    return {"ok": True, "error": "", "groups": groups, "members": len(new_auto),
+    return {"ok": True, "error": "", "groups": groups,
+            "members": int(applied["members"]),
             "added": len(added), "removed": len(removed), "changed": changed}
 
 

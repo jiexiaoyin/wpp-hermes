@@ -254,8 +254,12 @@ def test_the_file_ends_up_mode_600(adir, bdir):
 def test_no_temp_file_is_left_behind(adir, bdir):
     _write(adir, "default", _cfg())
     S.write_account_key("default", "heartflow", {"enabled": True})
-    leftovers = [f.name for f in adir.iterdir() if f.name != "default.json"]
+    # ``.locks/`` 是跨进程 flock 的稳定锁文件目录（有意保留，已被 sync/check/回滚排除）；
+    # 这里只断言**临时文件**没残留。
+    leftovers = [f.name for f in adir.iterdir()
+                 if f.name not in ("default.json", S.LOCK_DIR_NAME)]
     assert leftovers == [], f"临时文件没清干净: {leftovers}"
+    assert (adir / S.LOCK_DIR_NAME / "default.lock").is_file()
 
 
 def test_a_backup_of_the_previous_content_is_kept(adir, bdir):

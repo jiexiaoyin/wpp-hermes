@@ -1,0 +1,184 @@
+/* 微信助手控制台 — all classes are wppc- prefixed (host injects this CSS globally). */
+
+.wppc-page {
+  padding: 20px 24px 48px;
+  max-width: 1200px;
+  color: var(--foreground, #e6e6e6);
+  font-size: 14px;
+}
+
+.wppc-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.wppc-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.wppc-version { font-size: 12px; opacity: 0.55; font-weight: 400; }
+.wppc-sub { margin-top: 4px; font-size: 12px; opacity: 0.65; }
+
+.wppc-top-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.wppc-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+
+.wppc-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #888; display: inline-block;
+}
+.wppc-dot--ok { background: #3fb950; box-shadow: 0 0 6px #3fb95088; }
+
+.wppc-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid #555;
+  background: #2a2a2a;
+  white-space: nowrap;
+}
+.wppc-badge--live { border-color: #2ea04366; background: #1b3a2366; color: #64d27a; }
+.wppc-badge--delayed { border-color: #d2992266; background: #3a2f1b66; color: #e3b341; }
+.wppc-badge--stale { border-color: #f8514966; background: #3a1b1b66; color: #ff7b72; }
+.wppc-badge--unknown { opacity: 0.7; }
+
+.wppc-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+.wppc-stat {
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #1c1c1c;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wppc-stat b { font-size: 18px; font-weight: 600; }
+.wppc-stat span { font-size: 11px; opacity: 0.6; }
+
+.wppc-notice, .wppc-error, .wppc-warn {
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 10px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.wppc-notice--ok { border: 1px solid #2ea04366; background: #1b3a2333; }
+.wppc-notice--error, .wppc-error { border: 1px solid #f8514966; background: #3a1b1b33; }
+.wppc-notice--wait { border: 1px solid #d2992266; background: #3a2f1b33; }
+.wppc-warn { border: 1px solid #d2992255; background: #3a2f1b22; }
+.wppc-warn ul { margin: 6px 0 0 18px; padding: 0; }
+.wppc-warn li { margin: 2px 0; }
+
+.wppc-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid #333;
+  margin: 18px 0 14px;
+  flex-wrap: wrap;
+}
+.wppc-tab {
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+  opacity: 0.7;
+}
+.wppc-tab--active { border-bottom-color: #58a6ff; opacity: 1; }
+.wppc-tab:hover { opacity: 1; }
+
+.wppc-card {
+  border: 1px solid #333;
+  border-radius: 10px;
+  background: #181818;
+  padding: 16px 18px;
+}
+.wppc-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.wppc-card-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+
+.wppc-grid2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px 18px;
+}
+
+.wppc-field { display: flex; flex-direction: column; gap: 5px; margin: 6px 0; }
+.wppc-label { font-size: 12px; opacity: 0.75; }
+.wppc-hint { font-size: 11px; opacity: 0.55; line-height: 1.45; }
+
+.wppc-input {
+  background: #101010;
+  color: inherit;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  padding: 7px 9px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+.wppc-input:focus { border-color: #58a6ff; }
+.wppc-textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.wppc-select { min-width: 120px; }
+
+.wppc-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 6px 0; }
+.wppc-check input { width: 15px; height: 15px; accent-color: #58a6ff; }
+
+.wppc-features { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 4px 16px; }
+.wppc-feature { border-bottom: 1px dashed #2a2a2a; padding: 4px 0; }
+
+.wppc-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+.wppc-danger {
+  border: 1px solid #3a3a3a;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+  background: #141414;
+}
+
+.wppc-empty { padding: 28px; text-align: center; opacity: 0.55; font-size: 13px; }
+
+.wppc-table-wrap { overflow-x: auto; }
+.wppc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.wppc-table th, .wppc-table td {
+  text-align: left;
+  padding: 7px 9px;
+  border-bottom: 1px solid #2a2a2a;
+  white-space: nowrap;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wppc-table th { font-weight: 600; opacity: 0.7; }
+.wppc-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }

@@ -61,3 +61,12 @@ def set_override(account_id: str, key: str, value) -> None:
 
 def clear_override(account_id: str, key: str) -> None:
     _runtime_overrides.setdefault(account_id, {}).pop(key, None)
+
+
+def clear_overrides(account_id: str) -> None:
+    """清掉该账号的**全部**内存覆盖。
+
+    跨进程热加载（dashboard 写盘 → 网关 watcher）看不到对方进程里残留的覆盖；
+    重载前整体清一遍，保证盘上的值不会被 ③ 层影子掉。
+    """
+    _runtime_overrides.pop(account_id, None)

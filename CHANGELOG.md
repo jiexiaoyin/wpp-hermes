@@ -6,6 +6,34 @@
 
 ---
 
+## v2.3.0 — 2026-10-20
+
+Web 控制台（不修改 Hermes 本体代码）。
+
+- **Dashboard 页签**：`/wechatpadpro`，由 Hermes 官方插件机制加载
+  （`dashboard/manifest.json` + `dashboard/plugin_api.py` + 纯 IIFE 前端）。
+  只在 **root/launch profile** 启用 `wechatpadpro-console`；次级 profile 的 user
+  插件后端由 Hermes 拒绝挂载（API 404），页签会明确提示切回 default。
+- **账号状态**：网关每 5 秒写一份运行时快照
+  （`$HERMES_HOME/plugin-data/wechatpadpro/console-status.json`，0600），包含真实
+  WS 连接、客户端就绪、最近热加载结果；控制台按 15s/60s 区分 live/delayed/stale，
+  快照缺失或过期时显示 unknown，不把旧状态当在线。控制台**不调用厂商 API**。
+- **准入 / 欢迎语 / 能力开关编辑**：严格枚举与名单校验（`@chatroom` 归属、上限、
+  `quietHours` 只收 0–23 整数、`maxBatch` 1–20），section 增量合并保留本树未建模
+  的同级键；`heartflow` 未配 model 时开关不可用。
+- **3 秒热加载**：网关侧 mtime watcher（3s）发现账号文件变化后
+  `clear_overrides` + `reload_account`，无需重启 Hermes；UI 对比快照
+  `config_mtime_ns` 显示「已热加载」。
+- **跨进程写锁**：`account_store.update_account()` 在进程锁 + `flock` 内完成
+  读 → mutate → 备份 → 原子替换 → 清同键覆盖；控制台与全员群同步并发写不再
+  互相覆盖。锁文件在 `accounts/.locks/`（已被 sync/check/回滚排除）。
+- **群活跃统计**：新增只读 `data/repo_console.py`（三条单表查询 + Python 合并，
+  12 秒缓存）；数据库不可用时降级为 `db_available:false`。
+- **凭据边界**：控制台视图按白名单拼装，凭据字段结构性不出现；写路径拒绝改动
+  `authcode` / `tokenKey` / `webhookSecret` / `webhookPathToken`。
+
+---
+
 ## v2.2.0 — 2026-10-20
 
 群成员变动与进群欢迎语。

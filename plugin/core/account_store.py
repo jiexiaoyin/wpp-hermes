@@ -45,14 +45,21 @@ INVARIANT: W6 —— 命令面改账号配置只有本模块一条路：读原�
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+try:  # POSIX；Windows 上降级为只持进程锁（本插件的运行环境是 Linux）
+    import fcntl
+except ImportError:  # pragma: no cover - 非 Linux
+    fcntl = None  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
 
@@ -64,8 +71,11 @@ FORBIDDEN_KEYS = frozenset({
 })
 
 #: 命令写回是**低频**动作（人手工敲一条命令），但可能撞上 sweep / 工具线程 ⇒ 加锁。
-#: 进程内锁足够：同一份账号文件只有一个网关进程在写。
+#: 进程内锁只保护本进程；**跨进程**（dashboard 控制台 vs 网关）由 ``flock`` 补足。
 _LOCK = threading.Lock()
+
+#: 跨进程锁文件所在的子目录（在 ``accounts/`` 下，已被 sync / check / rollback 排除）。
+LOCK_DIR_NAME = ".locks"
 
 #: 备份目录的 env 覆盖（测试用；运维也可以指到别处）。
 BACKUP_DIR_ENV = "WECHATPRO_ACCOUNT_BACKUP_DIR"
@@ -152,6 +162,14 @@ def write_account_keys(account_id: str, updates: dict[str, Any]) -> dict[str, An
     加进去、这次已退群"的人）。分两次写会出现「名单已变、台账没变」的中间态，
     下次同步就会把手工加的人误判成自动项。
     """
+    cleaned = _clean_updates(updates)
+    data, _mtime_ns = update_account(
+        account_id, lambda raw: {**raw, **cleaned},
+        changed_keys=set(cleaned), log_keys=set(cleaned))
+    return data
+
+
+def _clean_updates(updates: dict[str, Any]) -> dict[str, Any]:
     cleaned: dict[str, Any] = {}
     for key, value in (updates or {}).items():
         k = str(key or "").strip()
@@ -164,18 +182,94 @@ def write_account_keys(account_id: str, updates: dict[str, Any]) -> dict[str, An
         cleaned[k] = value
     if not cleaned:
         raise AccountWriteError("没有要写的键")
+    return cleaned
 
-    with _LOCK:
+
+def update_account(
+    account_id: str,
+    mutate: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    changed_keys: set[str] | None = None,
+    log_keys: set[str] | None = None,
+    skip_if_unchanged: bool = False,
+) -> tuple[dict[str, Any], int]:
+    """在**跨进程独占锁**内完成 读 → mutate → 备份 → 原子写 → 清同键覆盖。
+
+    返回 ``(写入后的 dict, st_mtime_ns)``。``mutate`` 必须返回 dict；它拿到的是
+    **刚读出来的盘上最新内容**（不是调用方之前读到的那份）—— 这是 dashboard 与
+    网关命令并发写时"各写各的键、后写覆盖前写"的根治点。
+
+    ``changed_keys`` 用于清内存覆盖；不传时按 mutate 前后实际变化的顶层键计算。
+    ``log_keys`` 只用于日志（**只记键名，不记值**）。
+    """
+    with _LOCK, _cross_process_lock(account_id):
         path = account_path(account_id)
         data = read_account_json(account_id)          # 先读（读不到就不会写）
+        updated = mutate(dict(data))
+        if not isinstance(updated, dict):
+            raise AccountWriteError("mutate 必须返回 dict")
+        for key in FORBIDDEN_KEYS:
+            # 凭证键可以原样保留，但**任何改动**都拒绝（结构性不可写）。
+            if updated.get(key) != data.get(key):
+                raise AccountWriteError(
+                    f"拒绝写凭证键 {key!r}：它只从 env（<键>Env / WECHATPRO_*）或厂商面板来")
+        actual_changed = {k for k in set(data) | set(updated)
+                          if data.get(k) != updated.get(k)}
+        if changed_keys is None:
+            changed_keys = actual_changed
+        if skip_if_unchanged and not actual_changed:
+            return dict(data), _mtime_ns(path)
         backup = _backup(path)                        # 再备份（备不了就不写）
-        data.update(cleaned)
-        _atomic_write(path, data)
-        for k in cleaned:
+        _atomic_write(path, updated)
+        for k in changed_keys:
             _clear_shadow_override(account_id, k)
         log.info("[WPP:%s] 账号配置已写回：%s（备份 %s）",
-                 account_id, ",".join(sorted(cleaned)), backup)
-        return dict(data)
+                 account_id, ",".join(sorted(log_keys or changed_keys)) or "-", backup)
+        return dict(updated), _mtime_ns(path)
+
+
+def _mtime_ns(path: Path) -> int:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return int(time.time() * 1_000_000_000)
+
+
+@contextlib.contextmanager
+def _cross_process_lock(account_id: str):
+    """``accounts/.locks/<id>.lock`` 上的独占 ``flock``（非 Linux 降级为空操作）。
+
+    为什么锁一个**稳定路径**而不是账号 JSON 本身：``_atomic_write`` 用
+    ``os.replace`` 换 inode，锁旧 inode 等于没锁。``accounts/`` 整目录已被
+    ``sync.sh`` / ``--check`` / 回滚排除，锁文件不会进部署树。
+    """
+    path = account_path(account_id)
+    if fcntl is None:
+        yield
+        return
+    base = path.parent
+    if not base.is_dir():
+        # 与 read_account_json 的失败口径一致：不为了拿锁去凭空造账号目录。
+        raise AccountWriteError(f"账号目录不存在：{base}")
+    lock_dir = base / LOCK_DIR_NAME
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(lock_dir, 0o700)
+    except OSError as exc:
+        raise AccountWriteError(f"锁目录建不了：{lock_dir}: {exc}") from exc
+    lock_path = lock_dir / f"{path.stem}.lock"
+    try:
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise AccountWriteError(f"锁文件打不开：{lock_path}: {exc}") from exc
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _clear_shadow_override(account_id: str, key: str) -> None:

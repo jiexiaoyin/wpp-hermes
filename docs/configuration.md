@@ -300,3 +300,64 @@ GRANT ALL PRIVILEGES ON wechatpro.* TO 'wechatpro'@'127.0.0.1';
   一个空 SQLite。
 - 测试请使用以 `_test` 结尾的库名，插件和测试护栏都会拒绝其他库名（SQLite 测试
   只用临时文件）。
+
+---
+
+## 7. Web 控制台（可选）
+
+插件自带 Hermes dashboard 页签 `/wechatpadpro`，由 Hermes 官方插件机制加载
+（`dashboard/manifest.json` + `dashboard/plugin_api.py`），**不修改 Hermes 本体代码**。
+
+### 启用
+
+只把 `wechatpadpro-console` 加入 **root profile** 的 `plugins.enabled`：
+
+```yaml
+# $HERMES_HOME/config.yaml
+plugins:
+  enabled:
+    - wechatpadpro-console
+```
+
+然后重启 `hermes-dashboard`（plugin_api 只在启动时挂载）与网关（加载账号文件 watcher）：
+
+```bash
+systemctl restart hermes-dashboard
+hermes-gw-restart
+```
+
+访问 dashboard 的「微信助手控制台」页签。账号绑定在哪个 profile 不影响控制台——
+它直接读写 `accounts/*.json` 与插件数据库。
+
+⚠️ **不要**把 `wechatpadpro-console` 加到 `profiles/wpp-wechat/config.yaml`：
+Hermes 的次级 profile 只允许运行该 profile 自己的 bundled 插件后端，user 插件 API
+会一律 404（页签出现但接口不可用）。控制台必须从 launch/root profile 使用。
+
+### 能做什么
+
+| 区域 | 内容 |
+|---|---|
+| 账号状态 | 真实 WS 连接（`WppWsClient.connected`）、客户端就绪、最近热加载结果、快照新鲜度（`live` ≤15s / `delayed` ≤60s / `stale` / `unknown`） |
+| 准入策略 | `dmPolicy`、`groupPolicy`、`allowFrom`、`blacklistUsers`、`groupAllowFrom`、`blacklistGroups`、`adminUsers`、`employeeDenyList` |
+| 进群欢迎 | `enabled` / `mode` / `groups` / `template` / `llmPolish` / `mention` / `quietHours` / `maxBatch` |
+| 能力开关 | `heartflow` / `affection` / `jargon` / `style` / `tts` / `proactive` / `xiaoweiEnabled` |
+| 群活跃 | 群名、厂商与本地成员数、近 6h–7d 入/出站、最后同步时间（只读） |
+
+### 生效方式
+
+- 保存后写账号 JSON（先备份、原子替换、`0600`，凭证键结构性不可写），网关每 **3 秒**
+  检查 `accounts/*.json` 的 mtime，变化则清内存覆盖并调用 `reload_account(id)`。
+- UI 会在状态快照的 `config_mtime_ns` 追上写入值后显示「已热加载」。
+- `enabled`、凭据、API 端点不在热加载范围，改动仍需重启网关。
+
+### 安全边界
+
+- 账号视图是**白名单**拼出来的：`authcode` / `tokenKey` / `webhookSecret` /
+  `webhookPathToken` 不出现在任何响应里；写入路径也会拒绝改动这些键。
+- 控制台**不调用厂商 API**、不触发 `/Msg/Sync`、不重连账号；在线状态来自网关写的
+  快照 `$HERMES_HOME/plugin-data/wechatpadpro/console-status.json`（0600）。
+- 群统计对插件数据库**只读**；每个 handler 用完即关连接，数据库不可用时返回
+  `db_available:false`，不影响策略与开关。
+- dashboard 进程没有网关的 `WECHATPRO_*`，控制台只从 `$HERMES_HOME/.env`（及
+  `profiles/*/.env`）预加载 **DB 相关**变量。root 与 `wpp-wechat` 的
+  `WECHATPRO_DB_*` 必须一致，否则控制台会查另一个库。
