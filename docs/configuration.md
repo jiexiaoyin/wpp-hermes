@@ -195,9 +195,24 @@ profile、两台机器或两个测试进程；后连接的一方会把前一方�
   "tts": {"enabled": false, "provider": "tokenplan"},
   "proactive": {"enabled": false, "allowFrom": []},
   "debounceMerge": {"enabled": false, "maxChars": 2000},
-  "spectre": {"quoteHint": false}
+  "spectre": {"quoteHint": false},
+  "joinWelcome": {
+    "enabled": false,
+    "mode": "allowlist",
+    "groups": [],
+    "template": "欢迎 @{name} 加入{group}！",
+    "llmPolish": true,
+    "mention": true,
+    "quietHours": [],
+    "maxBatch": 3
+  }
 }
 ```
+
+**`joinWelcome`（进群欢迎语）**：默认关闭；`mode` 取 `allowlist` / `blocklist` /
+`all`，未知值回落 `allowlist`。`{name}` 为新人昵称（多人用「、」连接），`{group}`
+为群名。`llmPolish` 只在有群画像时生效，失败回落模板原文；`maxBatch` 防止首次
+同步 / 清表把全群欢迎一遍。详见 [features.md](features.md#10-成员变动识别与进群欢迎语)。
 
 - **heartflow**：群聊里判断是否主动搭话，遵循白名单、预算、静默段。
   启用时必须配置 `heartflow.model`；判定模型密钥走 `JUDGE_API_KEY`
