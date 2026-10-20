@@ -275,15 +275,18 @@ def test_the_wxid_fallback_is_last_and_is_announced() -> None:
 
 
 def test_the_fall_through_check_is_repeated_at_every_level() -> None:
-    """四道 ``if not name or name == fromusr`` —— 钉**级数与兜底口径**（见模块 docstring）。
+    """五道 ``if not name or name == fromusr`` —— 钉**级数与兜底口径**（见模块 docstring）。
 
     少一道不等于坏（下一级会覆盖），但"某一级没有兜底口径"意味着它的取值会**越过**
     "名称等于 wxid 就当没有名称"这条规则直接进前缀 ⇒ ``@wxid_xxx``。
+
+    2026-10-20 加第五道：**群成员表**（在通讯录之前）。华为群实测 ``chenli5211013``
+    表里就有昵称「何必」，但五级链漏了这张表，一路退到 ``@chenli5211013``。
     """
     qp = _methods()["_quote_prefix"]
     guards = [n for n in ast.walk(qp) if isinstance(n, ast.If)
               and ast.unparse(n.test) == "not name or name == fromusr"]
-    assert len(guards) == 4, f"兜底判据出现 {len(guards)} 次（应为 4，即四级各自一道）"
+    assert len(guards) == 5, f"兜底判据出现 {len(guards)} 次（应为 5，即五级各自一道）"
 
 
 # ============================================ 三、昵称来源：联系人表 + 厂商

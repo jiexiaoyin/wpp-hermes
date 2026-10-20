@@ -2506,15 +2506,17 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
                             *, db_name: str = "") -> str:
         """群聊引用回复的 ``@被回复人 `` 前缀（**仅群聊**才有）。
 
-        ``display_name`` 五级优先（第 1/2 级对齐旧 ``_send_quote`` 与 TS
-        ``send/quote-reply.ts`` 的 ``displayName``；第 3/4 级是本树的本地化补充）：
+        ``display_name`` 六级优先（第 1/2 级对齐旧 ``_send_quote`` 与 TS
+        ``send/quote-reply.ts`` 的 ``displayName``；第 3/4/5 级是本树的本地化补充）：
 
         1. ``metadata.quote_display_name`` —— 微信引用消息自带，最准（群友也准）
         2. **被引用消息行的 ``peer_name``**（``db_name``，TS 的
            ``paramsFromNicknameFallback``）
-        3. **DB 联系人昵称**（``repo_messages.get_contact`` 的 ``nickname``/``remark``）
-        4. vendor ``/Friend/GetContractDetail``（群友非联系人也能查）
-        5. ``wxid`` 兜底
+        3. **群成员表 ``wpp_chatroom_members``** —— 群昵称比通讯录更贴当下，
+           且 300s 缓存，几乎零成本
+        4. **DB 联系人昵称**（``repo_messages.get_contact`` 的 ``nickname``/``remark``）
+        5. vendor ``/Friend/GetContractDetail``（群友非联系人也能查）
+        6. ``wxid`` 兜底
 
         ⚠️ **2026-10-03 更正一句旧注释**：这里原来写着"第 2 级改成查联系人表，语义等价
         且更省"—— 那是**错的**。真机上（``真机``）``wpp_contacts`` / ``wpp_chatrooms`` /
@@ -2535,6 +2537,12 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
         if not name or name == fromusr:
             name = str(db_name or "").strip()
         if not name or name == fromusr:
+            # 群成员表（**群昵称**）：比通讯录更贴当下，比 vendor 实时查便宜
+            # （``session_title`` 有 300s 进程内缓存）。2026-10-20 华为群实测：
+            # 这一级缺失时 @ 出去的是 ``@chenli5211013``，而表里就有昵称「何必」。
+            name = await asyncio.to_thread(
+                self._group_member_name, acct.id, peer_id, fromusr)
+        if not name or name == fromusr:
             name = await asyncio.to_thread(self._contact_name, acct.id, fromusr)
         if not name or name == fromusr:
             name = await self._resolve_display_name(acct, client, fromusr)
@@ -2545,6 +2553,17 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
                      acct.id, fromusr)
             name = fromusr
         return quote_ref.build_mention_prefix(peer_id, name, fromusr)
+
+    @staticmethod
+    def _group_member_name(account_id: str, chatroom_id: str, wxid: str) -> str:
+        """群成员在**该群**里的昵称（``wpp_chatroom_members``，300s 缓存）。"""
+        try:
+            from ..inbound import session_title
+            return session_title.group_member_name(account_id, chatroom_id, wxid) or ""
+        except Exception as exc:  # noqa: BLE001 —— 昵称只是装饰
+            log.debug("[WPP:%s] 群成员昵称解析失败 %s/%s: %s",
+                      account_id, chatroom_id, wxid, exc)
+            return ""
 
     @staticmethod
     def _contact_name(account_id: str, wxid: str) -> str:
