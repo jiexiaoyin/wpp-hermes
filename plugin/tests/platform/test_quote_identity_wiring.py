@@ -164,8 +164,14 @@ def test_the_prefix_reaches_the_xml_and_nowhere_else() -> None:
                 for t in n.targets if isinstance(t, ast.Name) and t.id == "quote_text"]
     assert assigned == ["f'{prefix}{chunk}'.strip()"], assigned
     xml = _one(chunk, "build_quote_reply_xml")
-    assert _kv(xml) == {"reply_content": "quote_text",
-                        "svrid": "svrid", "fromusr": "fromusr"}, _kv(xml)
+    # ``displayname`` 是 2026-10-20 新增的第 4 个实参：微信渲染引用气泡的发送者名
+    # 只认 ``<displayname>``；不给就退化成 ``@wxid_xxx``（见 test_quote_xml_displayname）。
+    kv = _kv(xml)
+    assert kv["reply_content"] == "quote_text"
+    assert kv["svrid"] == "svrid"
+    assert kv["fromusr"] == "fromusr"
+    assert kv["displayname"] == (
+        "prefix[1:].strip() if prefix.startswith('@') else ''"), kv
 
 
 def test_the_bookkeeping_records_the_unprefixed_text() -> None:

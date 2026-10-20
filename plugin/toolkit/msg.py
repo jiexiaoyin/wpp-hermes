@@ -859,7 +859,8 @@ def register_msg_tools(ctx, adapter_getter) -> None:
                     "chunked": True}
 
         xml = outbound.build_quote_reply_xml(
-            reply_content=quote_text, svrid=svrid, fromusr=ident.fromusr)
+            reply_content=quote_text, svrid=svrid, fromusr=ident.fromusr,
+            displayname=name)
         resp = await client.call("/Msg/ShareLink",
                                  {"ToWxid": to_wxid, "Type": 5, "Xml": xml})
         ok = outbound.send_ok(resp)

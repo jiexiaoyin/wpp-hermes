@@ -2622,8 +2622,11 @@ class WppAdapter(MediaMixin, WebhookMixin, BasePlatformAdapter):
                                               db_name=ident.display_name)
             quote_text = f"{prefix}{chunk}".strip()
             if outbound.quote_reply_fits(quote_text):
+                # ``prefix`` 已经是「@昵称 」（六档兜底走完），去掉 @ 就是微信要的
+                # ``displayname`` —— 不传它，引用气泡上会写 @wxid_xxx。
                 xml = outbound.build_quote_reply_xml(
-                    reply_content=quote_text, svrid=svrid, fromusr=fromusr)
+                    reply_content=quote_text, svrid=svrid, fromusr=fromusr,
+                    displayname=prefix[1:].strip() if prefix.startswith("@") else "")
                 resp = await client.call("/Msg/ShareLink",
                                          {"ToWxid": peer_id, "Type": 5, "Xml": xml})
             else:

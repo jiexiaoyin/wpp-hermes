@@ -609,15 +609,22 @@ def escape_xml(text: Any) -> str:
             .replace('"', "&quot;").replace("'", "&apos;"))
 
 
-def build_quote_reply_xml(reply_content: str, svrid: str, fromusr: str = "") -> str:
+def build_quote_reply_xml(reply_content: str, svrid: str, fromusr: str = "",
+                          displayname: str = "") -> str:
     """引用回复 XML（迁移自 wpp ``quote-xml.ts buildQuoteReplyXml``）。
 
     形状::
 
         <appmsg><title>回复</title><des>回复</des><type>57</type>
-          <refermsg><svrid>..</svrid><fromusr>..</fromusr></refermsg></appmsg>
+          <refermsg><svrid>..</svrid><fromusr>..</fromusr>
+                    <displayname>张三</displayname></refermsg></appmsg>
 
     ``svrid`` 为空时**不带 refermsg** —— 没有可引用的目标，带了反而让 vendor 拒。
+
+    ⚠️ **``displayname`` 不是装饰**（2026-10-20 移动群/华为群实测）：只给
+    ``fromusr`` 时微信客户端**拿 wxid 当显示名**，引用气泡上写的是
+    ``@wxid_xxx`` —— 看着就像"没识别出被回复人"。这个字段才是微信渲染引用块
+    发送者名的那一档。
 
     ⚠️ 这里仍保留 ``[:QUOTE_REPLY_MAX_CHARS]`` 只是兜底：微信只渲染引用气泡前 500
     字符，超长正文**必须在** :meth:`WppAdapter._send_chunk` 改走普通文本
@@ -631,6 +638,8 @@ def build_quote_reply_xml(reply_content: str, svrid: str, fromusr: str = "") -> 
         refermsg = f"<refermsg><svrid>{svrid_e}</svrid>"
         if fromusr:
             refermsg += f"<fromusr>{escape_xml(fromusr)}</fromusr>"
+        if displayname:
+            refermsg += f"<displayname>{escape_xml(displayname)}</displayname>"
         refermsg += "</refermsg>"
     return f"<appmsg><title>{title}</title><des>{title}</des><type>57</type>{refermsg}</appmsg>"
 
