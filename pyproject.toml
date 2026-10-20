@@ -1,9 +1,21 @@
 # 只放工具链配置（本仓不打包发布）。pytest 配置仍在 pytest.ini。
 [project]
 name = "wpp-hermes-py2"
-version = "2.0.3"
+version = "2.1.0"
 description = "WeChatPadPro 的 Hermes 平台插件（个人微信 → Hermes Agent）"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "wpp-hermes-py2 contributors" }]
 requires-python = ">=3.11"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/<owner>/<repo>"
+Issues = "https://github.com/<owner>/<repo>/issues"
 # 运行时依赖：全部是**函数体内延迟导入**（注册期不能有第三方依赖，见
 # plugin/toolkit/hermes_contract.py 的取证），但部署机仍必须装。
 # 上界按 next-major 卡死（与 Hermes 的依赖策略一致）。
@@ -32,7 +44,7 @@ exclude = [
   ".git",
   ".pytest_cache",
   "plugin/tests",        # 测试用例密度高、风格宽松，单独处理
-  "tools/vendor_source", # 端点蓝本：生成器的输入，保持与来源逐字节一致
+  "tools",               # 内部工具链，不随公开仓发布
 ]
 
 [tool.ruff.lint]
