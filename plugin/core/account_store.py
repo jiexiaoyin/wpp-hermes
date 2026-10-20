@@ -88,6 +88,20 @@ class AccountWriteError(RuntimeError):
     """写回失败 —— **必须**让调用方看见（与"落库失败只 warn"是两个方向的取舍）。"""
 
 
+class AccountConflictError(AccountWriteError):
+    """乐观并发冲突：盘上文件的 mtime 已经不是调用方读到的那一版。
+
+    ``current_mtime_ns`` 给 UI 用来提示"重新加载"，也便于调用方直接重试。
+    """
+
+    def __init__(self, current_mtime_ns: int, expected_mtime_ns: int | None = None):
+        self.current_mtime_ns = int(current_mtime_ns)
+        self.expected_mtime_ns = expected_mtime_ns
+        super().__init__(
+            "账号配置已被其他写入者修改（当前 mtime_ns="
+            f"{self.current_mtime_ns}），请刷新后重试")
+
+
 # ==================================================================== 路径
 
 def account_path(account_id: str) -> Path:
@@ -192,6 +206,7 @@ def update_account(
     changed_keys: set[str] | None = None,
     log_keys: set[str] | None = None,
     skip_if_unchanged: bool = False,
+    expected_mtime_ns: int | None = None,
 ) -> tuple[dict[str, Any], int]:
     """在**跨进程独占锁**内完成 读 → mutate → 备份 → 原子写 → 清同键覆盖。
 
@@ -199,12 +214,20 @@ def update_account(
     **刚读出来的盘上最新内容**（不是调用方之前读到的那份）—— 这是 dashboard 与
     网关命令并发写时"各写各的键、后写覆盖前写"的根治点。
 
+    ``expected_mtime_ns`` 是**可选**的乐观并发校验：传了就要求盘上 mtime 仍是
+    调用方读到的那一版，否则在 mutate **之前**抛 :class:`AccountConflictError`，
+    一个字节都不写。不传时行为与旧版完全一致。
+
     ``changed_keys`` 用于清内存覆盖；不传时按 mutate 前后实际变化的顶层键计算。
     ``log_keys`` 只用于日志（**只记键名，不记值**）。
     """
     with _LOCK, _cross_process_lock(account_id):
         path = account_path(account_id)
         data = read_account_json(account_id)          # 先读（读不到就不会写）
+        if expected_mtime_ns is not None:
+            current = _mtime_ns(path)
+            if current != int(expected_mtime_ns):
+                raise AccountConflictError(current, expected_mtime_ns)
         updated = mutate(dict(data))
         if not isinstance(updated, dict):
             raise AccountWriteError("mutate 必须返回 dict")

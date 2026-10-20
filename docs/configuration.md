@@ -351,11 +351,37 @@ profile 自己的 plugin host** 进程运行（PLG-3，与 launch profile 的 ro
 
 | 区域 | 内容 |
 |---|---|
-| 账号状态 | 真实 WS 连接（`WppWsClient.connected`）、客户端就绪、最近热加载结果、快照新鲜度（`live` ≤15s / `delayed` ≤60s / `stale` / `unknown`） |
-| 准入策略 | `dmPolicy`、`groupPolicy`、`allowFrom`、`blacklistUsers`、`groupAllowFrom`、`blacklistGroups`、`adminUsers`、`employeeDenyList` |
-| 进群欢迎 | `enabled` / `mode` / `groups` / `template` / `llmPolish` / `mention` / `quietHours` / `maxBatch` |
-| 能力开关 | `heartflow` / `affection` / `jargon` / `style` / `tts` / `proactive` / `xiaoweiEnabled` |
-| 群活跃 | 群名、厂商与本地成员数、近 6h–7d 入/出站、最后同步时间（只读） |
+| 状态运维 | 全账号状态表、真实 WS 连接（`WppWsClient.connected`）、客户端就绪、最近热加载结果、快照新鲜度（`live` ≤15s / `delayed` ≤60s / `stale` / `unknown`）、DB/环境/凭据**仅存在性**体检、单账号与全账号手动热加载 |
+| 准入策略 | `dmPolicy`、`groupPolicy`、`allowFrom`、`blacklistUsers`、`groupAllowFrom`、`blacklistGroups`、`adminUsers`、`employeeDenyList`；配对码生成与已配对移除 |
+| 进群欢迎 | `enabled` / `mode` / `groups` / `template` / `llmPolish` / `mention` / `quietHours` / `maxBatch`（编辑值按 raw → 生效值回退，只提交变化键） |
+| 能力开关 | `heartflow` / `affection` / `jargon` / `style` / `tts` / `proactive` / `xiaoweiEnabled`，以及 `llmIntentEnabled` / `groupContextEnabled` / `mcpEnabled` / `friendCirclePublishEnabled` / `adminToolsEnabled` / `dmPairingEnabled` / `debounceMs` |
+| 群与成员 | 群列表搜索、排序（活跃/群名/成员数）、分页；白/黑名单快捷动作；群详情抽屉（成员搜索分页、24h 收发、心流/风格/好感度摘要） |
+| 消息分析 | 24h/7d 收发趋势、类型分布；按关键词/群/发送者/方向检索正文（本地库只读，分页） |
+| 心流运营 | 阈值/白名单/群画像开关编辑、判定与抑制统计、预算回填、群学习阈值、最近 50 条判定、风格卡与好感度只读 |
+
+**查询上限**：群列表 `limit ≤ 500`；成员 `limit ≤ 100`、`offset ≤ 5000`；消息检索
+`limit ≤ 50`、`offset ≤ 5000`、时间窗 `≤ 720h`（默认 168h）；分析时间窗
+`hours ≤ 168`；心流最近判定 50 条；好感度 Top 100。所有 GET 都是单表查询 +
+Python 合并，`Cache-Control: no-store`，每个 handler 用完关闭连接。
+
+**并发写入**：`PUT /accounts/{id}/{policy,join-welcome,features,heartflow}` 与
+`POST /accounts/{id}/groups/{gid}/policy` 接受可选的 `expected_mtime_ns`。
+服务端在账号文件锁内先比较 mtime，再执行 mutate；不匹配时返回 **409**，
+`detail = {code:"mtime_conflict", message, current_mtime_ns}`，文件字节不变。
+不传该字段时行为与旧版一致（不做并发检查）。群名单动作 `allow` / `deny` / `clear`
+分别把群加入 `groupAllowFrom` / `blacklistGroups` / 两边移除。
+
+**配对码**：`GET /accounts/{id}/pairing` 只返回是否有有效码、过期时间与已配对列表；
+`POST` 生成并在**响应里返回一次**配对码（文件 `0600`、目录 `0700`，码不写日志）；
+`DELETE /accounts/{id}/pairing/{wxid}` 从已配对列表移除。控制台只读写
+`$WPP_PAIRING_DIR`（默认 `<plugin>/pairing/`），必须与网关实例读取的是同一路径。
+
+**手动热加载**：`POST /accounts/{id}/reload` 只 `os.utime` 抬高账号文件 mtime，
+不改内容、不备份；网关 watcher 只扫描**已连接**账号，未连接时响应带 `warning`，
+全量入口为 `POST /ops/reload-all`。
+
+**消息正文**：检索只查插件本地 `wpp_messages`（`LIKE` 扫描，`%`/`_` 按字面值处理），
+不调用厂商接口、不写库。页面在 dashboard 登录态之后，正文仅管理员可见。
 
 ### 生效方式
 

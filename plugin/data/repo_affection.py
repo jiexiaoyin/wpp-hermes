@@ -89,6 +89,44 @@ def list_user_levels(account_id: str, group_id: str, *,
     return out
 
 
+def list_top_user_levels(
+    account_id: str, group_id: str, limit: int = 100, *,
+    conn: db.Connection | None = None,
+) -> list[tuple[str, int]]:
+    """Top N 用户分值（控制台好感度榜用；**只读**、SQL 侧就截断）。"""
+    c = conn or db.get_conn()
+    n = max(1, min(int(limit) if isinstance(limit, int) else 100, 500))
+    rows = c.query(
+        "SELECT user_id, level FROM wpp_affection "
+        "WHERE account_id = %s AND group_id = %s AND user_id <> '' "
+        "ORDER BY level DESC, user_id LIMIT %s",
+        (account_id, group_id, n),
+    )
+    out: list[tuple[str, int]] = []
+    for r in rows:
+        try:
+            out.append((str(r.get("user_id") or ""), int(r.get("level") or 0)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def get_mood_row(
+    account_id: str, group_id: str, *, conn: db.Connection | None = None,
+) -> dict | None:
+    """**只读**当前情绪行（不做过期重置 —— 那会写库，控制台不该改状态）。
+
+    返回 ``mood_type / intensity / description / expires_at / updated_at``；
+    没有行 ⇒ ``None``（由调用方决定展示"无"还是平静）。
+    """
+    c = conn or db.get_conn()
+    return c.query_one(
+        "SELECT mood_type, intensity, description, expires_at, updated_at "
+        "FROM wpp_affection WHERE account_id = %s AND group_id = %s AND user_id = %s",
+        (account_id, group_id, MOOD_ROW_USER_ID),
+    )
+
+
 def get_group_total(account_id: str, group_id: str, *,
                     conn: db.Connection | None = None) -> int:
     """群总好感度。**负分按 0 计**（对齐 TS ``getGroupTotalAffection`` 的 ``Math.max(0, l)``）

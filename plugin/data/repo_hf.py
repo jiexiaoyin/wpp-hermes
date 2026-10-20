@@ -405,6 +405,36 @@ def find_ledger_by_bot_msg(
     )
 
 
+def list_recent_judged(
+    account_id: str, limit: int = 50, conn: db.Connection | None = None,
+) -> list[dict]:
+    """最近 N 条判定（控制台「最近判定」表；单表、只读）。
+
+    比 :func:`get_ledger_last` 多带 ``group_id``（跨群列表用）；数值统一成
+    ``float``/``int``，避免 ``Decimal`` 直接进 JSON。
+    """
+    c = conn or db.get_conn()
+    rows = c.query(
+        """
+        SELECT group_id, inbound_msg_id, from_wxid, content_head, judge_overall,
+               effective_threshold, status, suppressed_reason, judged_at, sent_at
+        FROM wpp_hf_ledger
+        WHERE account_id = %s
+        ORDER BY judged_at DESC, id DESC LIMIT %s
+        """,
+        (account_id, _cap(limit, 1, 200)),
+    )
+    for r in rows:
+        for col in ("judge_overall", "effective_threshold"):
+            v = r.get(col)
+            r[col] = None if v is None else float(v)
+        for col in ("judged_at", "sent_at"):
+            v = r.get(col)
+            r[col] = None if v is None else int(v)
+        r["group_id"] = str(r.get("group_id") or "")
+    return rows
+
+
 def count_by_status(
     account_id: str, since_sec: int, conn: db.Connection | None = None,
 ) -> dict:

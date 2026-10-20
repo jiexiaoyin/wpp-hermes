@@ -256,6 +256,53 @@ def test_update_account_skip_if_unchanged_writes_no_backup(adir, bdir):
     assert not bdir.exists() or not list(bdir.iterdir())
 
 
+def test_update_account_expected_mtime_success(adir, bdir):
+    path = adir / "default.json"
+    path.write_text(json.dumps(_raw(), ensure_ascii=False), encoding="utf-8")
+    expected = int(path.stat().st_mtime_ns)
+
+    updated, mtime_ns = S.update_account(
+        "default", lambda d: {**d, "allowFrom": ["wxid_z"]},
+        expected_mtime_ns=expected)
+    assert updated["allowFrom"] == ["wxid_z"]
+    assert mtime_ns == path.stat().st_mtime_ns
+
+
+def test_update_account_stale_expected_mtime_conflicts_without_writing(adir, bdir):
+    path = adir / "default.json"
+    path.write_text(json.dumps(_raw(), ensure_ascii=False), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    stale = int(path.stat().st_mtime_ns) - 1
+
+    calls = []
+
+    def _mutate(data):
+        calls.append(1)
+        data["allowFrom"] = ["wxid_hacked"]
+        return data
+
+    with pytest.raises(S.AccountConflictError) as excinfo:
+        S.update_account("default", _mutate, expected_mtime_ns=stale)
+    assert excinfo.value.current_mtime_ns == path.stat().st_mtime_ns
+    assert calls == []                      # 冲突发生在 mutate 之前
+    assert path.read_text(encoding="utf-8") == before
+    assert not bdir.exists() or not list(bdir.iterdir())
+
+
+def test_update_account_credential_check_wins_even_with_matching_mtime(adir, bdir):
+    path = adir / "default.json"
+    path.write_text(json.dumps(_raw(), ensure_ascii=False), encoding="utf-8")
+    expected = int(path.stat().st_mtime_ns)
+
+    def _mutate(data):
+        data["tokenKey"] = "hacked"
+        return data
+
+    with pytest.raises(S.AccountWriteError):
+        S.update_account("default", _mutate, expected_mtime_ns=expected)
+    assert json.loads(path.read_text(encoding="utf-8"))["tokenKey"] == SECRETS["tokenKey"]
+
+
 # ------------------------------------------------------------- 群统计总量
 
 class _FakeConn:
@@ -272,6 +319,139 @@ class _FakeConn:
         if "wpp_chatroom_members" in sql:
             return self._members
         return []
+
+
+def test_features_advanced_toggles_and_debounce_bounds():
+    out = C.validate_features({
+        "llmIntentEnabled": True, "groupContextEnabled": False,
+        "debounceMs": C.MAX_DEBOUNCE_MS,
+    })
+    assert out == {"llmIntentEnabled": True, "groupContextEnabled": False,
+                   "debounceMs": C.MAX_DEBOUNCE_MS}
+    assert C.validate_features({"debounceMs": 0}) == {"debounceMs": 0}
+    for bad in (True, -1, C.MAX_DEBOUNCE_MS + 1, "abc"):
+        with pytest.raises(C.ConsoleValidationError):
+            C.validate_features({"debounceMs": bad})
+    with pytest.raises(C.ConsoleValidationError):
+        C.validate_features({"mcpEnabled": "yes"})
+
+
+def test_advanced_view_defaults_false():
+    assert C.advanced_view({}) == {key: False for key in C.ADVANCED_FEATURE_KEYS}
+    assert C.advanced_view({"mcpEnabled": True})["mcpEnabled"] is True
+
+
+def test_heartflow_view_fallback_and_explicit_threshold():
+    view = C.heartflow_config_view({"heartflow": {"enabled": True, "model": "m1"}})
+    assert view["replyThreshold"] == C.HF_THRESHOLD_FALLBACK
+    assert view["thresholdExplicit"] is False
+    assert view["modelConfigured"] is True
+    assert view["profileEnabled"] is True
+    assert "model" not in view
+    explicit = C.heartflow_config_view(
+        {"heartflow": {"replyThreshold": "0.72", "model": "m1",
+                       "whitelistGroups": ["g1@chatroom", "", 3]}})
+    assert explicit["replyThreshold"] == 0.72
+    assert explicit["thresholdExplicit"] is True
+    assert explicit["whitelistGroups"] == ["g1@chatroom", "3"]
+
+
+def test_validate_heartflow_partial_and_rejects_bad_values():
+    assert C.validate_heartflow({"replyThreshold": 0.55}) == {"replyThreshold": 0.55}
+    assert C.validate_heartflow({"whitelistGroups": ["g1@chatroom"]}) == {
+        "whitelistGroups": ["g1@chatroom"]}
+    assert C.validate_heartflow({"profileEnabled": False}) == {"profileEnabled": False}
+    for bad in ({"replyThreshold": True}, {"replyThreshold": "x"},
+                {"replyThreshold": 1.2}, {"replyThreshold": -0.1},
+                {"whitelistGroups": ["wxid_a"]},
+                {"profileEnabled": 1}, {"other": 1}, {}):
+        with pytest.raises(C.ConsoleValidationError):
+            C.validate_heartflow(bad)
+
+
+def test_merge_heartflow_preserves_model_weights_and_profile_caption():
+    existing = {"enabled": True, "model": "m1", "weights": {"a": 1},
+                "profile": {"enabled": True, "caption": "字幕", "minMsgs": 5}}
+    merged = C.merge_heartflow(existing, {"replyThreshold": 0.7, "profileEnabled": False})
+    assert merged["replyThreshold"] == 0.7
+    assert merged["model"] == "m1"
+    assert merged["weights"] == {"a": 1}
+    assert merged["profile"] == {"enabled": False, "caption": "字幕", "minMsgs": 5}
+    # 输入不被就地修改
+    assert existing["profile"]["enabled"] is True
+    with pytest.raises(C.ConsoleValidationError):
+        C.merge_heartflow(["bad"], {"replyThreshold": 0.7})
+
+
+def test_merge_group_policy_allow_deny_clear_and_idempotence():
+    allow, black = C.merge_group_policy(["g1@chatroom"], ["g2@chatroom"],
+                                        "g2@chatroom", "allow")
+    assert allow == ["g1@chatroom", "g2@chatroom"] and black == []
+    # 幂等：再来一次结果不变
+    assert C.merge_group_policy(allow, black, "g2@chatroom", "allow") == (allow, black)
+    allow, black = C.merge_group_policy(["g1@chatroom"], [], "g1@chatroom", "deny")
+    assert allow == [] and black == ["g1@chatroom"]
+    allow, black = C.merge_group_policy(["g1@chatroom"], ["g2@chatroom"],
+                                        "g1@chatroom", "clear")
+    assert allow == [] and black == ["g2@chatroom"]
+    # 盘上历史脏项被静默丢弃，但非法的新 gid / action 拒绝
+    assert C.merge_group_policy(["junk", "g1@chatroom"], [], "g1@chatroom", "allow") == (
+        ["g1@chatroom"], [])
+    with pytest.raises(C.ConsoleValidationError):
+        C.merge_group_policy([], [], "not-a-group", "allow")
+    with pytest.raises(C.ConsoleValidationError):
+        C.merge_group_policy([], [], "g1@chatroom", "block")
+
+
+def test_validate_page_hours_direction_clamp():
+    assert C.validate_page(999, -5) == (200, 0)
+    assert C.validate_page(0, 999999) == (1, 5000)
+    assert C.validate_page(10, 20, max_limit=50, max_offset=100) == (10, 20)
+    assert C.validate_hours(0) == 1
+    assert C.validate_hours(9999) == 720
+    assert C.validate_direction("INBOUND") == "inbound"
+    assert C.validate_direction("") == ""
+    with pytest.raises(C.ConsoleValidationError):
+        C.validate_direction("both")
+
+
+def test_safe_view_includes_advanced_and_heartflow_without_model_name():
+    view = C.safe_account_view("default", _raw(heartflow={
+        "enabled": True, "model": "secret-model", "replyThreshold": 0.7}))
+    assert view["advanced"]["mcpEnabled"] is False
+    assert view["heartflow"]["enabled"] is True
+    assert view["heartflow"]["replyThreshold"] == 0.7
+    assert "secret-model" not in json.dumps(view, ensure_ascii=False)
+
+
+def test_account_status_view_whitelists_fields():
+    snap = {"written_at": 1_000_000, "accounts": {"default": {
+        "ws_connected": True, "ws_connected_once": True, "client_ready": True,
+        "config_mtime_ns": 42, "last_reload_at": 9, "last_reload_ok": False,
+        "last_reload_error": "boom", "authcode": SECRETS["authcode"],
+        "allowFrom": ["wxid_a"]}}}
+    view = C.account_status_view(snap, "default", now=1_000_005)
+    assert view["state"] == "live" and view["age_sec"] == 5
+    assert view["ws_connected"] is True and view["last_reload_ok"] is False
+    blob = json.dumps(view, ensure_ascii=False)
+    assert SECRETS["authcode"] not in blob and "wxid_a" not in blob
+    missing = C.account_status_view(None, "default")
+    assert missing["state"] == "unknown" and missing["ws_connected"] is False
+
+
+def test_diagnostics_checks_levels():
+    checks = C.diagnostics_checks(
+        db_ok=False, db_error="DbUnavailable", snapshot_state="stale",
+        ws_connected=False, authcode_present=False, token_key_present=True,
+        allow_all_users=True, dm_policy="allowlist", heartflow_enabled=True,
+        heartflow_model_configured=False)
+    by_id = {c["id"]: c for c in checks}
+    assert by_id["db"]["level"] == "error"
+    assert by_id["snapshot"]["level"] == "warn"
+    assert by_id["ws"]["level"] == "warn"
+    assert by_id["authcode"]["ok"] is False
+    assert by_id["allowAllUsers"]["level"] == "warn"
+    assert by_id["heartflowModel"]["level"] == "error"
 
 
 def test_group_activity_totals_count_all_groups(monkeypatch):

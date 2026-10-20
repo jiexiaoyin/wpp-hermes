@@ -28,6 +28,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import types
 from collections.abc import Mapping
 from pathlib import Path
@@ -72,6 +73,10 @@ class _Mods:
     db: Any
     repo_console: Any
     repo_messages: Any
+    repo_hf: Any
+    repo_style: Any
+    repo_affection: Any
+    pairing: Any
 
 
 # ---------------------------------------------------------------- 模块加载
@@ -134,7 +139,7 @@ def _install_synthetic_package() -> None:
     pkg.__path__ = [str(PLUGIN_ROOT)]  # type: ignore[attr-defined]
     pkg.__package__ = _PKG
     sys.modules[_PKG] = pkg
-    for sub in ("core", "data", "inbound", "llm"):
+    for sub in ("core", "data", "inbound", "llm", "platform"):
         name = f"{_PKG}.{sub}"
         mod = types.ModuleType(name)
         mod.__path__ = [str(PLUGIN_ROOT / sub)]  # type: ignore[attr-defined]
@@ -160,6 +165,10 @@ def _mods() -> _Mods:
         obj.db = importlib.import_module(f"{_PKG}.data.db")
         obj.repo_console = importlib.import_module(f"{_PKG}.data.repo_console")
         obj.repo_messages = importlib.import_module(f"{_PKG}.data.repo_messages")
+        obj.repo_hf = importlib.import_module(f"{_PKG}.data.repo_hf")
+        obj.repo_style = importlib.import_module(f"{_PKG}.data.repo_style")
+        obj.repo_affection = importlib.import_module(f"{_PKG}.data.repo_affection")
+        obj.pairing = importlib.import_module(f"{_PKG}.platform.pairing")
         _mods_obj = obj
         return obj
 
@@ -278,6 +287,124 @@ def _db_failure(account_id: str, exc: BaseException) -> dict[str, Any]:
             "totals": {"inbound": 0, "outbound": 0}, "groups": []}
 
 
+def _db_unavailable(account_id: str, exc: BaseException, **shape: Any) -> dict[str, Any]:
+    """按端点返回各自的空结构（前端据此显示"库不可用"，而不是 500）。"""
+    log.warning("[WPP console] 查询降级（%s）: %s", account_id, type(exc).__name__)
+    return {"db_available": False, **shape}
+
+
+def _pop_expected(payload: dict[str, Any]) -> int | None:
+    """取出并移除 ``expected_mtime_ns``（校验器不认识这个键）。
+
+    缺省/``None`` = 不做并发校验；bool / 负数 / 非整数一律 400。
+    """
+    if "expected_mtime_ns" not in payload:
+        return None
+    value = payload.pop("expected_mtime_ns")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise HTTPException(status_code=400, detail="expected_mtime_ns 必须是非负整数")
+    return int(value)
+
+
+def _env_key_names() -> set[str]:
+    """所有 ``.env`` 文件 + 进程 env 里**出现过的键名**（只收键名，不读值）。"""
+    names = set(os.environ)
+    for path in _env_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key = line.partition("=")[0].strip()
+            if key.startswith("export "):
+                key = key[7:].strip()
+            if key:
+                names.add(key)
+    return names
+
+
+#: 诊断页 env 存在的友好标签 → 候选键名（只返回 bool）。
+_ENV_PRESENCE = {
+    "api_base": ("WECHATPRO_API_BASE", "WECHATPRO_WS_URL"),
+    "authcode": ("WECHATPRO_AUTHCODE", "WECHATPRO_AUTH_CODE"),
+    "token_key": ("WECHATPRO_TOKEN_KEY",),
+    "db_backend": ("WECHATPRO_DB_BACKEND",),
+    "db_host": ("WECHATPRO_DB_HOST",),
+    "db_name": ("WECHATPRO_DB_NAME",),
+    "sqlite_path": ("WECHATPRO_SQLITE_PATH",),
+    "webhook_secret": ("WECHATPRO_WEBHOOK_SECRET",),
+}
+
+
+def _env_presence() -> dict[str, bool]:
+    names = _env_key_names()
+    return {label: any(key in names for key in keys)
+            for label, keys in _ENV_PRESENCE.items()}
+
+
+def _id_set(value: Any) -> set[str]:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return set()
+    return {str(x).strip() for x in value if str(x).strip()}
+
+
+def _heartflow_warnings(raw: Mapping[str, Any], hf_view: Mapping[str, Any],
+                        group_policy: str) -> list[str]:
+    """心流配置的显式告警（只读计算）。"""
+    out: list[str] = []
+    if not hf_view.get("enabled"):
+        return out
+    whitelist = [str(g) for g in hf_view.get("whitelistGroups") or ()]
+    if not whitelist:
+        out.append("心流白名单为空：所有群都允许心流")
+    elif group_policy == "allowlist":
+        allow = _id_set(raw.get("groupAllowFrom"))
+        missing = [g for g in whitelist if g not in allow]
+        if missing:
+            out.append(f"{len(missing)} 个心流白名单群不在 groupAllowFrom 里（群策略=allowlist 时不会处理）")
+    if not hf_view.get("modelConfigured"):
+        out.append("心流已启用但没有配置 heartflow.model，判定会直接失败")
+    return out
+
+
+def _write_and_respond(account_id: str, mutate, *, log_keys: set[str],
+                       expected_mtime_ns: int | None = None,
+                       skip_if_unchanged: bool = False,
+                       extra: Any = None):
+    mods = _mods()
+    try:
+        data, mtime_ns = mods.account_store.update_account(
+            account_id, mutate, changed_keys=set(log_keys), log_keys=set(log_keys),
+            skip_if_unchanged=skip_if_unchanged,
+            expected_mtime_ns=expected_mtime_ns)
+    except mods.console_admin.ConsoleValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except mods.account_store.AccountConflictError as exc:
+        # 结构化 detail：前端要从 body.detail.current_mtime_ns 读出当前版本。
+        raise HTTPException(status_code=409, detail={
+            "code": "mtime_conflict",
+            "message": str(exc),
+            "current_mtime_ns": exc.current_mtime_ns,
+        }) from exc
+    except mods.account_store.AccountWriteError as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "write_failed",
+            "message": str(exc),
+        }) from exc
+    payload: dict[str, Any] = {
+        "ok": True, "updated_keys": sorted(log_keys), "mtime_ns": mtime_ns}
+    if callable(extra):
+        payload.update(extra(data))
+    elif extra:
+        payload.update(extra)
+    return _no_store(payload)
+
+
 # ---------------------------------------------------------------- 路由
 
 @router.get("/health")
@@ -316,7 +443,7 @@ def overview(account: str = Query("", description="要统计的账号 id（默�
             "db_available": bool(res.get("db_available")),
             "since_hours": res.get("since_hours", 24),
             "totals": res.get("totals", {"inbound": 0, "outbound": 0}),
-            "group_count": len(res.get("groups") or []),
+            "group_count": int(res.get("total") or len(res.get("groups") or [])),
             "truncated": bool(res.get("truncated")),
         }
     return _no_store({
@@ -325,6 +452,10 @@ def overview(account: str = Query("", description="要统计的账号 id（默�
         "accounts": accounts,
         "selected": selected,
         "status": _status_view(status, selected),
+        # 全账号状态表：每项只含白名单字段（WS/热加载/快照新鲜度）。
+        "account_statuses": {
+            aid: _mods().console_admin.account_status_view(status, aid) for aid in ids
+        },
         "stats": stats,
         "warnings": _status_warnings(status, selected),
     })
@@ -359,6 +490,8 @@ def account_detail(account_id: str):
         effective = {}
     view = mods.console_admin.safe_account_view(
         account_id, raw, join_welcome_effective=effective, mtime_ns=mtime_ns)
+    view["heartflowWarnings"] = _heartflow_warnings(
+        raw, view.get("heartflow") or {}, str(view.get("groupPolicy") or ""))
     return _no_store({
         "ok": True,
         "account": view,
@@ -374,31 +507,22 @@ def _validate_or_400(fn, payload: dict[str, Any]) -> Any:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _write_and_respond(account_id: str, mutate, *, log_keys: set[str]):
-    mods = _mods()
-    try:
-        _data, mtime_ns = mods.account_store.update_account(
-            account_id, mutate, changed_keys=set(log_keys), log_keys=set(log_keys))
-    except mods.console_admin.ConsoleValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except mods.account_store.AccountWriteError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _no_store({"ok": True, "updated_keys": sorted(log_keys), "mtime_ns": mtime_ns})
-
-
 @router.put("/accounts/{account_id}/policy")
 def update_policy(account_id: str, payload: dict[str, Any]):
     _require_account(account_id)
     mods = _mods()
+    expected = _pop_expected(payload)
     validated = _validate_or_400(mods.console_admin.validate_policy, payload)
     return _write_and_respond(
-        account_id, lambda raw: {**raw, **validated}, log_keys=set(validated))
+        account_id, lambda raw: {**raw, **validated}, log_keys=set(validated),
+        expected_mtime_ns=expected)
 
 
 @router.put("/accounts/{account_id}/join-welcome")
 def update_join_welcome(account_id: str, payload: dict[str, Any]):
     _require_account(account_id)
     mods = _mods()
+    expected = _pop_expected(payload)
     validated = _validate_or_400(mods.console_admin.validate_join_welcome, payload)
 
     def _mutate(raw: dict[str, Any]) -> dict[str, Any]:
@@ -407,13 +531,15 @@ def update_join_welcome(account_id: str, payload: dict[str, Any]):
             data.get("joinWelcome"), validated)
         return data
 
-    return _write_and_respond(account_id, _mutate, log_keys={"joinWelcome"})
+    return _write_and_respond(account_id, _mutate, log_keys={"joinWelcome"},
+                              expected_mtime_ns=expected)
 
 
 @router.put("/accounts/{account_id}/features")
 def update_features(account_id: str, payload: dict[str, Any]):
     _require_account(account_id)
     mods = _mods()
+    expected = _pop_expected(payload)
     validated = _validate_or_400(mods.console_admin.validate_features, payload)
 
     def _mutate(raw: dict[str, Any]) -> dict[str, Any]:
@@ -426,18 +552,473 @@ def update_features(account_id: str, payload: dict[str, Any]):
                     data.get(key), enabled)
         return data
 
-    return _write_and_respond(account_id, _mutate, log_keys=set(validated))
+    return _write_and_respond(account_id, _mutate, log_keys=set(validated),
+                              expected_mtime_ns=expected)
+
+
+# ---------------------------------------------------------------- 群与成员
+
+def _require_group_id(group_id: str) -> str:
+    gid = str(group_id or "").strip()
+    if not gid or not gid.endswith("@chatroom"):
+        raise HTTPException(status_code=400, detail=f"群 id 必须以 @chatroom 结尾：{gid!r}")
+    return gid
+
+
+def _group_flags(raw: Mapping[str, Any], gid: str) -> dict[str, bool]:
+    allow = _id_set(raw.get("groupAllowFrom"))
+    black = _id_set(raw.get("blacklistGroups"))
+    hf = raw.get("heartflow")
+    whitelist = _id_set(hf.get("whitelistGroups")) if isinstance(hf, Mapping) else set()
+    return {
+        "allowlisted": gid in allow,
+        "blacklisted": gid in black,
+        "heartflow_whitelisted": gid in whitelist,
+    }
 
 
 @router.get("/accounts/{account_id}/groups")
 def account_groups(account_id: str,
-                   since_hours: int = Query(24, ge=1, le=24 * 30),
-                   limit: int = Query(200, ge=1, le=500)):
+                   since_hours: int = Query(24, ge=1, le=720),
+                   q: str = Query("", max_length=100),
+                   sort: str = Query("activity"),
+                   limit: int = Query(50, ge=1, le=500),
+                   offset: int = Query(0, ge=0, le=100000)):
+    _require_account(account_id)
+    mods = _mods()
+    sort_key = str(sort or "activity").strip().lower()
+    if sort_key not in ("activity", "name", "members"):
+        raise HTTPException(status_code=400, detail="sort 只能是 activity / name / members")
+    try:
+        res = mods.repo_console.list_groups_page(
+            account_id, q=q, sort=sort_key, since_hours=since_hours,
+            limit=limit, offset=offset)
+    except Exception as exc:  # noqa: BLE001 —— 控制台降级，不 500
+        res = _db_failure(account_id, exc)
+        res.update({"q": q, "sort": sort_key, "limit": limit, "offset": offset,
+                    "total": 0, "has_more": False})
+    raw = _read_raw(account_id)
+    # 复制每项再挂 policy 标记 —— 缓存里的 dict 不能被就地改。
+    res["groups"] = [{**g, "policy": _group_flags(raw, str(g.get("chatroom_id") or ""))}
+                     for g in res.get("groups") or []]
+    res["sort"] = sort_key
+    return _no_store({"ok": True, **res})
+
+
+@router.get("/accounts/{account_id}/groups/{group_id}")
+def group_detail_route(account_id: str, group_id: str,
+                       since_hours: int = Query(24, ge=1, le=720)):
+    _require_account(account_id)
+    gid = _require_group_id(group_id)
+    mods = _mods()
+    try:
+        res = mods.repo_console.get_group_detail(
+            account_id, gid, since_hours=since_hours)
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(account_id, exc, since_hours=since_hours, found=False,
+                              group={"chatroom_id": gid})
+    raw = _read_raw(account_id)
+    group_view = res.get("group") or {}
+    if res.get("db_available") and not res.get("found") \
+            and not group_view.get("inbound") and not group_view.get("outbound"):
+        raise HTTPException(status_code=404, detail=f"群 {gid!r} 没有本地记录")
+    group = dict(res.get("group") or {})
+    group["policy"] = _group_flags(raw, gid)
+    res["group"] = group
+    return _no_store({"ok": True, **res})
+
+
+@router.get("/accounts/{account_id}/groups/{group_id}/members")
+def group_members(account_id: str, group_id: str,
+                  q: str = Query("", max_length=100),
+                  limit: int = Query(50, ge=1, le=100),
+                  offset: int = Query(0, ge=0, le=5000)):
+    _require_account(account_id)
+    gid = _require_group_id(group_id)
+    mods = _mods()
+    try:
+        res = mods.repo_console.list_group_members_page(
+            account_id, gid, q=q, limit=limit, offset=offset)
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(account_id, exc, group_id=gid, q=q, limit=limit,
+                              offset=offset, total=0, has_more=False, members=[])
+    return _no_store({"ok": True, **res})
+
+
+@router.post("/accounts/{account_id}/groups/{group_id}/policy")
+def group_policy_action(account_id: str, group_id: str, payload: dict[str, Any]):
+    _require_account(account_id)
+    gid = _require_group_id(group_id)
+    mods = _mods()
+    expected = _pop_expected(payload)
+    action = _validate_or_400(mods.console_admin.validate_group_action,
+                              payload.get("action"))
+    result: dict[str, Any] = {"changed": False}
+
+    def _mutate(raw: dict[str, Any]) -> dict[str, Any]:
+        allow, black = mods.console_admin.merge_group_policy(
+            raw.get("groupAllowFrom"), raw.get("blacklistGroups"), gid, action)
+        data = dict(raw)
+        data["groupAllowFrom"] = allow
+        data["blacklistGroups"] = black
+        result.update({
+            "changed": allow != list(raw.get("groupAllowFrom") or [])
+            or black != list(raw.get("blacklistGroups") or []),
+            "action": action,
+            "group_id": gid,
+            "groupAllowFrom": allow,
+            "blacklistGroups": black,
+        })
+        return data
+
+    return _write_and_respond(
+        account_id, _mutate, log_keys={"groupAllowFrom", "blacklistGroups"},
+        expected_mtime_ns=expected, skip_if_unchanged=True,
+        extra=lambda _data: dict(result))
+
+
+@router.get("/accounts/{account_id}/groups/{group_id}/insights")
+def group_insights_route(account_id: str, group_id: str):
+    _require_account(account_id)
+    gid = _require_group_id(group_id)
+    mods = _mods()
+    try:
+        res = mods.repo_console.group_insights(account_id, gid)
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(account_id, exc, group_id=gid, heartflow={},
+                              style=None, affection=None)
+    return _no_store({"ok": True, **res})
+
+
+# ---------------------------------------------------------------- 消息与分析
+
+@router.get("/accounts/{account_id}/messages")
+def search_messages(account_id: str,
+                    q: str = Query("", max_length=100),
+                    group_id: str = Query("", max_length=128),
+                    sender: str = Query("", max_length=128),
+                    direction: str = Query(""),
+                    since_hours: int = Query(168, ge=1, le=720),
+                    limit: int = Query(50, ge=1, le=50),
+                    offset: int = Query(0, ge=0, le=5000)):
+    _require_account(account_id)
+    mods = _mods()
+    gid = str(group_id or "").strip()
+    if gid and not gid.endswith("@chatroom"):
+        raise HTTPException(status_code=400, detail="group_id 必须以 @chatroom 结尾")
+    if not str(q or "").strip() and not gid and not str(sender or "").strip():
+        raise HTTPException(status_code=400, detail="至少提供关键词/群/发送者之一")
+    direction_value = _validate_or_400(mods.console_admin.validate_direction, direction)
+    try:
+        res = mods.repo_console.search_messages_page(
+            account_id, q=q, group_id=gid, sender=sender, direction=direction_value,
+            since_hours=since_hours, limit=limit, offset=offset)
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(account_id, exc, since_hours=since_hours, limit=limit,
+                              offset=offset, total=0, has_more=False, messages=[])
+    return _no_store({"ok": True, **res})
+
+
+@router.get("/accounts/{account_id}/analytics")
+def analytics(account_id: str, hours: int = Query(24, ge=1, le=168)):
     _require_account(account_id)
     mods = _mods()
     try:
-        res = mods.repo_console.list_group_activity(
-            account_id, since_hours=since_hours, limit=limit)
-    except Exception as exc:  # noqa: BLE001 —— 控制台降级，不 500
-        res = _db_failure(account_id, exc)
+        res = mods.repo_console.message_analytics(account_id, hours=hours)
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(
+            account_id, exc, hours=hours, bucket_sec=3600, buckets=[], types=[],
+            totals={"inbound": 0, "outbound": 0}, last_message_at=None)
     return _no_store({"ok": True, **res})
+
+
+# ---------------------------------------------------------------- 心流
+
+@router.get("/accounts/{account_id}/heartflow")
+def heartflow_detail(account_id: str, hours: int = Query(24, ge=1, le=168)):
+    _require_account(account_id)
+    mods = _mods()
+    raw = _read_raw(account_id)
+    config = mods.console_admin.heartflow_config_view(raw)
+    try:
+        res = mods.repo_console.heartflow_overview(account_id, hours=hours)
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(
+            account_id, exc, hours=hours, stats={"total": 0, "by_status": {},
+                                                 "by_suppressed_reason": {}},
+            budget=[], group_states=[], recent=[], last_sent_at=None)
+    return _no_store({
+        "ok": True,
+        "config": config,
+        "warnings": _heartflow_warnings(raw, config,
+                                        str(raw.get("groupPolicy") or "open")),
+        **res,
+    })
+
+
+@router.put("/accounts/{account_id}/heartflow")
+def update_heartflow(account_id: str, payload: dict[str, Any]):
+    _require_account(account_id)
+    mods = _mods()
+    expected = _pop_expected(payload)
+    validated = _validate_or_400(mods.console_admin.validate_heartflow, payload)
+
+    def _mutate(raw: dict[str, Any]) -> dict[str, Any]:
+        data = dict(raw)
+        data["heartflow"] = mods.console_admin.merge_heartflow(
+            data.get("heartflow"), validated)
+        return data
+
+    def _extra(data: dict[str, Any]) -> dict[str, Any]:
+        config = mods.console_admin.heartflow_config_view(data)
+        return {"warnings": _heartflow_warnings(
+            data, config, str(data.get("groupPolicy") or "open"))}
+
+    return _write_and_respond(account_id, _mutate, log_keys={"heartflow"},
+                              expected_mtime_ns=expected, extra=_extra)
+
+
+# ---------------------------------------------------------------- 风格 / 好感度
+
+@router.get("/accounts/{account_id}/style-cards")
+def style_cards(account_id: str,
+                group_id: str = Query("", max_length=128)):
+    _require_account(account_id)
+    mods = _mods()
+    gid = str(group_id or "").strip()
+    if gid and not gid.endswith("@chatroom"):
+        raise HTTPException(status_code=400, detail="group_id 必须以 @chatroom 结尾")
+    try:
+        res = mods.repo_console.style_cards_view(account_id, group_id=gid)
+        versions = (mods.repo_console.style_card_versions(account_id, gid)["versions"]
+                    if gid else [])
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(account_id, exc, group_id=gid, cards=[])
+        versions = []
+    return _no_store({"ok": True, "versions": versions, **res})
+
+
+@router.get("/accounts/{account_id}/style-cards/{group_id}/versions")
+def style_versions(account_id: str, group_id: str,
+                   limit: int = Query(20, ge=1, le=100)):
+    _require_account(account_id)
+    gid = _require_group_id(group_id)
+    mods = _mods()
+    try:
+        res = mods.repo_console.style_card_versions(account_id, gid, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(account_id, exc, group_id=gid, versions=[])
+    return _no_store({"ok": True, **res})
+
+
+@router.get("/accounts/{account_id}/style-cards/{group_id}/versions/{version}")
+def style_version_detail(account_id: str, group_id: str, version: int):
+    _require_account(account_id)
+    gid = _require_group_id(group_id)
+    mods = _mods()
+    try:
+        res = mods.repo_console.style_card_version(account_id, gid, version)
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(account_id, exc, found=False, version=version)
+    if not res.get("found"):
+        raise HTTPException(status_code=404, detail="风格卡版本不存在")
+    return _no_store({"ok": True, **res})
+
+
+@router.get("/accounts/{account_id}/affection")
+def affection_detail(account_id: str,
+                     group_id: str = Query("", max_length=128),
+                     limit: int = Query(100, ge=1, le=100)):
+    _require_account(account_id)
+    gid = _require_group_id(group_id)
+    mods = _mods()
+    try:
+        res = mods.repo_console.affection_view(account_id, gid, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        res = _db_unavailable(account_id, exc, group_id=gid, total=0,
+                              user_count=0, users=[], mood=None)
+    return _no_store({"ok": True, **res})
+
+
+# ---------------------------------------------------------------- 运维诊断
+
+@router.get("/accounts/{account_id}/diagnostics")
+def diagnostics(account_id: str):
+    _require_account(account_id)
+    mods = _mods()
+    raw = _read_raw(account_id)
+    status = _read_status()
+    status_view = mods.console_admin.account_status_view(status, account_id)
+
+    try:
+        backend = str(mods.db.backend())
+    except Exception:  # noqa: BLE001
+        backend = "unknown"
+    try:
+        db_ok = bool(mods.db.is_available())
+        db_error = ""
+    except Exception as exc:  # noqa: BLE001
+        db_ok = False
+        db_error = type(exc).__name__
+    finally:
+        try:
+            mods.db.close()
+        except Exception as exc:  # noqa: BLE001 —— 关连接失败不影响诊断结论
+            log.debug("[WPP console] db.close 失败: %s", type(exc).__name__)
+    health = mods.db.health()
+
+    env_names = _env_key_names()
+    authcode_present = bool(str(raw.get("authcode") or "").strip()) \
+        or "WECHATPRO_AUTHCODE" in env_names
+    token_key_present = bool(str(raw.get("tokenKey") or "").strip()) \
+        or "WECHATPRO_TOKEN_KEY" in env_names
+    heartflow = mods.console_admin.heartflow_config_view(raw)
+    checks = mods.console_admin.diagnostics_checks(
+        db_ok=db_ok, db_error=db_error,
+        snapshot_state=str(status_view.get("state") or "unknown"),
+        ws_connected=bool(status_view.get("ws_connected")),
+        authcode_present=authcode_present,
+        token_key_present=token_key_present,
+        allow_all_users=raw.get("allowAllUsers") is True,
+        dm_policy=str(raw.get("dmPolicy") or ""),
+        heartflow_enabled=bool(heartflow.get("enabled")),
+        heartflow_model_configured=bool(heartflow.get("modelConfigured")),
+    )
+    return _no_store({
+        "ok": True,
+        "version": _version(),
+        "generated_at": int(time.time()),
+        "db": {
+            "backend": backend,
+            "available": db_ok,
+            "process_health_state": str(health.get("state") or "unknown"),
+            "process_health_at": int(health.get("at") or 0),
+            "note": "dashboard 进程的 health 是进程内状态；迁移结论由网关侧决定",
+        },
+        "snapshot": status_view,
+        "env": {"presence": _env_presence()},
+        "credential_presence": {
+            "authcode": authcode_present,
+            "tokenKey": token_key_present,
+            "webhookSecret": "WECHATPRO_WEBHOOK_SECRET" in env_names,
+        },
+        "checks": checks,
+    })
+
+
+# ---------------------------------------------------------------- 热加载 / 配对
+
+def _touch_account(account_id: str) -> dict[str, Any]:
+    """只抬高 mtime（改内容会备份+清覆盖；热加载 watcher 认的就是 mtime）。"""
+    mods = _mods()
+    path = mods.account_store.account_path(account_id)
+    lock_factory = getattr(mods.account_store, "_cross_process_lock", None)
+    lock_cm = lock_factory(account_id) if lock_factory else _nullcontext()
+    with lock_cm:
+        st = path.stat()
+        new_ns = max(time.time_ns(), st.st_mtime_ns + 1_000_000_000)
+        os.utime(path, ns=(st.st_atime_ns, new_ns))
+    return {"previous_mtime_ns": int(st.st_mtime_ns), "mtime_ns": int(new_ns),
+            "bumped_ns": int(new_ns - st.st_mtime_ns)}
+
+
+class _nullcontext:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *_exc: Any) -> bool:
+        return False
+
+
+@router.post("/accounts/{account_id}/reload")
+def reload_account(account_id: str):
+    _require_account(account_id)
+    try:
+        result = _touch_account(account_id)
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "reload_failed", "message": f"账号文件不可写：{type(exc).__name__}"}) from exc
+    view = _status_view(_read_status(), account_id)
+    warning = None
+    if view.get("state") not in ("live", "delayed"):
+        warning = "mtime 已更新，但状态快照不新鲜：网关可能未运行，热加载未确认"
+    elif not (view.get("account") or {}).get("ws_connected"):
+        warning = "该账号当前未连接 WS；watcher 只扫已连接账号，热加载可能未发生"
+    return _no_store({"ok": True, **result,
+                      "snapshot_age_sec": view.get("age_sec"),
+                      "warning": warning})
+
+
+@router.post("/ops/reload-all")
+def reload_all():
+    results: list[dict[str, Any]] = []
+    for aid in _account_ids():
+        try:
+            item = _touch_account(aid)
+            results.append({"account_id": aid, "ok": True, **item})
+        except Exception as exc:  # noqa: BLE001 —— 单账号失败不影响整批
+            results.append({"account_id": aid, "ok": False,
+                            "error": type(exc).__name__})
+    return _no_store({"ok": True, "results": results})
+
+
+def _pairing_summary(account_id: str) -> dict[str, Any]:
+    mods = _mods()
+    entry = mods.pairing.read_pairing_code(account_id)
+    paired = mods.pairing.load_paired(account_id)
+    now_ms = int(time.time() * 1000)
+    expires_at = int(entry["expires_at"]) if entry else None
+    return {
+        "has_code": bool(entry),
+        "expires_at": expires_at,
+        "expires_in_sec": (max(0, (expires_at - now_ms) // 1000)
+                           if expires_at else 0),
+        "paired_count": len(paired),
+        "paired_users": paired[:500],
+        "users_truncated": len(paired) > 500,
+    }
+
+
+@router.get("/accounts/{account_id}/pairing")
+def pairing_state(account_id: str):
+    _require_account(account_id)
+    return _no_store({"ok": True, **_pairing_summary(account_id)})
+
+
+@router.post("/accounts/{account_id}/pairing")
+def pairing_generate(account_id: str):
+    _require_account(account_id)
+    mods = _mods()
+    try:
+        entry = mods.pairing.generate_pairing_code(account_id)
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "pairing_write_failed",
+            "message": f"配对文件写入失败：{type(exc).__name__}"}) from exc
+    summary = _pairing_summary(account_id)
+    now_ms = int(time.time() * 1000)
+    return _no_store({
+        "ok": True,
+        # 配对码**只在这里返回一次**；之后的 GET 永远不带 code。
+        "code": str(entry.get("code") or ""),
+        "expires_at": int(entry.get("expires_at") or 0),
+        "expires_in_sec": max(0, (int(entry.get("expires_at") or 0) - now_ms) // 1000),
+        "paired_count": summary["paired_count"],
+    })
+
+
+@router.delete("/accounts/{account_id}/pairing/{wxid}")
+def pairing_remove(account_id: str, wxid: str):
+    _require_account(account_id)
+    mods = _mods()
+    target = str(wxid or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="wxid 不能为空")
+    try:
+        removed = bool(mods.pairing.remove_paired(account_id, target))
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "pairing_write_failed",
+            "message": f"配对文件写入失败：{type(exc).__name__}"}) from exc
+    return _no_store({"ok": True, "removed": removed, "wxid": target,
+                      **_pairing_summary(account_id)})

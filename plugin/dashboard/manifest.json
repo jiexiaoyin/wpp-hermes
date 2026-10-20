@@ -1,9 +1,9 @@
 {
   "name": "wechatpadpro-console",
   "label": "微信助手控制台",
-  "description": "WPP 账号在线状态、准入策略、进群欢迎、能力开关与群活跃统计",
+  "description": "WPP 账号运维、准入/欢迎/开关编辑、群成员、消息分析、心流运营与配对",
   "icon": "MessageSquare",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "tab": {
     "path": "/wpp-console",
     "position": "end"

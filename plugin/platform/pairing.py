@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
+import secrets
 import time
 from pathlib import Path
 
@@ -40,12 +40,21 @@ PLUGIN_DIR = Path(__file__).resolve().parent.parent
 PAIRING_DIR = Path(os.environ.get("WPP_PAIRING_DIR", str(PLUGIN_DIR / "pairing")))
 
 
+def _safe_account_id(account_id: str) -> str:
+    """账号 id 直接进文件名 —— 挡住空串/路径穿越。"""
+    aid = str(account_id or "").strip()
+    if not aid or aid in (".", "..") or "/" in aid or "\\" in aid:
+        raise ValueError(f"账号 id {account_id!r} 不能用作文件名")
+    return aid
+
+
 def get_pairing_path(account_id: str) -> Path:
-    return PAIRING_DIR / f"{account_id}.json"
+    return PAIRING_DIR / f"{_safe_account_id(account_id)}.json"
 
 
 def random_code(length: int = PAIRING_CODE_LENGTH) -> str:
-    return "".join(random.choice(CODE_ALPHABET) for _ in range(length))
+    # secrets（不是 random）：配对码等于一次性的准入凭据，别用可预测的 PRNG。
+    return "".join(secrets.choice(CODE_ALPHABET) for _ in range(length))
 
 
 def normalize_pair_code(code: str) -> str:
@@ -68,17 +77,43 @@ def extract_pair_code(content: str) -> str | None:
     return None
 
 
+def _ensure_dir() -> None:
+    """配对目录：存在即用；尽量收紧到 0700（失败不阻塞，文件本身仍是 0600）。"""
+    PAIRING_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        PAIRING_DIR.chmod(0o700)
+    except OSError:
+        pass
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    """临时文件 + 0600 + ``replace``；断电/被杀不会留半份 JSON。"""
+    _ensure_dir()
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), "utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
+    tmp.replace(path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def generate_pairing_code(account_id: str) -> dict:
-    """生成配对码（1 小时有效）。"""
+    """生成配对码（1 小时有效）。文件 0600、目录 0700。"""
     code = random_code()
     entry = {
         "code": code,
         "account_id": account_id,
         "expires_at": int(time.time() * 1000) + PAIRING_CODE_TTL_MS,
     }
-    PAIRING_DIR.mkdir(parents=True, exist_ok=True)
-    get_pairing_path(account_id).write_text(json.dumps(entry, ensure_ascii=False, indent=1), "utf-8")
-    log.info("[WPP] 配对码已生成: %s (account=%s)", code, account_id)
+    _write_json_atomic(get_pairing_path(account_id), entry)
+    # ⚠️ 只记账号与过期时刻，**不记配对码**（日志会被 journal 长期保留）。
+    log.info("[WPP] 配对码已生成: account=%s expires_at=%s",
+             account_id, entry["expires_at"])
     return entry
 
 
@@ -115,7 +150,7 @@ def redeem_pairing_code(account_id: str, code: str) -> tuple[bool, str]:
 # 文件形如 ``{"users": ["wxid_..."]}``，权限 0600。
 
 def get_paired_path(account_id: str) -> Path:
-    return PAIRING_DIR / f"{account_id}.paired.json"
+    return PAIRING_DIR / f"{_safe_account_id(account_id)}.paired.json"
 
 
 def load_paired(account_id: str) -> list[str]:
@@ -139,16 +174,25 @@ def add_paired(account_id: str, wxid: str) -> bool:
     if wxid in users:
         return False
     users.append(wxid)
-    PAIRING_DIR.mkdir(parents=True, exist_ok=True)
-    path = get_paired_path(account_id)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"users": users}, ensure_ascii=False, indent=1), "utf-8")
-    try:
-        tmp.chmod(0o600)
-    except OSError:
-        pass
-    tmp.replace(path)
+    _write_json_atomic(get_paired_path(account_id), {"users": users})
     log.info("[WPP] 配对成功: account=%s wxid=%s", account_id, wxid)
+    return True
+
+
+def remove_paired(account_id: str, wxid: str) -> bool:
+    """从已配对名单移除 wxid（幂等）。返回是否真的删掉了。
+
+    控制台的「移除配对」入口用。文件不存在 / 名单里没有 ⇒ ``False``，不造空文件。
+    """
+    wxid = str(wxid or "").strip()
+    if not wxid:
+        return False
+    users = load_paired(account_id)
+    if wxid not in users:
+        return False
+    keep = [u for u in users if u != wxid]
+    _write_json_atomic(get_paired_path(account_id), {"users": keep})
+    log.info("[WPP] 取消配对: account=%s wxid=%s", account_id, wxid)
     return True
 
 
