@@ -22,10 +22,24 @@ plugin/accounts/*.json
 .env.*
 !.env.example
 
+# 覆盖率产物
+.coverage
+.coverage.*
+htmlcov/
+
 # 部署产物与备份（不属于源码）
 deploy.sh
+sync.sh
 *.tar.gz
 *.zip
+*.bak-*
+
+# 内部运维材料（本机保留，不进入公开树）
+tools/
+docs/internal/
 
 # 技能工坊暂存区（临时产物）
 skills-workshop-staging/
+
+# 本机测试护栏：生产 bot wxid（公开仓不携带）
+conftest_local.py
