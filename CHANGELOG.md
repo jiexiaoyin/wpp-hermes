@@ -33,6 +33,9 @@ Web 控制台（不修改 Hermes 本体代码）。
   12 秒缓存）；数据库不可用时降级为 `db_available:false`。
 - **凭据边界**：控制台视图按白名单拼装，凭据字段结构性不出现；写路径拒绝改动
   `authcode` / `tokenKey` / `webhookSecret` / `webhookPathToken`。
+- **主题适配**：页面颜色统一改用 Hermes 主题变量（`--midground` / `--color-*`），
+  修复内置主题下正文透明（`--foreground` 的 alpha 为 0）导致整页文字不可见；
+  深色与浅色主题下正文对比度均 ≥ 4.5:1。
 
 ---
 

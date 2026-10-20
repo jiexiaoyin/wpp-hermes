@@ -168,21 +168,22 @@ hermes plugins doctor "$HERMES_HOME/plugins/wechatpadpro-platform"
 - **热加载**：保存后网关约 **3 秒**内重载该账号，不需要重启 Hermes；
   写入前自动备份、原子替换、文件保持 `0600`，凭据字段结构性不可写。
 
-启用方式（每个要显示页签的 profile 各加一次）：把 `wechatpadpro-console` 加进该
-profile 的 `plugins.enabled`，然后重启 `hermes-dashboard` 与网关：
+启用方式：把 `wechatpadpro-console` 加进**运行 `wechatpadpro-platform` 的那个
+profile** 的 `plugins.enabled`，然后重启 `hermes-dashboard` 与网关：
 
 ```yaml
-# $HERMES_HOME/config.yaml（root / default）
+# $HERMES_HOME/profiles/<name>/config.yaml（本机是 wpp-wechat）
 plugins:
   enabled:
+    - wechatpadpro-platform
     - wechatpadpro-console
 ```
 
-要让次级 profile（如 `wpp-wechat`）也显示页签，同样把名字加进
-`$HERMES_HOME/profiles/<name>/config.yaml` 的 `plugins.enabled`。Hermes 会把次级
-profile 的插件后端转发到**该 profile 自己的 plugin host** 进程运行；没有启用的
-profile 只会返回 404。账号绑定在哪个 profile 不影响控制台管理——它直接读写
-`accounts/*.json` 与插件数据库；在线状态快照从 launch home 读取。
+如果平台插件装在 root/default，就把这一行加进 `$HERMES_HOME/config.yaml`。Hermes
+会把次级 profile 的插件后端转发到**该 profile 自己的 plugin host** 进程运行；
+没有启用的 profile 只会返回 404，页签也只出现在启用了它的 profile 里。账号绑定在
+哪个 profile 不影响控制台管理——它直接读写 `accounts/*.json` 与插件数据库；在线
+状态快照从 launch home 读取。
 
 控制台**不调用厂商 API、不重连账号、不显示也不写凭据**；`enabled` 与端点变更仍需重启
 网关。数据库统计只读，配置缺失时页面降级为“数据库不可用”，策略与开关不受影响。

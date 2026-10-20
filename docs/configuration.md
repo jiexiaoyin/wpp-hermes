@@ -310,16 +310,20 @@ GRANT ALL PRIVILEGES ON wechatpro.* TO 'wechatpro'@'127.0.0.1';
 
 ### 启用
 
-只把 `wechatpadpro-console` 加入 **root profile** 的 `plugins.enabled`：
+把 `wechatpadpro-console` 加入**运行 `wechatpadpro-platform` 的那个 profile** 的
+`plugins.enabled`。本机插件跑在 `wpp-wechat` profile 下：
 
 ```yaml
-# $HERMES_HOME/config.yaml
+# $HERMES_HOME/profiles/wpp-wechat/config.yaml
 plugins:
   enabled:
+    - wechatpadpro-platform
     - wechatpadpro-console
 ```
 
-然后重启 `hermes-dashboard`（plugin_api 只在启动时挂载）与网关（加载账号文件 watcher）：
+如果平台插件装在 root/default profile，就把这一行加进 `$HERMES_HOME/config.yaml` 的
+`plugins.enabled`；页签只出现在启用了它的 profile 里。然后重启 `hermes-dashboard`
+（plugin_api 只在启动时挂载）与网关（加载账号文件 watcher）：
 
 ```bash
 systemctl restart hermes-dashboard
@@ -335,20 +339,13 @@ hermes-gw-restart
 > 重定向成带尾斜杠的形式，两者相撞时页面会被转发到 webhook 端口并显示
 > `{"error":"unknown path"}`。
 
-### 在次级 profile（如 `wpp-wechat`）使用
+### 次级 profile 的后端如何运行
 
-把 `wechatpadpro-console` 也加入该 profile 的 `plugins.enabled`：
-
-```yaml
-# $HERMES_HOME/profiles/wpp-wechat/config.yaml
-plugins:
-  enabled:
-    - wechatpadpro-console
-```
-
-Hermes 会把该 profile 的 `/api/plugins/wechatpadpro-console/*` 请求转发到**该
+Hermes 会把次级 profile 的 `/api/plugins/wechatpadpro-console/*` 请求转发到**该
 profile 自己的 plugin host** 进程运行（PLG-3，与 launch profile 的 router 隔离），
-页签与接口都需要这一条 enabled；没有启用的 profile 会得到 404。
+页签与接口都需要 profile 里这一条 enabled；没有启用的 profile 会得到 404。
+控制台不需要同时出现在 root profile；只要启用它的 profile 能访问到同一份
+`accounts/*.json` 与插件数据库即可。
 
 ### 能做什么
 
