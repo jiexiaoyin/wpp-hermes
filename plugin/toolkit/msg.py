@@ -816,13 +816,27 @@ def register_msg_tools(ctx, adapter_getter) -> None:
             ident = quote_ref.resolve_quote_identity(row)
         except Exception as exc:  # noqa: BLE001 —— 查库失败只降级，不挡发送
             log.debug("[WPP:%s] quote_reply 回查降级 %s: %s", aid, svrid, exc)
-        name = ident.display_name
-        if ident.fromusr and (not name or name == ident.fromusr):
-            try:
-                name = adapter._contact_name(aid, ident.fromusr) if adapter is not None else ""
-            except Exception:  # noqa: BLE001 —— 昵称只是装饰
-                name = ""
-        prefix = quote_ref.build_mention_prefix(to_wxid, name, ident.fromusr)
+        # ★ 2026-10-22 与适配器 _quote_prefix 六级链对齐：原先这里只有 2 级
+        #   （行内昵称 → 联系人表），非好友群友一律 @ 成 wxid。适配器在 10-20 补了
+        #   群成员表/vendor 两级，但**工具路径没跟上** ⇒ 移动群走 wpp_quote_reply
+        #   时又出现 @wxid。复用同一个实现，别再维护两条链（昵称只是装饰，永不抛）。
+        prefix = ""
+        if ident.fromusr:
+            if adapter is not None and hasattr(adapter, "_quote_prefix"):
+                try:
+                    prefix = await adapter._quote_prefix(
+                        getattr(adapter, "_accounts", {}).get(aid),
+                        client, to_wxid, ident.fromusr, {}, db_name=ident.display_name)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("[WPP:%s] quote_reply 六级昵称链降级: %s", aid, exc)
+            if not prefix:
+                name = ident.display_name
+                if not name or name == ident.fromusr:
+                    try:
+                        name = adapter._contact_name(aid, ident.fromusr) if adapter is not None else ""
+                    except Exception:  # noqa: BLE001
+                        name = ""
+                prefix = quote_ref.build_mention_prefix(to_wxid, name, ident.fromusr)
         quote_text = f"{prefix}{content}".strip()
         peer_kind = "group" if to_wxid.endswith("@chatroom") else "direct"
 

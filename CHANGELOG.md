@@ -6,6 +6,21 @@
 
 ---
 
+## v2.4.1 — 2026-10-22
+
+工具路径 `wpp_quote_reply` 的 @昵称与适配器六级链对齐。
+
+- **缺陷**：适配器 `_quote_prefix` 在 v2.4.0 补了「群成员表 / vendor」两级兜底，
+  但 `toolkit/msg.py::quote_reply` 仍是老的 2 级（行内昵称 → 联系人表）。
+  非好友群友（陈丽/高维芳/倪n. 等）被引用回复时 @ 成 wxid —— 移动业务对接群实测复现。
+- **修复**：quote_reply 有 adapter 时直接复用 `adapter._quote_prefix`（同一实现，
+  不再维护两条链）；拿不到 adapter 才退回老的本地兜底。
+- **测试**：`test_quote_prefix_nickname / test_quote_ref / test_quote_xml_displayname`
+  47 passed。`test_unified_whitelist` 2 条失败为生产环境变量（PROTECTED_WXIDS）触发的
+  conftest 守护，与本改动无关（未触碰该文件）。
+
+---
+
 ## v2.4.0 — 2026-10-20
 
 Web 控制台能力扩展与交互升级（仍**不修改 Hermes 本体代码**）。
