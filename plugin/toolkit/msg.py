@@ -821,6 +821,7 @@ def register_msg_tools(ctx, adapter_getter) -> None:
         #   群成员表/vendor 两级，但**工具路径没跟上** ⇒ 移动群走 wpp_quote_reply
         #   时又出现 @wxid。复用同一个实现，别再维护两条链（昵称只是装饰，永不抛）。
         prefix = ""
+        name = ident.display_name or ""
         if ident.fromusr:
             if adapter is not None and hasattr(adapter, "_quote_prefix"):
                 try:
@@ -829,8 +830,11 @@ def register_msg_tools(ctx, adapter_getter) -> None:
                         client, to_wxid, ident.fromusr, {}, db_name=ident.display_name)
                 except Exception as exc:  # noqa: BLE001
                     log.debug("[WPP:%s] quote_reply 六级昵称链降级: %s", aid, exc)
+                if prefix and (not name or name == ident.fromusr):
+                    # 六级链解析出的昵称在 prefix 里（"@nick\u2005"）；
+                    # displayname 不是装饰，缺它微信端显示 @wxid（2026-10-23 修复）
+                    name = prefix.lstrip("@").replace("\u2005", " ").strip()
             if not prefix:
-                name = ident.display_name
                 if not name or name == ident.fromusr:
                     try:
                         name = adapter._contact_name(aid, ident.fromusr) if adapter is not None else ""
